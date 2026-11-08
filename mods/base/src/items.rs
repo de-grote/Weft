@@ -103,7 +103,7 @@ pub fn register(r: &mut Registry) {
     r.item(Item::generated("leather".into()))
         .tag("materials/leather")
         .tab(&crate::tabs::INGREDIENTS);
-    for name in ["bone", "string", "sugar", "gunpowder", "feather", "arrow", "egg"] {
+    for name in ["bone", "string", "sugar", "gunpowder", "feather", "arrow", "egg", "paper"] {
         r.item(Item::generated(name.into()))
             .tag(name)
             .tab(&crate::tabs::INGREDIENTS);

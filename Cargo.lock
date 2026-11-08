@@ -4619,7 +4619,7 @@ dependencies = [
 
 [[package]]
 name = "tinkers"
-version = "26.11.2"
+version = "26.11.3"
 dependencies = [
  "base_api",
  "weft_sdk",

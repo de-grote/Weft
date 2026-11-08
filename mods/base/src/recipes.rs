@@ -32,6 +32,7 @@ pub fn register(r: &mut Registry) {
     r.shaped(C, "torch", 4, &["c", "s"], &[('c', "#gems/coal"), ('s', "#stick")]);
     r.shaped(C, "ladder", 3, &["s s", "sss", "s s"], &[('s', "#stick")]);
     r.shaped(C, "bread", 1, &["www"], &[('w', "#crops/wheat")]);
+    r.shaped(C, "paper", 3, &["sss"], &[('s', "sugar_cane")]);
     r.shaped(C, "stone_bricks", 4, &["##", "##"], &[('#', "#smooth_stone")]);
     r.shaped(C, "wool", 1, &["ss", "ss"], &[('s', "#string")]);
     r.shaped(C, "bed", 1, &["www", "ppp"], &[('w', "wool"), ('p', "#planks")]);

@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::OnceLock};
 
+use base_api::CRAFTING;
 use weft_sdk::*;
 
 declare_mod!(deps: ["base"], init: init);
@@ -56,13 +57,19 @@ fn init(r: &mut Registry) {
 
     r.block(&WORKBENCH)
         .tab(&TINKER_TAB)
-        .mineable("axe")
-        .opens(&WORKBENCH_MENU);
+        .hardness(3.0)
+        .mined_by("axe", abi::tool_tier::HAND)
+        .opens(&WORKBENCH_MENU)
+        .textures("workbench_top", "workbench_side", "base:crafting_table_bottom");
+    r.shaped(&CRAFTING, WORKBENCH.name(), 1, &["iii", "lsl", "lll"], &[('i', "#ingots/iron"), ('l', "#planks"), ('s', "#stone")]);
 
     r.block(&PART_BUILDER)
         .tab(&TINKER_TAB)
-        .mineable("axe")
-        .opens(&PART_BUILDER_MENU);
+        .hardness(3.0)
+        .mined_by("axe", abi::tool_tier::HAND)
+        .opens(&PART_BUILDER_MENU)
+        .textures("part_builder_top", "part_builder_side", "base:crafting_table_bottom");
+    r.shaped(&CRAFTING, PART_BUILDER.name(), 1, &["ppp", "lil", "lll"], &[('p', "#paper"), ('l', "#planks"), ('i', "#ingots/iron")]);
 
     let mut generated_items = HashMap::new();
     for material in MATERIALS.iter() {
@@ -76,8 +83,8 @@ fn init(r: &mut Registry) {
                 .item(item)
                 .tab(&TINKER_MATS_TAB)
                 .texture(component)
-                .tag(component)
-                .tag(&material.name);
+                .tag(&component)
+                .tag(&format!("tinkers/{}", material.name));
             if component.ends_with("head") {
                 ib = ib.tag("tool_head");
             }
@@ -86,16 +93,18 @@ fn init(r: &mut Registry) {
             }
         }
     }
-    let _ = GENERATED_ITEMS.set(generated_items);
+    let Ok(_) = GENERATED_ITEMS.set(generated_items) else {
+        panic!("failed to save generated items");
+    };
 
     r.item(&PICKAXE)
-        .tool("pickaxe")
+        .tool("pickaxe", 0)
         .tab(&TINKER_TAB)
         .texture("pickaxe")
         .max_stack(1);
 
     r.item(&AXE)
-        .tool("axe")
+        .tool("axe", 0)
         .tab(&TINKER_TAB)
         .texture("axe")
         .max_stack(1);
@@ -129,17 +138,17 @@ fn init(r: &mut Registry) {
 
     r.menu(&PART_BUILDER_MENU)
         .group("input", Slots::single())
-        .group("output", Slots::single().output())
+        .group("output", Slots::grid(4, 1).output())
         .player_inventory()
         .recipes(&PART_BUILDER_RECIPE)
         .on_change(craft_result_part_builder)
         .on_take(consume_grid_part_builder)
         .screen(|ui| {
-            ui.panel("panel", S::column().pad(7.0).gap(4.0).stretch(), |ui| {
+            ui.panel("panel", S::column().pad(7.0).gap(4.0), |ui| {
                 ui.title();
-                ui.row(S::row().gap(8.0), |ui| {
-                    ui.spacer();
+                ui.row(S::row().gap(6.0), |ui| {
                     ui.group("input");
+                    ui.recipe_arrow();
                     ui.group("output");
                 });
                 ui.player_inventory(true);
@@ -221,22 +230,25 @@ fn consume_grid_workbench(m: &MenuCtx) {
 fn craft_result_part_builder(m: &MenuCtx) {
     let input = m.group("input").get(0);
     let output = m.group("output");
-    // TODO implement menu for this
-    let component = COMPONENTS[m.world().game_time() as usize % COMPONENTS.len()];
-    let tags =
-        [("planks", "wood"), ("cobblestone", "stone"), ("ingots/gold", "gold"), ("ingots/iron", "iron"), ("gems/diamond", "diamond")];
+    let tags = [("planks", "wood"), ("stone", "stone"), ("ingots/gold", "gold"), ("ingots/iron", "iron"), ("gems/diamond", "diamond")];
     for (tag, material) in tags {
         if item_has_tag(input.item, tag) {
-            let item = GENERATED_ITEMS
-                .get()
-                .unwrap()
-                .get(&format!("{material}_{component}"))
-                .unwrap();
-            output.set(0, ItemStack::new(item.id(), 1));
+            for i in 0..COMPONENTS.len() {
+                if let Some(item) = GENERATED_ITEMS
+                    .get()
+                    .unwrap()
+                    .get(&format!("{}_{}", material, COMPONENTS[i]))
+                {
+                    output.set(i as u32, ItemStack::new(item.id(), 1));
+                }
+            }
             return;
         }
     }
-    output.set(0, ItemStack::EMPTY);
+    // clear
+    for i in 0..COMPONENTS.len() {
+        output.set(i as u32, ItemStack::EMPTY);
+    }
 }
 
 fn consume_grid_part_builder(m: &MenuCtx) {
