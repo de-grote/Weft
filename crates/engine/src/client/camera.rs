@@ -1,8 +1,9 @@
 //! Camera modes (`registry::CameraMode`): which one is on, what it says each frame, the box or
 //! the pull-in that keeps it out of blocks, and the eased change from one to the next.
 
+use crate::tag_bits::camera as cf;
 use glam::DVec3;
-use weft_abi::{self as abi, camera_flags as cf};
+use weft_abi::{self as abi};
 
 use super::Client;
 use super::world_render::Camera;
@@ -126,12 +127,12 @@ impl Client {
         (cams.mode, cams.since, cams.first) = (mode, 0.0, true);
     }
 
-    /// The player asks for `mode`: at once, or the server first when it `ASK`s.
+    /// The player asks for `mode`: at once, or the server first when it has conditions.
     fn want_camera(&mut self, mode: u32) {
         if self.cameras.locked {
             return;
         }
-        if content().game.cameras[mode as usize].has(cf::ASK) {
+        if content().game.cameras[mode as usize].when.is_some() {
             self.cameras.asked = Some(mode);
             self.conn.send(ToServer::Camera(mode));
         } else {
@@ -236,19 +237,8 @@ impl Client {
             let look = input.mouse_delta.y * sens * if input.invert_y { -1.0 } else { 1.0 };
             cams.look.1 = (cams.look.1 - look).clamp(-1.55, 1.55);
         }
-        let held = |a: &str| input.captured && input.held_raw(a);
-        let axis = |plus: &str, minus: &str| held(plus) as i32 as f32 - held(minus) as i32 as f32;
-        let (look_yaw, look_pitch) = if detached { cams.look } else { (eye.yaw, eye.pitch) };
-        let keys = abi::MountInput {
-            forward: axis("core:forward", "core:back"),
-            strafe: axis("core:right", "core:left"),
-            up: held("core:jump") as u32,
-            down: held("core:sneak") as u32,
-            sprint: held("core:sprint") as u32,
-            yaw: look_yaw,
-            pitch: look_pitch,
-            ..Default::default()
-        };
+        let (yaw, pitch) = if detached { cams.look } else { (eye.yaw, eye.pitch) };
+        let keys = crate::input::Keys { input, ticks: &self.key_ticks, raw: true };
         let eye_v: abi::Vec3 = eye.pos.to_array().into();
         let mut pose = cams.pose;
         let mut anchor = eye_v;
@@ -258,7 +248,9 @@ impl Client {
         match (m.call, cams.mode) {
             (Some((owner, cb)), _) => {
                 let mut args = abi::CameraArgs {
-                    keys,
+                    keys: keys.ctx(),
+                    yaw,
+                    pitch,
                     eye: eye_v,
                     eye_yaw: eye.yaw,
                     eye_pitch: eye.pitch,
@@ -274,15 +266,18 @@ impl Client {
                 (pose, anchor) = (args.out, args.anchor);
             }
             (None, camera::FREE) => {
-                let ahead = physics::look_dir(keys.yaw, keys.pitch);
-                let right = DVec3::new(keys.yaw.cos() as f64, 0.0, -keys.yaw.sin() as f64);
-                let wish = ahead * keys.forward as f64 + right * keys.strafe as f64 + DVec3::Y * (keys.up as f64 - keys.down as f64);
-                let speed = FREE_SPEED * if keys.sprint != 0 { 2.0 } else { 1.0 };
+                let ahead = physics::look_dir(yaw, pitch);
+                let right = DVec3::new(yaw.cos() as f64, 0.0, -yaw.sin() as f64);
+                let up = keys.axis("core:jump", "core:sneak");
+                let wish = ahead * keys.axis("core:forward", "core:back") as f64
+                    + right * keys.axis("core:right", "core:left") as f64
+                    + DVec3::Y * up as f64;
+                let speed = FREE_SPEED * if keys.state("core:sprint").held != 0 { 2.0 } else { 1.0 };
                 let target = wish.normalize_or_zero() * speed;
                 // Eases into a speed and out of it, as a spectator's flight.
                 cams.vel += (target - cams.vel) * (dt as f64 * 8.0).min(1.0);
                 let p = DVec3::new(pose.pos.x, pose.pos.y, pose.pos.z) + cams.vel * dt as f64;
-                pose = abi::CameraPose { pos: p.to_array().into(), yaw: keys.yaw, pitch: keys.pitch, roll: 0.0, fov: 1.0 };
+                pose = abi::CameraPose { pos: p.to_array().into(), yaw, pitch, roll: 0.0, fov: 1.0 };
             }
             (None, mode) => {
                 let mut cam = abi::CameraPose { pos: eye_v, yaw: eye.yaw, pitch: eye.pitch, roll: 0.0, fov: 1.0 };

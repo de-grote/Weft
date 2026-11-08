@@ -9,6 +9,7 @@ use glam::{DVec3, IVec3};
 
 use weft_abi::ItemStack;
 
+use crate::server::lod_tops::LodColumn;
 use crate::world::Cube;
 use codec::Wire;
 
@@ -294,9 +295,9 @@ messages! {
         /// Area edits of the dimension (`AreaFill::spec`): `all` replaces what the client has,
         /// otherwise they come after it. Clients make them on what they generate.
         Edits { dim: u32, specs: Vec<String>, all: bool },
-        /// Columns of dimension `dim` whose top isn't the terrain's, for distant terrain: (x, z,
-        /// height, top, under), `top` `u32::MAX` for one that is again; `all`: every one there is.
-        LodColumns { dim: u32, all: bool, cols: Vec<(i32, i32, i32, u32, u32)> },
+        /// Columns of dimension `dim` that differ from the terrain, for distant terrain (`top`
+        /// `u32::MAX` for one that doesn't any more); `all`: every one there is.
+        LodColumns { dim: u32, all: bool, cols: Vec<LodColumn> },
         /// Of the world, or of body `frame`.
         /// `extras`: what else is in cells, after `changes` (which take it away).
         Blocks { dim: u32, frame: u64, changes: Vec<(IVec3, u32)>, extras: Vec<(IVec3, Vec<u32>)> },
@@ -423,8 +424,8 @@ messages! {
         SwapHands,
         /// `frame`: the structure (entity) the block is part of, its position in the structure's
         /// coordinates; 0 for the world. `face`: of its selection that was hit.
-        /// `part`: which of what is in the cell.
-        Break { pos: IVec3, part: u32, face: u8, frame: u64 },
+        /// `part`: which of what is in the cell; `hit`: where on it, from its corner (`Use`'s).
+        Break { pos: IVec3, part: u32, face: u8, hit: [f32; 3], frame: u64 },
         /// Right click on a block: the block reacts first (chests), otherwise the held item is used or
         /// placed against the clicked face. `frame` like `Break`'s; `look` in world space.
         /// `hit`: where on the block, from its corner.

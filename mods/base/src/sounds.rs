@@ -3,6 +3,9 @@
 
 use weft_sdk::*;
 
+static CALM: Music = Music::named("calm");
+static DEEP: Music = Music::named("deep");
+
 pub fn register(r: &mut Registry) {
     for g in ["stone", "wood", "gravel", "grass", "sand", "glass", "cloth"] {
         let files = |kind: &str| {
@@ -29,10 +32,10 @@ pub fn register(r: &mut Registry) {
             .volume(0.6)
             .pitch(0.5, 0.55);
     }
-    r.music(&Music::named("calm"))
+    r.music(&CALM)
         .tracks(&["music/calm1"])
         .when(&conditions::SURFACE);
-    r.music(&Music::named("deep"))
+    r.music(&DEEP)
         .tracks(&["music/deep1"])
         .when(&conditions::UNDERGROUND);
 }

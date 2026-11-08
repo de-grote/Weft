@@ -135,7 +135,7 @@ pub fn register(r: &mut Registry) {
             .y(i32::MIN, max_y)
             .veins(veins)
             .vein_size(size)
-            .replace("#stone_ore_replaceables")
+            .replaces("#stone_ore_replaceables")
             .exposed(exposed);
     }
 
@@ -168,21 +168,21 @@ pub fn register(r: &mut Registry) {
                 .named("mountains"),
         )
         // Biomes bring their climate and surface; rules only add where else they must hold.
-        .biome(BiomeRule::new("ocean").height(..=SEA - 2))
-        .biome(
+        .rule(BiomeRule::new("ocean").height(..=SEA - 2))
+        .rule(
             BiomeRule::new("snowy_plains")
                 .named("snowy_coast")
                 .height(..=SEA + 1)
                 .continent(..0.1),
         )
-        .biome(BiomeRule::new("beach").height(..=SEA + 1).continent(..0.1))
-        .biome(BiomeRule::new("mountains").field("base:mountains", 0.45..))
-        .biome(BiomeRule::new("snowy_plains"))
-        .biome(BiomeRule::new("taiga"))
-        .biome(BiomeRule::new("desert"))
-        .biome(BiomeRule::new("forest"))
-        .biome(BiomeRule::new("birch_forest"))
-        .biome(BiomeRule::new("plains"))
+        .rule(BiomeRule::new("beach").height(..=SEA + 1).continent(..0.1))
+        .rule(BiomeRule::new("mountains").field("base:mountains", 0.45..))
+        .rule(BiomeRule::new("snowy_plains"))
+        .rule(BiomeRule::new("taiga"))
+        .rule(BiomeRule::new("desert"))
+        .rule(BiomeRule::new("forest"))
+        .rule(BiomeRule::new("birch_forest"))
+        .rule(BiomeRule::new("plains"))
         .cave_biome("deep_caves", 24, 96.0, 0.25)
         .caves(Caves::new("lava", i32::MIN, 11));
 

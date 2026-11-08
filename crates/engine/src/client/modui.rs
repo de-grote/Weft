@@ -264,7 +264,8 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
                 let bind =
                     if n.bind.is_some() { float_bind(owner, n.bind) } else { Box::new(|_: &Ctx| 0.0f32) as Box<dyn Fn(&Ctx) -> f32> };
                 let on_change: Rc<dyn Fn(&mut Ctx, f32)> = Rc::new(move |ctx: &mut Ctx, v: f32| on_change(ctx, String::new(), v));
-                b.ui.open(Kind::Slider { value: 0.0, bind, on_change }, style)
+                let steps = if n.count == 0 { 100 } else { n.count };
+                b.ui.open(Kind::Slider { value: 0.0, bind, on_change, steps }, style)
             }
             uk::ITEM => {
                 let (item, count) = (n.data, n.count);

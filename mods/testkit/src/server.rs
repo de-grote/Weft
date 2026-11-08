@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use weft_sdk::abi::entry_kind as ek;
+use weft_sdk::terrain::{BiomeRule, Expr};
 use weft_sdk::*;
 
 /// How many of each event arrived since `events reset`, in `EVENT_NAMES` order.
@@ -26,6 +27,26 @@ pub static HALF_DAMAGE: Config<bool> = Config::named("half_damage");
 /// Mobs may not attack while it is on.
 pub static PEACE: Config<bool> = Config::named("peace");
 static DRILL: Block = Block::named("drill");
+/// Registered, then changed by `r.edit` (the `edits` test).
+static EDITED: Item = Item::named("edited");
+static EDITED_BIOME: Biome = Biome::named("edited");
+static EDITED_LOOT: LootTable = LootTable::named("edited");
+static EDITED_KIND: EntityKind = EntityKind::named("edited");
+static WARMTH: Component<f32> = Component::named("testkit:warmth");
+static STORM: Weather = Weather::named("storm");
+static GRIT: Attribute = Attribute::named("grit");
+static TIN_ORE: Block = Block::named("testmod:tin_ore");
+static OIL: Block = Block::named("testmod:oil");
+static MARS: Dimension = Dimension::named("testmod:mars");
+/// Lit by `.states`, then edited: its light on every state, its opacity on the lit one.
+static LAMP: Block = Block::named("lamp");
+/// Made by base's stairs template, edited like any block.
+static OAK_STAIRS: Block = Block::named("base:oak_planks_stairs");
+/// A column of Mars, far from what other tests look at, that an edit of its terrain gives base's
+/// plains.
+const PROBE: [i32; 2] = [-20000, 20000];
+/// Only the equipment of what it opens on (the `armor` test opens it on a zombie).
+static GEAR: Menu = Menu::named("gear");
 /// How many cells of the world a drill on a moving body has come to.
 static PASSES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// Players can't be hurt (`actions::HURT`) or use items (`actions::USE_ITEM`) while on.
@@ -40,6 +61,42 @@ static RANG: Event<u64> = Event::named("rang");
 static RINGS: AtomicU32 = AtomicU32::new(0);
 /// Mobs walked by tests (`drive`): (entity, direction, ticks left).
 static DRIVEN: std::sync::Mutex<Vec<(u64, [f32; 2], u32)>> = std::sync::Mutex::new(Vec::new());
+/// A box watched tick by tick (`trace`): dimension, corners, ticks left, what each cell last was,
+/// and what changed: `tick x,y,z block signal`, as the tick before left it (signals go later).
+struct Trace {
+    dim: u32,
+    a: [i32; 3],
+    b: [i32; 3],
+    left: u32,
+    last: std::collections::HashMap<[i32; 3], (u32, u8)>,
+    lines: Vec<String>,
+}
+static TRACE: std::sync::Mutex<Option<Trace>> = std::sync::Mutex::new(None);
+
+fn trace_tick(w: &World) {
+    let mut guard = TRACE.lock().unwrap();
+    let Some(t) = guard
+        .as_mut()
+        .filter(|t| t.dim == w.dimension() && t.left > 0)
+    else {
+        return;
+    };
+    t.left -= 1;
+    let now = w.game_time();
+    for x in t.a[0]..=t.b[0] {
+        for y in t.a[1]..=t.b[1] {
+            for z in t.a[2]..=t.b[2] {
+                let p = [x, y, z];
+                let here = (w.block(p), w.signal(p));
+                let was = t.last.insert(p, here);
+                if was != Some(here) && (was.is_some() || here.0 != 0) {
+                    t.lines
+                        .push(format!("{now} {x},{y},{z} {} {}", block_name(here.0), here.1));
+                }
+            }
+        }
+    }
+}
 
 fn count(i: usize, n: usize) {
     COUNTS[i].fetch_add(n as u32, Ordering::Relaxed);
@@ -80,10 +137,79 @@ pub fn register(r: &mut Registry) {
         .no_item();
     r.entity_component(&MARK, 0, component_flags::SYNC_WATCHERS);
     // A suit to swim in lava with (`swimming`).
-    r.set_text_on(Target::Name("base:diamond_chestplate"), &SWIMS_IN, "#lava");
-    r.attach(&PIG, &MARK);
+    r.edit(Item::generated("base:diamond_chestplate".into()))
+        .set_text(&SWIMS_IN, "#lava");
+    r.edit(&PIG).attach(&MARK);
     r.storage(&STASH, 54);
-    r.attach_storage(&PLAYER, &STASH);
+    // What an edit sets wins, the rest stays; the testmod ones load after or before this mod
+    // depending on order, which edits don't care about.
+    r.item(&EDITED).max_stack(16).attack_damage(3.0);
+    r.edit(&EDITED).max_stack(8);
+    r.biome(&EDITED_BIOME).set(&WARMTH, 1.0).tag("edited_a");
+    r.edit(&EDITED_BIOME).set(&WARMTH, 2.0);
+    r.weather(&STORM).no_falling().weight(0);
+    r.edit(&STORM).lightning().untag(abi::comp::weather::DRY);
+    r.attribute(&GRIT, 1.0, 0.0, 10.0);
+    r.edit(&GRIT).set(&comps::attribute::DEFAULT, 4.0);
+    r.entity(&EDITED_KIND)
+        .size(0.6, 1.8)
+        .eye_height(1.0)
+        .set(&WARMTH, 1.0)
+        .no_egg();
+    r.edit(&EDITED_KIND)
+        .size(0.9, 2.5)
+        .set(&WARMTH, 3.0)
+        .attach(&MARK);
+    r.edit(TIN_ORE.ore()).veins(7);
+    r.block(&LAMP)
+        .prop("lit", ["false", "true"])
+        .states(|p, s| if p.is("lit", "true") { s.light(13) } else { s })
+        .tag("testkit:lamps")
+        .no_item();
+    r.edit(&LAMP)
+        .light(4)
+        .state_where("lit=true", |s| s.light_opacity(3));
+    r.edit(&OAK_STAIRS).light(7);
+    r.set("#testkit:lamp*", &WARMTH, 1.5);
+    r.tag("testkit:lit", &["lamp[lit=true]"]);
+    r.shapeless(&base_api::SMELTING, "base:stick", 1, &["edited"], 200)
+        .named("smelt_edited");
+    r.remove(&Recipe::named("smelt_edited"));
+    r.loot(&EDITED_LOOT)
+        .pool(Pool::new().item("base:stick"))
+        .pool(Pool::new().item("base:dirt"));
+    r.edit(&EDITED_LOOT)
+        .remove_item(&comps::loot::POOLS, "#1")
+        .replace_drop("base:stick", "edited")
+        .pool(Pool::new().items("base:cobblestone", 2, 2));
+    r.edit(OIL.liquid())
+        .flow_delay(12)
+        .block(|b| b.tag("testkit:edited"));
+    let off = |at: i32, of: Expr| (of - Expr::blocks(at as f64)).abs();
+    r.edit(&MARS).tag("testkit:edited");
+    r.edit(MARS.terrain())
+        .field(
+            "testkit:probe",
+            off(PROBE[0], Expr::x())
+                .max(off(PROBE[1], Expr::z()))
+                .ramp_blocks(1.0, 1.0)
+                .not(),
+        )
+        .rule_before(
+            "#0",
+            BiomeRule::new("base:plains")
+                .named("probe")
+                .field("testkit:probe", 0.5..),
+        );
+    r.menu(&GEAR).equipment().player_inventory().screen(|ui| {
+        ui.panel("panel", S::column().pad(7.0).gap(4.0), |ui| {
+            ui.title();
+            ui.equipment();
+            ui.player_inventory(true);
+        });
+    });
+    r.edit(&GEAR).group("extra", Slots::row(2));
+    r.edit(&PLAYER).attach_storage(&STASH);
     r.config(&COUNT_MARKS).bool(false).world();
     // While the rule is on, every marked pig counts up once a tick.
     r.system(&MARK, |b| {
@@ -100,7 +226,7 @@ pub fn register(r: &mut Registry) {
     // Switches for the tests of the extension mechanisms, off unless a test turns them on.
     r.config(&PROTECT_GOLD).bool(false).world();
     r.config(&PEACE).bool(false).world();
-    r.intercept(&question::ATTACK, |q| {
+    r.before_event(&question::ATTACK, |q| {
         let w = q.world();
         let mob = w
             .entity(q.entity())
@@ -110,38 +236,38 @@ pub fn register(r: &mut Registry) {
     r.config(&NO_HURT).bool(false).world();
     r.config(&NO_USE).bool(false).world();
     r.config(&CHAT_HOOKS).bool(false).world();
-    r.intercept(&actions::CHAT, |q| if CHAT_HOOKS.get() && q.text() == "forbidden" { Verdict::Deny } else { Verdict::Abstain });
+    r.before_event(&actions::CHAT, |q| if CHAT_HOOKS.get() && q.text() == "forbidden" { Verdict::Deny } else { Verdict::Abstain });
     r.chat_format(|f| {
         if CHAT_HOOKS.get() {
             f.set("{0} from a mod", &[Arg::Text(f.text())]);
         }
     });
-    r.on(&actions::CHAT, |b| {
+    r.on_event(&actions::CHAT, |b| {
         for m in b.iter() {
             *LAST_SAID.lock().unwrap() = m.text().to_string();
         }
     });
     let player = |w: &World, id: u64| w.players_iter().any(|p| p == id);
-    r.intercept(&actions::HURT, move |q| if player(&q.world(), q.entity()) && NO_HURT.get() { Verdict::Deny } else { Verdict::Abstain });
-    r.intercept(&actions::USE_ITEM, |_| if NO_USE.get() { Verdict::Deny } else { Verdict::Abstain });
-    r.on(&RANG, |b| {
+    r.before_event(&actions::HURT, move |q| if player(&q.world(), q.entity()) && NO_HURT.get() { Verdict::Deny } else { Verdict::Abstain });
+    r.before_event(&actions::USE_ITEM, |_| if NO_USE.get() { Verdict::Deny } else { Verdict::Abstain });
+    r.on_event(&RANG, |b| {
         RINGS.fetch_add(b.len() as u32, Ordering::Relaxed);
     });
     r.config(&HALF_DAMAGE).bool(false).world();
-    r.intercept(&actions::BREAK_BLOCK, |q| if GOLD.is(q.state()) && PROTECT_GOLD.get() { Verdict::Deny } else { Verdict::Abstain });
+    r.before_event(&actions::BREAK_BLOCK, |q| if GOLD.is(q.state()) && PROTECT_GOLD.get() { Verdict::Deny } else { Verdict::Abstain });
     r.modify(&chain::DAMAGE, stage::FINAL, |m| {
         if HALF_DAMAGE.get() {
             m.value *= 0.5;
         }
     });
-    r.on(&actions::BREAK_BLOCK, |b| count(0, b.len()));
-    r.on(&actions::PLACE_BLOCK, |b| count(1, b.len()));
-    r.on(&actions::PICKUP_ITEM, |b| count(2, b.len()));
-    r.on(&actions::DIE, |b| count(3, b.len()));
-    r.on(&actions::HURT, |b| count(4, b.len()));
-    r.on(&PLAYER_JOINED, |b| count(5, b.len()));
-    r.on(&actions::USE_ITEM, |b| count(6, b.len()));
-    r.on(&SMELTED, |b| count(7, b.len()));
+    r.on_event(&actions::BREAK_BLOCK, |b| count(0, b.len()));
+    r.on_event(&actions::PLACE_BLOCK, |b| count(1, b.len()));
+    r.on_event(&actions::PICKUP_ITEM, |b| count(2, b.len()));
+    r.on_event(&actions::DIE, |b| count(3, b.len()));
+    r.on_event(&actions::HURT, |b| count(4, b.len()));
+    r.on_event(&PLAYER_JOINED, |b| count(5, b.len()));
+    r.on_event(&actions::USE_ITEM, |b| count(6, b.len()));
+    r.on_event(&SMELTED, |b| count(7, b.len()));
     // A mob walks where a test says for a while, after its own AI had its say.
     r.world_tick(|w| {
         let mut driven = DRIVEN.lock().unwrap();
@@ -153,6 +279,7 @@ pub fn register(r: &mut Registry) {
         }
         driven.retain(|d| d.2 > 0);
     });
+    r.world_tick(trace_tick);
     register_ops(r);
 }
 
@@ -254,7 +381,7 @@ fn clock(w: &World, p: [i32; 3]) -> Result<String, String> {
         }
         Ok(s)
     };
-    let wire = Block::lookup("base:redstone").ok_or("no redstone")? + (1 << 2);
+    let wire = state_with(Block::lookup("base:redstone").ok_or("no redstone")?, "down", "true").ok_or("no redstone on a floor")?;
     let at = |x: i32, z: i32| [p[0] + x, p[1], p[2] + z];
     w.set_block(at(0, 0), state("base:stone", &[])?);
     w.set_block(at(1, 0), state("base:redstone_torch", &[("attach", "west")])?);
@@ -273,6 +400,21 @@ type Run = fn(&World, &Command, u64, [i32; 3]) -> Result<String, String>;
 /// that ran it (`Client::run_command`), as `ok ..` or `err ..`.
 const OPS: &[(&str, &str, Run)] = &[
     ("last_said", "", |_, _, _, _| Ok(LAST_SAID.lock().unwrap().clone())),
+    // Every change in a box for some ticks; `traced` gives what it saw.
+    ("traced", "", |_, _, _, _| {
+        Ok(TRACE
+            .lock()
+            .unwrap()
+            .take()
+            .map_or(String::new(), |t| t.lines.join("\n")))
+    }),
+    ("trace", "<a:pos> <b:pos> <ticks:int>", |w, cmd, _, _| {
+        let (a, b) = (pos(cmd, "a")?, pos(cmd, "b")?);
+        let (lo, hi) = (std::array::from_fn(|i| a[i].min(b[i])), std::array::from_fn(|i| a[i].max(b[i])));
+        *TRACE.lock().unwrap() =
+            Some(Trace { dim: w.dimension(), a: lo, b: hi, left: int(cmd, "ticks")?, last: Default::default(), lines: Vec::new() });
+        Ok(String::new())
+    }),
     ("show", "<who:word> <place:word> <text:text>", |w, cmd, player, _| {
         let pos = w.entity(player).map_or([0.0; 3], |e| e.pos.to_array());
         let who = match word(cmd, "who")? {
@@ -326,7 +468,7 @@ const OPS: &[(&str, &str, Run)] = &[
     ("rsbuild", "<at:pos> <seed:int>", |w, cmd, _, _| crate::tests::redstone::build_turned(w, int::<u64>(cmd, "seed")?, pos(cmd, "at")?)),
     ("rsfill", "<at:pos> <half:int>", |w, cmd, _, _| {
         let (p, half) = (pos(cmd, "at")?, int::<i32>(cmd, "half")?);
-        let s = Block::lookup("base:redstone").ok_or("no redstone")? + (1 << 2);
+        let s = state_with(Block::lookup("base:redstone").ok_or("no redstone")?, "down", "true").ok_or("no redstone on a floor")?;
         for x in -half..half {
             for z in -half..half {
                 w.set_block([p[0] + x, p[1], p[2] + z], s);
@@ -384,6 +526,11 @@ const OPS: &[(&str, &str, Run)] = &[
         if missed > 0 { Err(format!("{missed} blocks not loaded")) } else { Ok(volume.to_string()) }
     }),
     ("get", "<pos:pos>", |w, cmd, _, _| Ok(block_name(w.block(pos(cmd, "pos")?)).to_string())),
+    ("prop", "<pos:pos> <name:word>", |w, cmd, _, _| {
+        Ok(w.prop(pos(cmd, "pos")?, word(cmd, "name")?)
+            .unwrap_or("none")
+            .to_string())
+    }),
     ("parts", "<pos:pos>", |w, cmd, _, _| {
         Ok(w.parts(pos(cmd, "pos")?)
             .into_iter()
@@ -422,7 +569,7 @@ const OPS: &[(&str, &str, Run)] = &[
         // The same through the area edit: one call, done at the end of the tick.
         let r: i32 = int(cmd, "r")?;
         w.fill(Shape::ball([me[0] as f64 + 0.5, me[1] as f64 + 0.5, me[2] as f64 + 0.5], r as f64), 0)
-            .keep_unbreakable();
+            .keep("#unbreakable");
         Ok(String::new())
     }),
     ("group", "@owner <name:word>", |w, cmd, _, _| {
@@ -530,7 +677,7 @@ const OPS: &[(&str, &str, Run)] = &[
         // Biomes of every block within `r` of the player, and where glow crystals are.
         let r: i32 = int(cmd, "r")?;
         let crystal = Block::lookup("testmod:glow_crystal").ok_or("no crystal block")?;
-        let cave = Tag::named("cave");
+        let cave: Tag = Tag::named("cave");
         let mut biomes: std::collections::BTreeMap<&str, u32> = Default::default();
         let (mut in_cave, mut elsewhere) = (0, 0);
         for y in me[1] - r..=me[1] + r {
@@ -674,6 +821,56 @@ const OPS: &[(&str, &str, Run)] = &[
         Ok(String::new())
     }),
     ("rings", "", |_, _, _, _| Ok(RINGS.load(Ordering::Relaxed).to_string())),
+    ("edited", "", |w, _, player, _| {
+        let i = EDITED.id();
+        let b = EDITED_BIOME.id();
+        let mut drops: Vec<String> = w
+            .roll_loot(&EDITED_LOOT, &LootCtx::default())
+            .iter()
+            .map(|s| format!("{}x{}", item_name(s.item), s.count))
+            .collect();
+        drops.sort();
+        let oil: Tag = Tag::named("testkit:edited");
+        let probe = |dx: i32| name_of(ek::BIOME, MARS.column(w.seed(), PROBE[0] + dx, PROBE[1]).biome) == "base:plains";
+        let size = w
+            .kind_size(EDITED_KIND.name())
+            .map_or([0.0; 3], |s| [s.width, s.height, s.eye]);
+        // Each state of the lamp: light, opacity, warmth, lit tag.
+        let lit: Tag = Tag::named("testkit:lit");
+        let lamp: Vec<String> = (LAMP.id()..LAMP.id() + 2)
+            .map(|s| {
+                let i = block_info(s).map_or(([0; 3], 0), |i| (i.light, i.opacity));
+                format!("{}/{}/{}/{}", i.0[0], i.1, WARMTH.on_block(s).unwrap_or(0.0), lit.on_block(s))
+            })
+            .collect();
+        let stairs = block_info(OAK_STAIRS.id()).map_or(0, |i| i.states);
+        let stairs_lit = (OAK_STAIRS.id()..OAK_STAIRS.id() + stairs).all(|s| block_info(s).is_some_and(|i| i.light == [7; 3]));
+        Ok(format!(
+            "{} {} {} {} {} {} {} {} {} {} {} {} {:?} {} {} {} {}",
+            MAX_STACK.on_item(i).unwrap_or(0),
+            ATTACK_DAMAGE.on_item(i).unwrap_or(0.0),
+            WARMTH.on_biome(b).unwrap_or(0.0),
+            Tag::<kind::Biome>::named("edited_a").on_id(b),
+            format!(
+                "{}/{}/{}",
+                !comps::weather::DRY.on_id(STORM.id()),
+                comps::weather::LIGHTNING.on_id(STORM.id()),
+                comps::weather::UNSHELTERED.on_id(STORM.id())
+            ),
+            w.attribute(player, &GRIT),
+            recipe_process(&base_api::SMELTING, i).is_none(),
+            drops.join(","),
+            liquid_of(OIL.id()) == Some(OIL.liquid().id()),
+            oil.on_block(OIL.id()) && oil.on_item(Item::generated(OIL.name().to_string()).id()),
+            (probe(0), probe(4)) == (true, false),
+            oil.on_dimension(MARS.id()),
+            size,
+            WARMTH.on_entity(EDITED_KIND.id()).unwrap_or(0.0),
+            lamp.join(","),
+            stairs,
+            stairs_lit,
+        ))
+    }),
     ("look", "", |w, _, player, _| {
         Ok(w.target_block(player, 5.0, false)
             .map_or("none".into(), |l| format!("{} {} {} {} {}", l.body, l.pos.x, l.pos.y, l.pos.z, block_name(l.state))))
@@ -721,6 +918,15 @@ const OPS: &[(&str, &str, Run)] = &[
         let p = pos(cmd, "pos")?;
         if !w.open_menu(player, m, p) {
             return Err(format!("no block entity at {p:?} ({})", block_name(w.block(p))));
+        }
+        Ok(String::new())
+    }),
+    ("emenu", "<which:word> <id:int>", |w, cmd, player, _| {
+        let name = word(cmd, "which")?;
+        let m = Menu::lookup(name).ok_or_else(|| format!("no menu {name}"))?;
+        let id: u64 = int(cmd, "id")?;
+        if !w.open_menu(player, m, id) {
+            return Err(format!("can't open {name} on {id}"));
         }
         Ok(String::new())
     }),
@@ -782,10 +988,10 @@ const OPS: &[(&str, &str, Run)] = &[
         if name == "release" {
             w.release_camera(player, None);
         } else {
-            let m = CameraMode::generated(name.to_string());
-            if m.camera_id() == u32::MAX {
+            if CameraMode::lookup(name).is_none() {
                 return Err(format!("no camera {name}"));
             }
+            let m = CameraMode::generated(name.to_string());
             if cmd.int("locked") == Some(1) {
                 w.force_camera(player, m, None);
             } else {
@@ -889,7 +1095,7 @@ const OPS: &[(&str, &str, Run)] = &[
     // A melee hit's damage with what `item` makes of the player having fallen `fall` blocks.
     ("attack_damage", "<item:item> <fall:float>", |w, cmd, player, _| {
         let fall = cmd.float("fall").ok_or("missing fall")?;
-        w.entity_edit(player).fall_distance(fall as f32);
+        w.entity_modify(player).fall_distance(fall as f32);
         let base = 6.0;
         let q = abi::Query { entity: player, item: id(cmd, "item")?, amount: base, ..query() };
         let fell = w.entity(player).map_or(-1.0, |s| s.fall_distance);
@@ -897,7 +1103,7 @@ const OPS: &[(&str, &str, Run)] = &[
     }),
     // The player hits `id` as if having fallen `fall` blocks first.
     ("hit_falling", "<id:int> <fall:float>", |w, cmd, player, _| {
-        w.entity_edit(player)
+        w.entity_modify(player)
             .fall_distance(cmd.float("fall").unwrap_or(0.0) as f32);
         w.damage(int(cmd, "id")?, 1.0, player, damage_cause::ATTACK);
         Ok(String::new())
@@ -909,7 +1115,7 @@ const OPS: &[(&str, &str, Run)] = &[
             .ok_or("no player")?
             .pos
             .offset(0.0, 3.0, 0.0);
-        w.entity_edit(player)
+        w.entity_modify(player)
             .pos(up)
             .yaw(cmd.float("yaw").unwrap_or(0.0) as f32)
             .selected(int(cmd, "slot")?)

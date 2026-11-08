@@ -202,10 +202,13 @@ pub fn describe_lod(c: &Content, dim: u32, seed: u64) -> Option<Vec<i32>> {
                 [threshold as u32 as i32, (threshold >> 32) as u32 as i32, radii[radii.len() / 2], tops[tops.len() / 2], state as i32];
             w.extend_from_slice(&entry);
         }
-        w.push(sc.ground.len() as i32);
-        for &b in &sc.ground {
-            let bd = &c.blocks[b as usize];
-            w.extend_from_slice(&[bd.first_state as i32, bd.states as i32]);
+        // The states its ground takes, as runs (first, count); none: any.
+        let runs = sc
+            .ground
+            .map_or(Vec::new(), |m| crate::refs::runs(c.matchers.set(m), c.states.len() as u32));
+        w.push(runs.len() as i32);
+        for (first, count) in runs {
+            w.extend_from_slice(&[first as i32, count as i32]);
         }
     }
     Some(w)
@@ -550,7 +553,7 @@ fn finish(job: Job, (blocks, biomes, cols): Unpacked) {
         let biome_differs = (0..256).find(|&i| cube.biome(i % 16, i / 16) != want.biome(i % 16, i / 16));
         // Light too, against the way it was done before (lit as it will be below).
         let mut lit = cube.clone();
-        area::catch_up(c, &job.edits, job.pos, &mut lit);
+        area::catch_up(&job.edits, job.pos, &mut lit);
         let mut old = lit.clone();
         crate::world::light::prelight(c, &mut lit, c.dims[job.dim as usize].sky_light);
         crate::world::light::prelight_reference(c, &mut old, c.dims[job.dim as usize].sky_light);

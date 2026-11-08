@@ -321,7 +321,7 @@ impl Dim {
     /// A mount's fall hurts its riders too, when its kind says so (`RIDERS_FALL`).
     pub fn riders_fall(&mut self, c: &'static Content, mount: u64, amount: f32) {
         let Some(m) = self.entities.get(mount) else { return };
-        if !c.game.entities[m.kind as usize].is(abi::entity_flags::RIDERS_FALL) {
+        if !c.game.entities[m.kind as usize].is(crate::tag_bits::entity::RIDERS_FALL) {
             return;
         }
         let riders: Vec<u64> = self

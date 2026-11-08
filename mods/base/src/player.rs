@@ -13,6 +13,9 @@ pub static INVENTORY: Menu = Menu::named("inventory");
 pub static CRAFTING: Menu = Menu::named("crafting_table");
 static HUD_HEALTH: HudElement = HudElement::named("health");
 static HUD_ARMOR: HudElement = HudElement::named("armor");
+static HUNGRY: Condition = Condition::named("hungry");
+/// How fast the food goes (1 vanilla's, 0 never): a world rule, and one player's by `/attribute`.
+static HUNGER_RATE: Attribute = Attribute::named("hunger_rate");
 static HUD_FOOD: HudElement = HudElement::named("food");
 static HUD_AIR: HudElement = HudElement::named("air");
 static HUD_ATTACK: HudElement = HudElement::named("attack_indicator");
@@ -32,7 +35,7 @@ fn armor_of(w: &World, entity: u64) -> (u32, f32) {
 }
 
 pub fn register(r: &mut Registry) {
-    r.player_inventory()
+    r.player_slots()
         .group("hotbar", Slots::row(9).hotbar())
         .group("main", Slots::grid(9, 3));
     for (slot, covers, piece) in [
@@ -49,10 +52,21 @@ pub fn register(r: &mut Registry) {
         Hunger { food: 20.0, saturation: 5.0, exhaustion: 0.0, air: MAX_AIR, food_timer: 0 },
         component_flags::SAVE | component_flags::SYNC_OWNER,
     );
-    r.attach(&PLAYER, &HUNGER);
+    // Too hungry to sprint: modern's 3 drumsticks.
+    r.condition(&HUNGRY, |c| {
+        let w = c.world();
+        w.is_some_and(|w| {
+            w.component(c.entity(), &HUNGER)
+                .is_some_and(|h| h.food <= 6.0)
+        })
+    });
+    r.attribute(&HUNGER_RATE, 1.0, 0.0, 10.0).rule();
+    r.edit(&PLAYER)
+        .attach(&HUNGER)
+        .modifier(Modifier::add(&attribute::CAN_SPRINT, -1.0).when(&HUNGRY));
     r.world_tick(tick_players);
     // Not hungry, it doesn't start eating; the other way round it would only find out at the end.
-    r.intercept(&actions::USE_ITEM, |q| {
+    r.before_event(&actions::USE_ITEM, |q| {
         let full = FOOD.on_item(q.item()).is_some()
             && q.world()
                 .component(q.entity(), &HUNGER)
@@ -60,13 +74,13 @@ pub fn register(r: &mut Registry) {
         if full { Verdict::Deny } else { Verdict::Abstain }
     });
     // Modern's exhaustion, by what the player does.
-    r.on(&actions::BREAK_BLOCK, |b| {
+    r.on_event(&actions::BREAK_BLOCK, |b| {
         let w = b.world();
         for e in b.iter() {
             tire(&w, e.player, 0.005);
         }
     });
-    r.on(&actions::HURT, |b| {
+    r.on_event(&actions::HURT, |b| {
         let w = b.world();
         for e in b.iter() {
             tire(&w, e.source, 0.1);
@@ -88,7 +102,7 @@ pub fn register(r: &mut Registry) {
         let through = m.value / (2.0 + toughness as f64 / 4.0);
         m.value *= 1.0 - (points - through).clamp(points * 0.2, 20.0) / 25.0;
     });
-    r.on(&actions::HURT, |b| {
+    r.on_event(&actions::HURT, |b| {
         let w = b.world();
         for h in b.iter().filter(|h| armor_applies(h.cause)) {
             let Some(worn) = w.inventory(h.entity).find_group(EQUIPMENT_GROUP) else { continue };
@@ -125,6 +139,7 @@ pub fn register(r: &mut Registry) {
     // Survival bars; a negative value hides them (creative).
     r.hud_element(&HUD_HEALTH, hud_anchor::HOTBAR_LEFT, 0, |ui| {
         ui.icons("heart", 10, |c| if c.outside_survival() { -1.0 } else { c.player_state().map_or(20.0, |s| s.health.ceil()) })
+            .max_by(|c| c.player_state().map_or(20.0, |s| s.max_health.ceil()))
             .shaking()
             .flash_on_gain(0.5)
             .flash_on_loss(1.0);
@@ -234,7 +249,7 @@ pub fn register(r: &mut Registry) {
 }
 
 fn armor_applies(cause: u32) -> bool {
-    DamageCause::flags_of(cause) & damage_flags::BYPASSES_ARMOR == 0
+    !comps::damage_cause::BYPASSES_ARMOR.on_id(cause)
 }
 
 /// The `result` slot shows what the `grid` makes.
@@ -316,11 +331,7 @@ fn tick_players(w: &World) {
         if st.jumped != 0 {
             tire(w, id, if st.sprinting != 0 { 0.2 } else { 0.05 });
         }
-        // Too hungry to sprint: modern's 3 drumsticks.
-        let hungry = w.component(id, &HUNGER).is_some_and(|h| h.food <= 6.0);
-        if hungry {
-            w.attribute_add_modifier(id, &attribute::CAN_SPRINT, "base:too_hungry", attr_op::ADD, -1.0, 20);
-        }
+        let per_point = 4.0 / w.attribute(id, &HUNGER_RATE) as f32;
         let Some(h) = w.component_mut(id, &HUNGER) else { continue };
         // Modern's: 0.1 a block sprinting, 0.01 swimming, 0 walking; jumps are counted from `Move`.
         h.exhaustion += st.moved
@@ -331,8 +342,8 @@ fn tick_players(w: &World) {
             } else {
                 0.0
             };
-        if h.exhaustion > 4.0 {
-            h.exhaustion -= 4.0;
+        if h.exhaustion > per_point {
+            h.exhaustion -= per_point;
             if h.saturation > 0.0 {
                 h.saturation = (h.saturation - 1.0).max(0.0);
             } else {

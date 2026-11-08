@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "backends/*", "mods/*", "mods/base/api"]
 
 [workspace.package]
-version = "26.11.2"
+version = "26.11.3"
 edition = "2024"
 license = "MPL-2.0"
 rust-version = "1.95"
@@ -15,10 +15,13 @@ weft_noise = { path = "crates/noise" }
 weft_render = { path = "crates/render" }
 weft_engine = { path = "crates/engine" }
 weft_vulkan = { path = "backends/vulkan" }
+weft_wgpu = { path = "backends/wgpu" }
 base_api = { path = "mods/base/api" }
 
 ash = "0.38"
 ash-window = "0.13"
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "vulkan", "metal", "dx12", "naga-ir"] }
+pollster = "0.4"
 gpu-allocator = { version = "0.28", default-features = false, features = ["vulkan", "std"] }
 winit = "0.30"
 raw-window-handle = "0.6"
@@ -34,7 +37,7 @@ libloading = "0.9"
 lz4_flex = "0.14"
 png = "0.18"
 rustc-hash = "2"
-arboard = { version = "3", default-features = false }
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 iroh = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }

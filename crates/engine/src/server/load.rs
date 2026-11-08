@@ -318,12 +318,16 @@ impl Server {
                         .any(|&(v, lo, hi)| v.column(pos) && pos.y >= lo && pos.y <= hi)
                         || tickets.iter().any(|t| t.contains(pos))
                 });
-                for (pos, cube, inside) in removed {
+                let around: Vec<_> = removed
+                    .iter()
+                    .map(|x| r.around(x.0, |p| removed.iter().find(|o| o.0 == p).map(|o| o.1.clone())))
+                    .collect();
+                for ((pos, cube, inside), around) in removed.into_iter().zip(around) {
                     if let Some(s) = &storage {
                         // Written in the background; loads queue behind it there.
                         let (s, mut bytes, dim) = (s.clone(), serialize(c, r, &inside), r.id);
                         persist::append_ticks(&mut bytes, &r.ticks_in(pos));
-                        crate::background().spawn(move || s.lock().save(c, dim, pos, &cube, &bytes));
+                        crate::background().spawn(move || s.lock().save(c, dim, pos, &cube, &around, &bytes));
                     }
                     for id in inside {
                         r.entities.remove(id);
@@ -349,7 +353,7 @@ impl Server {
         let def = &c.dims[dim as usize];
         let in_view = |cp: IVec3| views.iter().any(|v| v.contains_in(def, cp));
         // Blocks it keeps may be anywhere in terrain: such cubes are generated.
-        let keeps = fill.keeps_any(c);
+        let keeps = fill.keeps_any();
         let d = &self.dims[dim as usize];
         let (lo, hi) = fill.shape.bounds();
         let (lo, hi) = (((lo - 17.0) / 16.0).floor().as_ivec3(), ((hi + 17.0) / 16.0).floor().as_ivec3());
@@ -455,7 +459,7 @@ pub(super) fn send_far(
             None => {
                 n += 1;
                 let Some((mut cube, _)) = storage.and_then(|s| s.lock().load(p.dim, pos)) else { continue };
-                dim.catch_up_edits(c, pos, &mut cube);
+                dim.catch_up_edits(pos, &mut cube);
                 Arc::new(cube)
             }
         };

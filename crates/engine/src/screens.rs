@@ -27,6 +27,8 @@ pub struct BuildCx<'a> {
     pub size: glam::Vec2,
     pub look: &'a crate::ui::look::Look,
     pub assets: &'a crate::assets::Assets,
+    /// The renderer drawing now (`core:renderer` may have chosen another for the next start).
+    pub renderer: &'a str,
 }
 
 impl BuildCx<'_> {
@@ -91,8 +93,14 @@ pub trait Screen: std::any::Any {
 /// Engine screens open each other through this too, so a mod's replacement is used everywhere.
 pub fn named(name: &str) -> Option<Box<dyn Screen>> {
     let name = if name.contains(':') { name.to_string() } else { format!("core:{name}") };
-    if let Some(s) = crate::content::try_content().and_then(|c| c.game.screens.iter().rev().find(|s| s.name == name)) {
-        return Some(Box::new(ModScreen(s.clone())));
+    // A menu's screen opens on the client alone too, with nothing to sync.
+    if let Some(&m) = crate::content::try_content().and_then(|c| {
+        c.game
+            .menu_names
+            .get(&name)
+            .filter(|&&m| c.game.menus[m as usize].screen.is_some())
+    }) {
+        return Some(Box::new(ModScreen(m)));
     }
     Some(match name.as_str() {
         "core:title" => Box::new(Title),
@@ -102,13 +110,14 @@ pub fn named(name: &str) -> Option<Box<dyn Screen>> {
         "core:controls" => Box::new(Controls::default()),
         "core:mod_settings" => Box::new(ModSettings),
         "core:worlds" => Box::new(crate::saves::WorldSelect::default()),
-        "core:create_world" => Box::new(crate::saves::CreateWorld),
+        "core:create_world" => Box::new(crate::saves::CreateWorld::new()),
         "core:chat" => Box::new(crate::game_screens::Chat::new("")),
         "core:death" => Box::new(crate::game_screens::Death),
         "core:multiplayer" => Box::new(crate::net::screens::Multiplayer::default()),
         "core:resource_packs" => Box::new(crate::packs::ResourcePacks::default()),
         "core:shader_packs" => Box::new(crate::packs::ShaderPacks),
-        "core:sound" => Box::new(ConfigScreen { ns: None }),
+        "core:sound" => Box::new(ConfigScreen { shown: Shown::Sound }),
+        "core:world_rules" => Box::new(ConfigScreen { shown: Shown::World }),
         "core:chat_settings" => Box::new(ChatSettings),
         "core:hud_editor" => Box::new(crate::hud_editor::HudEditor::default()),
         "core:debug_options" => Box::new(crate::hud_editor::DebugOptions),
@@ -278,10 +287,10 @@ impl Screen for ModList {
                     .game
                     .configs
                     .iter()
-                    .any(|d| on_config_screen(d, Some(&id)));
+                    .any(|d| on_config_screen(d, &Shown::Mod(id.clone())));
                 let b = button(ui, cx, "mods.settings", &[], 120.0, move |c| {
                     c.requests
-                        .push(Request::Open(Box::new(ConfigScreen { ns: Some(id.clone()) })))
+                        .push(Request::Open(Box::new(ConfigScreen { shown: Shown::Mod(id.clone()) })))
                 });
                 if let Kind::Button { enabled, .. } = &mut ui.nodes[b].kind {
                     *enabled = has_settings;
@@ -346,38 +355,46 @@ impl Screen for Profile {
     }
 }
 
-/// A screen a mod built (`Registry::screen`).
-pub struct ModScreen(crate::registry::ScreenDef);
+/// A menu's screen opened on the client (`Client::menu_open`), by its menu.
+pub struct ModScreen(u32);
+
+impl ModScreen {
+    fn def(&self) -> &'static crate::registry::MenuDef {
+        &crate::content::content().game.menus[self.0 as usize]
+    }
+    fn has(&self, flag: u32) -> bool {
+        self.def().flags & flag != 0
+    }
+}
 
 impl Screen for ModScreen {
     fn name(&self) -> &str {
-        &self.0.name
+        &self.def().name
     }
 
     fn pauses(&self) -> bool {
-        self.0.flags & weft_abi::screen_flags::PAUSES != 0
+        self.has(crate::tag_bits::screen::PAUSES)
     }
 
     fn escape_closes(&self) -> bool {
-        self.0.flags & weft_abi::screen_flags::KEEP_ON_ESCAPE == 0
+        !self.has(crate::tag_bits::screen::KEEP_ON_ESCAPE)
     }
 
     fn closes_on_respawn(&self) -> bool {
-        self.0.flags & weft_abi::screen_flags::CLOSES_ON_RESPAWN != 0
+        self.has(crate::tag_bits::screen::CLOSES_ON_RESPAWN)
     }
 
     fn shows_chat(&self) -> bool {
-        self.0.flags & weft_abi::screen_flags::SHOWS_CHAT != 0
+        self.has(crate::tag_bits::screen::SHOWS_CHAT)
     }
 
     fn keys_first(&self) -> bool {
-        self.0.flags & weft_abi::screen_flags::KEYS_FIRST != 0 || self.0.on_key.is_some()
+        self.has(crate::tag_bits::screen::KEYS_FIRST) || self.def().on_key.is_some()
     }
 
     fn key(&mut self, key: Key, ctx: &mut Ctx) -> bool {
-        if self.0.on_key.is_some() {
-            ctx.requests
-                .push(Request::ModKey(self.0.owner, self.0.on_key, key.id()));
+        if let Some((by, cb)) = self.def().on_key {
+            ctx.requests.push(Request::ModKey(by, cb, key.id()));
         }
         false
     }
@@ -386,7 +403,9 @@ impl Screen for ModScreen {
         let bg = if cx.in_game { "overlay" } else { "background" };
         ui.root_style(Style::default().stretch());
         ui.panel(bg, Style::default().grow().center(), |ui| {
-            crate::client::modui::build(ui, cx.lang, Some(cx.input), self.0.owner, self.0.cb, cx.client);
+            if let Some((by, cb)) = self.def().screen {
+                crate::client::modui::build(ui, cx.lang, Some(cx.input), by, cb, cx.client);
+            }
         });
     }
 }
@@ -395,6 +414,18 @@ impl Screen for ModScreen {
 
 pub fn label(ui: &mut Ui, cx: &BuildCx, key: &str, args: &[Arg], class: &str) -> NodeId {
     ui.text(cx.t(key, args), class)
+}
+
+/// A button whose text `text` says each frame (a choice going round).
+pub fn bound_button(
+    ui: &mut Ui,
+    width: f32,
+    text: impl Fn() -> (String, Vec<Arg>) + 'static,
+    action: impl Fn(&mut Ctx) + 'static,
+) -> NodeId {
+    ui.button("button", Style::default().min_w(width).min_h(20.0).pad_xy(6.0, 4.0), Rc::new(action), |ui| {
+        ui.text_bound("button", Box::new(move |_: &Ctx| text()));
+    })
 }
 
 pub fn button(ui: &mut Ui, cx: &BuildCx, key: &str, args: &[Arg], width: f32, action: impl Fn(&mut Ctx) + 'static) -> NodeId {
@@ -554,7 +585,7 @@ impl Screen for Pause {
 
 pub struct SettingsScreen;
 
-fn on_off(v: bool) -> Arg {
+pub fn on_off(v: bool) -> Arg {
     Arg::Key(if v { "settings.on".into() } else { "settings.off".into() })
 }
 
@@ -606,6 +637,17 @@ impl Screen for SettingsScreen {
                         r.settings.set("vsync", !r.settings.vsync() as u8 as f64);
                         r.handle(vec![Request::Rebuild]);
                     });
+                    let chosen = s.renderer();
+                    let key = if chosen == cx.renderer { "settings.renderer" } else { "settings.renderer.restart" };
+                    d.button(key, &[Arg::Key(format!("settings.renderer.{chosen}"))], 300.0, false, |r| {
+                        let id = crate::config::by_name("core:renderer").unwrap_or(0);
+                        let count = crate::content::content().game.configs[id as usize]
+                            .choices
+                            .len()
+                            .max(1);
+                        crate::config::set(id, (crate::config::get(id) + 1.0) % count as f64);
+                        r.handle(vec![Request::Rebuild]);
+                    });
 
                     let row = abi::UiNode {
                         row: 1,
@@ -630,9 +672,18 @@ impl Screen for SettingsScreen {
                             d.button("settings.chat", &[], 147.0, true, screen("core:chat_settings"));
                             d.button("settings.hud", &[], 147.0, true, screen("core:hud_editor"));
                         });
+                        // Who may change them with `/rule` may here.
+                        if cx
+                            .client
+                            .is_some_and(|cl| cl.permission >= weft_abi::permission::ADMIN)
+                        {
+                            d.button("world.rules", &[], 300.0, false, screen("core:world_rules"));
+                        }
                     } else {
                         d.button("settings.chat", &[], 300.0, false, screen("core:chat_settings"));
                     }
+                    // Below the screens a short window must show without scrolling.
+                    d.slider("settings.fov_effects", "core:fov_effects", 100.0);
                     d.button("settings.first_person_model", &[on_off(s.first_person_model())], 300.0, false, |r| {
                         r.settings
                             .set("first_person_model", !r.settings.first_person_model() as u8 as f64);
@@ -695,7 +746,7 @@ impl Screen for ChatSettings {
 
 // ---------------------------------------------------------------- settings mods declare
 
-/// Mods that declared settings (`Host::reg_config`).
+/// Mods that declared settings (`entry_kind::CONFIG`).
 pub struct ModSettings;
 
 impl Screen for ModSettings {
@@ -717,7 +768,7 @@ impl Screen for ModSettings {
                 d.name
                     .split_once(':')
                     .map(|x| x.0)
-                    .filter(|ns| on_config_screen(d, Some(ns)))
+                    .filter(|ns| on_config_screen(d, &Shown::Mod(ns.to_string())))
             })
             .filter(|ns| *ns != "core")
             .collect();
@@ -731,7 +782,7 @@ impl Screen for ModSettings {
                 let ns = ns.to_string();
                 button(ui, cx, "settings.mods.entry", &[name], 220.0, move |c| {
                     c.requests
-                        .push(Request::Open(Box::new(ConfigScreen { ns: Some(ns.clone()) })))
+                        .push(Request::Open(Box::new(ConfigScreen { shown: Shown::Mod(ns.clone()) })))
                 });
             }
             button(ui, cx, "menu.done", &[], 200.0, |c| c.requests.push(Request::Close));
@@ -739,26 +790,38 @@ impl Screen for ModSettings {
     }
 }
 
-/// Whether a setting shows on the screen of mod `ns`, or with `None` on the Sound screen, where
-/// the volumes of every mod are. Text settings have their own screens (keys, packs, profile).
-fn on_config_screen(d: &crate::config::ConfigDef, ns: Option<&str>) -> bool {
+/// Which settings a `ConfigScreen` shows: every mod's volumes, a mod's own, the world's rules.
+pub enum Shown {
+    Sound,
+    Mod(String),
+    World,
+}
+
+/// Whether a setting shows on that screen. Text settings have their own screens (keys, packs,
+/// profile), and a mod's rules are with the world's.
+fn on_config_screen(d: &crate::config::ConfigDef, shown: &Shown) -> bool {
+    use weft_abi::{config_kind as ck, config_scope as scope};
     let Some((owner, short)) = d.name.split_once(':') else { return false };
     let volume = short.starts_with("volume_");
-    match ns {
-        None => volume,
-        Some(ns) => owner == ns && !volume && d.kind != weft_abi::config_kind::TEXT,
+    match shown {
+        Shown::Sound => volume,
+        Shown::Mod(ns) => owner == ns && !volume && d.kind != ck::TEXT && d.scope != scope::WORLD,
+        Shown::World => d.scope == scope::WORLD && d.kind != ck::TEXT,
     }
 }
 
-/// Settings built from their declarations: toggles, sliders, choices. Those of mod `ns`, or with
-/// `None` the sound volumes.
+/// Settings built from their declarations: toggles, sliders, choices.
 pub struct ConfigScreen {
-    pub ns: Option<String>,
+    pub shown: Shown,
 }
 
 impl Screen for ConfigScreen {
     fn name(&self) -> &str {
-        "core:config"
+        match self.shown {
+            Shown::Sound => "core:sound",
+            Shown::Mod(_) => "core:config",
+            Shown::World => "core:world_rules",
+        }
     }
 
     fn pauses(&self) -> bool {
@@ -768,9 +831,16 @@ impl Screen for ConfigScreen {
     fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
         use weft_abi::config_kind as ck;
         let c = crate::content::content();
-        let ns = self.ns.as_deref();
-        frame(ui, cx, if ns.is_some() { "settings.mods.title" } else { "settings.sound" }, |ui| {
-            if let Some(ns) = ns {
+        let shown = &self.shown;
+        let title = match shown {
+            Shown::Sound => "settings.sound",
+            Shown::Mod(_) => "settings.mods.title",
+            Shown::World => "world.rules",
+        };
+        // Rules a world was made with locked stay as they are while it is played.
+        let rules_locked = matches!(shown, Shown::World) && cx.in_game && crate::config::get(c.game.rules_locked) != 0.0;
+        frame(ui, cx, title, |ui| {
+            if let Shown::Mod(ns) = shown {
                 label(ui, cx, "settings.mods.of", &[Arg::Name(text::Name::Mod(ns.to_string()))], "default");
             }
             let list = ui.panel(
@@ -790,13 +860,14 @@ impl Screen for ConfigScreen {
                         .configs
                         .iter()
                         .enumerate()
-                        .filter(|(_, d)| on_config_screen(d, ns))
+                        .filter(|(_, d)| on_config_screen(d, shown))
                         .collect();
-                    listed.sort_by_key(|(_, d)| d.name != "core:volume_master");
+                    // The master volume first, the damage rules together at the end.
+                    listed.sort_by_key(|(_, d)| (d.name != "core:volume_master", d.name.starts_with("core:damage.")));
                     for (id, d) in listed {
                         let id = id as u32;
                         let key = text::lang_key("config", &d.name);
-                        let locked = d.synced() && cx.remote;
+                        let locked = (d.synced() && cx.remote) || rules_locked;
                         let show = |d: &crate::config::ConfigDef, key: &str, v: f64| -> Arg {
                             match d.kind {
                                 ck::BOOL => on_off(v != 0.0),
@@ -847,11 +918,13 @@ impl Screen for ConfigScreen {
                                 );
                                 if !locked {
                                     let (min, range) = (d.min, (d.max - d.min).max(1e-9));
+                                    let unit = if d.kind == weft_abi::config_kind::INT { 1.0 } else { range / 100.0 };
                                     ui.add(
                                         Kind::Slider {
                                             value: 0.0,
                                             bind: Box::new(move |_: &Ctx| ((crate::config::get(id) - min) / range) as f32),
                                             on_change: Rc::new(move |_: &mut Ctx, f: f32| crate::config::set(id, min + f as f64 * range)),
+                                            steps: d.steps(unit),
                                         },
                                         Style::default().h(20.0).stretch(),
                                     );
@@ -862,7 +935,7 @@ impl Screen for ConfigScreen {
                         let mut spans = if cx.lang.has(&tip) { cx.t(&tip, &[]) } else { Vec::new() };
                         for (on, note) in [
                             (locked, "settings.config_synced"),
-                            (d.flags & weft_abi::config_flags::RESTART_REQUIRED != 0, "settings.config_restart"),
+                            (d.flags & crate::tag_bits::config::RESTART_REQUIRED != 0, "settings.config_restart"),
                         ] {
                             if on {
                                 if !spans.is_empty() {
@@ -963,7 +1036,7 @@ impl Controls {
         Self::change(ctx, &action, slot, |old| {
             let trigger = match (double, old.map(|b| b.trigger)) {
                 (true, _) => Trigger::Double,
-                (false, Some(Trigger::Toggle)) => Trigger::Toggle,
+                (false, Some(t @ (Trigger::Toggle | Trigger::Tap))) => t,
                 _ => Trigger::Hold,
             };
             Some(Binding { chord, trigger })
@@ -1000,9 +1073,13 @@ impl Screen for Controls {
             ctx.requests.push(Request::Rebuild);
             return true;
         }
-        let chord = crate::input::Chord { key, mods: ctx.input.mods() };
+        let chord = crate::input::Chord { key, mods: ctx.input.mods(), with: None };
         match self.first {
             Some((first, _)) if first == chord => self.bind(ctx, chord, true),
+            // Pressed while the first is still down: that one is held with it (F3+T).
+            Some((first, _)) if first.with.is_none() && ctx.input.held_key(first.key) => {
+                self.bind(ctx, crate::input::Chord { with: Some(first.key), ..chord }, false)
+            }
             Some((first, _)) => self.bind(ctx, first, false),
             None => self.first = Some((chord, std::time::Instant::now())),
         }
@@ -1043,7 +1120,7 @@ impl Screen for Controls {
                 old.map(|b| match b.trigger {
                     Trigger::Hold => Binding { trigger: Trigger::Toggle, ..b },
                     Trigger::Toggle => Binding { trigger: Trigger::Hold, ..b },
-                    Trigger::Double => b,
+                    Trigger::Double | Trigger::Tap => b,
                 })
             });
         } else {
@@ -1056,9 +1133,6 @@ impl Screen for Controls {
         let conflicts = cx.input.conflicts();
         let waiting = self.waiting.clone();
         frame(ui, cx, "controls.title", |ui| {
-            if let Some((a, _)) = &waiting {
-                label(ui, cx, "controls.press", &[Arg::Name(text::Name::Key(a.clone()))], "default");
-            }
             let list = ui.panel(
                 "panel",
                 Style::default()

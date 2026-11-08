@@ -1,0 +1,13 @@
+[package]
+name = "weft_wgpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+weft_render.workspace = true
+wgpu.workspace = true
+naga.workspace = true
+pollster.workspace = true
+raw-window-handle.workspace = true
+log.workspace = true

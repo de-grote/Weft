@@ -74,7 +74,7 @@ pub const COMMANDS: &[(&str, &str, Handler, u32)] = &[
     ("weather", "<weather:word(#core:weathers)> [ticks:int]", weather, p::GAME_MASTER),
     ("op", "<who:targets> [level:int]", op, p::ADMIN),
     ("deop", "<who:targets>", deop, p::ADMIN),
-    ("rule", "[name:word(#core:rules)] [value:int]", rule, p::ADMIN),
+    ("rule", "[name:word(#core:rules)] [value:float]", rule, p::ADMIN),
     (
         "title",
         "<who:targets> title <text:text> | <who:targets> subtitle <text:text> | <who:targets> hint <text:text> | <who:targets> show <x:float> <y:float> <size:float> <text:text> | <who:targets> times <fade_in:float> <stay:float> <fade_out:float> | <who:targets> clear | <who:targets> reset",
@@ -497,8 +497,12 @@ fn rule(_s: &mut Server, x: &Ctx) -> Vec<Msg> {
     else {
         return say("rule.unknown", vec![text(name)]);
     };
-    if let Some(v) = a.int("value") {
-        crate::config::set(id, v as f64);
+    if let Some(v) = a.float("value") {
+        // A world made with its rules locked keeps them.
+        if crate::config::get(c.game.rules_locked) != 0.0 {
+            return say("rule.locked", Vec::new());
+        }
+        crate::config::set(id, v);
     }
     value(id, d)
 }

@@ -78,7 +78,7 @@ struct WireSet {
 /// toward what it feeds or what feeds it, by the rules of the simulation.
 fn reaches_device(c: &Content, state: u32, e: u8) -> bool {
     let s = &c.states[state as usize].signal;
-    wire::reads(s, e ^ 1) || wire::gives(s, e ^ 1)
+    (s.inputs | s.gives) & (1 << (e ^ 1)) != 0
 }
 
 /// The axes a face's quad goes along: u, v.
@@ -275,7 +275,7 @@ impl WireSet {
             let (dot, line) = (textures.texture(dot_tex), textures.texture(line_tex));
             let light = world.light(cell);
             let power = self.power.get(&cell).copied().unwrap_or([0; 6]);
-            for f in (0..6u8).filter(|f| m & (1 << f) != 0) {
+            for f in wire::dirs(m) {
                 let piece = self.numbers.len() as u32;
                 self.index.insert((cell, f), piece);
                 self.numbers.push(power[f as usize] as u32);

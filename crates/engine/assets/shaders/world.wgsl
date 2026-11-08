@@ -321,50 +321,78 @@ fn fs_translucent(in: VOut) -> @location(0) vec4<f32> {
     return shade(in, albedo);
 }
 
-// Distant terrain (`client::lod`): a record is the `dir` face of a box in its tile, drawn in the
-// average color of its texture (the smallest mip), full sky light. Its pixels in columns whose
-// cubes show their ground are dropped (`lod_mask`); it sits a little lower so the cubes win
-// along the edges.
+// Distant terrain (`client::lod`): a record is the `dir` face of a box in its tile, textured and
+// tinted like a near face, full sky light. Its pixels in columns whose cubes show their ground
+// are dropped (`lod_mask`); it sits a little lower so the cubes win along the edges.
+fn lod_uv(dir: u32, p: vec3<f32>) -> vec2<f32> {
+    if dir == 2u || dir == 3u {
+        return p.xz;
+    }
+    if dir == 0u {
+        return vec2(p.z, -p.y);
+    }
+    if dir == 1u {
+        return vec2(-p.z, -p.y);
+    }
+    if dir == 4u {
+        return vec2(-p.x, -p.y);
+    }
+    return vec2(p.x, -p.y);
+}
+
 @vertex
 fn vs_lod(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
     let f = vi / 4u;
-    let c = vi % 4u;
     let w0 = records[f * 4u];
     let w1 = records[f * 4u + 1u];
     let w2 = records[f * 4u + 2u];
     let w3 = records[f * 4u + 3u];
     let dir = lod_dir(w0);
-    let lo = lod_pos(w0, w2) - vec3(0.0, 0.125, 0.0);
-    let size = lod_size(w2, w3);
-    let local = lo + CORNERS[dir * 4u + c] * size;
+    let a = lod_ao(w3);
+    var c = vi % 4u;
+    if a.x + a.z < a.y + a.w {
+        c = (c + 1u) % 4u;
+    }
+    let local = lod_pos(w0, w2) + lod_corner(w0, w2, w3, CORNERS[dir * 4u + c]) - vec3(0.0, 0.125, 0.0);
     let pos = finish(local, origins[ii]);
     var out: VOut;
     out.clip = scene.view_proj * pos;
     out.dist = length(pos.xyz);
-    out.uv = pos.xz;
-    let fr = texture_frame(w1 & FACE_TEX_MASK);
+    let o = origins[ii] + g.cam_cube;
+    let world = vec3<f32>(o.xyz * 16) + local + vec3(0.0, 0.125, 0.0);
+    out.uv = lod_uv(dir, world);
+    out.pos = world - vec3(0.0, 0.125, 0.0);
+    let tex_id = w1 & FACE_TEX_MASK;
+    let fr = texture_frame(tex_id);
     out.size = fr.size;
     out.layer = fr.a;
     out.layer2 = fr.b;
     out.blend = fr.blend;
     out.glow = 0xffffffffu;
     out.slot = 0u;
-    out.overlay = 0u;
-    out.light = vec4(1.0, 0.0, 0.0, 0.0);
-    let o = origins[ii] + g.cam_cube;
-    out.pos = vec3<f32>(o.xyz * 16) + local;
+    out.light = vec4(1.0, lod_light(w0, w2, w3));
     let kind = lod_tint(w0);
     var tint = vec3(1.0);
     if kind != 0u {
         tint = unpack_rgb(biomes[(w1 >> FACE_BIOME_SHIFT) * g.extra.z + kind - 1u]);
     }
     out.tint = tint;
-    out.color = tint * SHADE[dir];
+    let shade = SHADE[dir] * AO[a[c]];
+    let ov = frames[g.extra.x + tex_id];
+    if ov != 0u {
+        out.overlay = texture_frame(ov - 1u).a + 1u;
+        out.color = vec3(shade);
+    } else {
+        out.overlay = 0u;
+        out.color = tint * shade;
+    }
     return out;
 }
 
 @fragment
 fn fs_lod(in: VOut) -> @location(0) vec4<f32> {
+    let du = dpdx(in.uv);
+    let dv = dpdy(in.uv);
     let half = i32(g.extra.w);
     let col = vec2<i32>(floor(in.pos.xz / 16.0));
     let d = col - g.cam_cube.xz;
@@ -375,9 +403,11 @@ fn fs_lod(in: VOut) -> @location(0) vec4<f32> {
             discard;
         }
     }
-    var albedo = textureSampleLevel(textures[in.layer], linear_mipped, vec2(0.5), 16.0);
-    if in.blend > 0.0 {
-        albedo = mix(albedo, textureSampleLevel(textures[in.layer2], linear_mipped, vec2(0.5), 16.0), in.blend);
-    }
+    let uv = fract(in.uv);
+    let nuv = nearest_uv(in.size, uv, du, dv);
+    var albedo = with_overlay(in, sample(in, nuv, du, dv), nuv, du, dv);
+    let cover = smoothstep(0.1, 0.6, albedo.a);
+    let tinted = any(in.tint != vec3(1.0));
+    albedo = vec4(mix(select(albedo.rgb, vec3(1.0), tinted), albedo.rgb, cover), 1.0);
     return vec4(shade(in, albedo).rgb, 1.0);
 }

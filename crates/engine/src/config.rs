@@ -12,6 +12,7 @@ use std::sync::{Mutex, OnceLock, RwLock};
 use weft_abi::{config_kind as ck, config_scope as scope};
 
 use crate::content::content;
+use crate::entries::{Entry, RawEntry};
 
 #[derive(Clone, Debug)]
 pub struct ConfigDef {
@@ -55,6 +56,14 @@ impl ConfigDef {
         }
     }
 
+    /// How many steps a slider of it goes through: its own, or `unit` (what one shown digit
+    /// is worth) where it has none or a finer one.
+    pub fn steps(&self, unit: f64) -> u32 {
+        ((self.max - self.min).abs() / self.step.max(unit))
+            .round()
+            .clamp(1.0, u32::MAX as f64) as u32
+    }
+
     fn parse(&self, s: &str) -> Option<f64> {
         let s = s.trim();
         match self.kind {
@@ -78,25 +87,6 @@ impl ConfigDef {
                 s.trim_end_matches('0').trim_end_matches('.').to_string()
             }
         }
-    }
-
-    pub fn number(name: &str, kind: u32, default: f64, min: f64, max: f64, step: f64) -> ConfigDef {
-        ConfigDef {
-            name: name.into(),
-            kind,
-            default,
-            min,
-            max,
-            step,
-            choices: Vec::new(),
-            flags: 0,
-            scope: scope::CLIENT,
-            text: String::new(),
-        }
-    }
-
-    pub fn text(name: &str, default: &str) -> ConfigDef {
-        ConfigDef { text: default.into(), ..ConfigDef::number(name, ck::TEXT, 0.0, 0.0, 0.0, 0.0) }
     }
 }
 
@@ -373,66 +363,117 @@ pub fn load_world(saved: &[(String, f64)]) {
 /// Settings the engine itself reads: the client's options, `core:mob_spawning` for worlds, and
 /// a binding per key (`core:key.<action>`, from `keys`: action and default key); each sound
 /// category adds its volume (`volume`).
-pub fn engine_configs(keys: &[(String, String)]) -> Vec<ConfigDef> {
+pub fn engine_configs(keys: &[(String, String)]) -> Vec<RawEntry> {
+    use weft_abi::comp::config as c;
     let user = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "Player".into());
     let mut out = vec![
         volume("core:volume_master"),
-        ConfigDef::text("core:language", &crate::settings::system_language()),
-        ConfigDef::number("core:gui_scale", ck::INT, 0.0, 0.0, 16.0, 1.0),
-        ConfigDef::number("core:view_distance", ck::INT, 12.0, 2.0, 64.0, 1.0),
+        string("core:language", &crate::settings::system_language()),
+        number("core:gui_scale", ck::INT, 0.0, 0.0, 16.0, 1.0),
+        number("core:view_distance", ck::INT, 12.0, 2.0, 64.0, 1.0),
         // Distant terrain beyond the view (`client::lod`), in cubes; 0 off.
-        ConfigDef::number("core:lod_distance", ck::INT, 256.0, 0.0, 2048.0, 16.0),
+        number("core:lod_distance", ck::INT, 256.0, 0.0, 2048.0, 16.0),
         // Blocks clouds float above where their dimension puts them.
-        ConfigDef::number("core:cloud_height", ck::INT, 0.0, 0.0, 512.0, 8.0),
+        number("core:cloud_height", ck::INT, 0.0, 0.0, 512.0, 16.0),
         // Vanilla's: in GUI pixels, and percent of the dark behind the text.
-        ConfigDef::number("core:chat_width", ck::INT, 320.0, 40.0, 1000.0, 10.0),
-        ConfigDef::number("core:chat_height", ck::INT, 180.0, 20.0, 1000.0, 10.0),
-        ConfigDef::number("core:chat_height_closed", ck::INT, 110.0, 20.0, 1000.0, 10.0),
-        ConfigDef::number("core:chat_opacity", ck::INT, 50.0, 0.0, 100.0, 5.0),
-        ConfigDef {
-            kind: ck::CHOICE,
-            choices: vec!["all".into(), "system".into(), "hidden".into()],
-            ..ConfigDef::number("core:chat_visibility", ck::CHOICE, 0.0, 0.0, 2.0, 0.0)
-        },
-        ConfigDef::number("core:vsync", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
-        ConfigDef::number("core:fullscreen", ck::BOOL, 0.0, 0.0, 1.0, 0.0),
-        ConfigDef::number("core:terrain_gpu", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
-        ConfigDef::number("core:terrain_check", ck::BOOL, 0.0, 0.0, 1.0, 0.0),
-        ConfigDef::number("core:client_visibility", ck::INT, 0.0, 0.0, 2.0, 1.0),
-        ConfigDef::number("core:fov", ck::FLOAT, 70.0, 30.0, 110.0, 1.0),
-        ConfigDef::number("core:sensitivity", ck::FLOAT, 1.0, 0.01, 3.0, 0.05),
-        ConfigDef::number("core:brightness", ck::FLOAT, 0.5, 0.0, 1.0, 0.0),
-        ConfigDef::number("core:debug_groups", ck::INT, u32::MAX as f64, 0.0, u32::MAX as f64, 1.0),
-        ConfigDef::number("core:invert_y", ck::BOOL, 0.0, 0.0, 1.0, 0.0),
-        ConfigDef::text("core:debug_lines", ""),
-        ConfigDef::text("core:name", &user),
-        ConfigDef::text("core:relays", ""),
+        number("core:chat_width", ck::INT, 320.0, 40.0, 1000.0, 1.0),
+        number("core:chat_height", ck::INT, 180.0, 20.0, 1000.0, 1.0),
+        number("core:chat_height_closed", ck::INT, 110.0, 20.0, 1000.0, 1.0),
+        number("core:chat_opacity", ck::INT, 50.0, 0.0, 100.0, 1.0),
+        number("core:chat_visibility", ck::CHOICE, 0.0, 0.0, 2.0, 0.0)
+            .set(c::CHOICES, ["all", "system", "hidden"].map(String::from).to_vec()),
+        number("core:vsync", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
+        // Taken at the next start; the others are tried if it can't run.
+        number("core:renderer", ck::CHOICE, 0.0, 0.0, 1.0, 0.0).set(c::CHOICES, ["vulkan", "wgpu"].map(String::from).to_vec()),
+        number("core:fullscreen", ck::BOOL, 0.0, 0.0, 1.0, 0.0),
+        number("core:terrain_gpu", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
+        number("core:terrain_check", ck::BOOL, 0.0, 0.0, 1.0, 0.0),
+        number("core:client_visibility", ck::INT, 0.0, 0.0, 2.0, 1.0),
+        number("core:fov", ck::FLOAT, 70.0, 30.0, 110.0, 1.0),
+        // How much sprinting, flying and speed widen the view, as vanilla's FOV effects.
+        number("core:fov_effects", ck::FLOAT, 1.0, 0.0, 1.0, 0.0),
+        number("core:sensitivity", ck::FLOAT, 1.0, 0.01, 3.0, 0.01),
+        number("core:brightness", ck::FLOAT, 0.5, 0.0, 1.0, 0.0),
+        number("core:debug_groups", ck::INT, u32::MAX as f64, 0.0, u32::MAX as f64, 1.0),
+        number("core:invert_y", ck::BOOL, 0.0, 0.0, 1.0, 0.0),
+        string("core:debug_lines", ""),
+        string("core:name", &user),
+        string("core:relays", ""),
         // Where others reach this game by address; forward it, TCP and UDP.
-        ConfigDef::number("core:server_port", ck::INT, 27182.0, 1.0, 65535.0, 1.0),
-        ConfigDef::text("core:resource_packs", ""),
-        ConfigDef::text("core:shader_pack", ""),
-        ConfigDef { scope: scope::WORLD, ..ConfigDef::number("core:mob_spawning", ck::BOOL, 1.0, 0.0, 1.0, 0.0) },
-        ConfigDef { scope: scope::WORLD, ..ConfigDef::number("core:simulation_distance", ck::INT, 8.0, 2.0, 64.0, 1.0) },
+        number("core:server_port", ck::INT, 27182.0, 1.0, 65535.0, 1.0),
+        string("core:resource_packs", ""),
+        string("core:shader_pack", ""),
+        number("core:mob_spawning", ck::BOOL, 1.0, 0.0, 1.0, 0.0).set(c::SCOPE, scope::WORLD),
+        number("core:simulation_distance", ck::INT, 8.0, 2.0, 64.0, 1.0).set(c::SCOPE, scope::WORLD),
         // Most cubes mods' tickets keep loaded with no player near (`Host::force_load`).
-        ConfigDef { scope: scope::WORLD, ..ConfigDef::number("core:max_forced_cubes", ck::INT, 4096.0, 0.0, 1048576.0, 1.0) },
-        ConfigDef::number("core:first_person_model", ck::BOOL, 0.0, 0.0, 1.0, 0.0),
-        ConfigDef::number("core:show_avatars", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
-        ConfigDef::number("core:occlusion_culling", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
-        ConfigDef { scope: scope::WORLD, ..ConfigDef::number("core:allow_avatars", ck::BOOL, 1.0, 0.0, 1.0, 0.0) },
-        ConfigDef { scope: scope::WORLD, ..ConfigDef::number("core:keep_inventory", ck::BOOL, 0.0, 0.0, 1.0, 0.0) },
+        number("core:max_forced_cubes", ck::INT, 4096.0, 0.0, 1048576.0, 1.0).set(c::SCOPE, scope::WORLD),
+        number("core:first_person_model", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
+        number("core:show_avatars", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
+        number("core:occlusion_culling", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
+        number("core:allow_avatars", ck::BOOL, 1.0, 0.0, 1.0, 0.0).set(c::SCOPE, scope::WORLD),
+        number("core:keep_inventory", ck::BOOL, 0.0, 0.0, 1.0, 0.0).set(c::SCOPE, scope::WORLD),
+        // Deaths a player has before staying a spectator (0: no end); 1 is hardcore.
+        rule("core:lives", ck::INT, 0.0, 0.0, 100.0),
+        // Set when the world is made, nobody changes the rules after.
+        rule("core:rules_locked", ck::BOOL, 0.0, 0.0, 1.0),
     ];
     out.extend(
         keys.iter()
-            .map(|(action, key)| ConfigDef::text(&format!("core:key.{action}"), key)),
+            .map(|(action, key)| string(&format!("core:key.{action}"), key)),
     );
     out
 }
 
+/// A world rule (`/rule`).
+pub fn rule(name: &str, kind: u32, default: f64, min: f64, max: f64) -> RawEntry {
+    let step = if kind == ck::FLOAT { 0.0 } else { 1.0 };
+    number(name, kind, default, min, max, step).set(weft_abi::comp::config::SCOPE, scope::WORLD)
+}
+
 /// A volume setting in percent.
-pub fn volume(name: &str) -> ConfigDef {
-    ConfigDef::number(name, ck::INT, 100.0, 0.0, 100.0, 1.0)
+pub fn volume(name: &str) -> RawEntry {
+    number(name, ck::INT, 100.0, 0.0, 100.0, 1.0)
+}
+
+fn number(name: &str, kind: u32, default: f64, min: f64, max: f64, step: f64) -> RawEntry {
+    use weft_abi::comp::config as c;
+    RawEntry::engine(weft_abi::entry_kind::CONFIG, name)
+        .set(c::KIND, kind)
+        .set(c::DEFAULT, default)
+        .set(c::RANGE, [min, max])
+        .set(c::STEP, step)
+}
+
+fn string(name: &str, default: &str) -> RawEntry {
+    number(name, ck::TEXT, 0.0, 0.0, 0.0, 0.0).set(weft_abi::comp::config::TEXT, default.to_string())
+}
+
+/// A setting from its entry. The engine's defaults stand as written; a mod's are made to fit.
+pub fn bake(e: &Entry, errors: &mut Vec<String>) -> ConfigDef {
+    use weft_abi::comp::config as c;
+    let [min, max] = e.or(c::RANGE, [0.0, 1.0]);
+    let mut d = ConfigDef {
+        name: e.name.clone(),
+        kind: e.or(c::KIND, ck::BOOL),
+        default: e.or(c::DEFAULT, 0.0),
+        min,
+        max,
+        step: e.or(c::STEP, 0.0),
+        choices: e.or(c::CHOICES, Vec::new()),
+        flags: e.flags(crate::tag_bits::config::TAGS),
+        scope: e.or(c::SCOPE, scope::CLIENT),
+        text: e.text(c::TEXT).unwrap_or_default().to_string(),
+    };
+    if d.kind == ck::TEXT && d.scope != scope::CLIENT {
+        errors.push(format!("setting {}: text settings are the client's own", d.name));
+        d.scope = scope::CLIENT;
+    }
+    if e.owner != crate::registry::ENGINE {
+        d.default = d.fit(d.default);
+    }
+    d
 }
 
 #[cfg(test)]
@@ -441,7 +482,8 @@ mod tests {
 
     #[test]
     fn values_fit_their_setting() {
-        let d = ConfigDef::number("t:x", ck::INT, 5.0, 0.0, 10.0, 2.0);
+        let f = crate::entries::fold("setting", vec![number("t:x", ck::INT, 5.0, 0.0, 10.0, 2.0)], &|_| String::new(), &mut Vec::new());
+        let d = bake(&f.entries[0], &mut Vec::new());
         assert_eq!((d.fit(3.2), d.fit(99.0), d.fit(f64::NAN)), (4.0, 10.0, 5.0));
         let c = ConfigDef { kind: ck::CHOICE, choices: vec!["low".into(), "high".into()], ..d.clone() };
         assert_eq!((c.parse("high"), c.parse("mid"), c.show(0.0)), (Some(1.0), None, "low".into()));

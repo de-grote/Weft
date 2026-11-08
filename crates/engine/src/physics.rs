@@ -216,7 +216,7 @@ impl<'a> Body<'a> {
             None => Aabb::around(pos, size.0, size.1),
         };
         let blocks = built.map(|s| (s, place));
-        Some(Body { id, aabb, delta, carry: kind.carry_height as f64, crushes: kind.is(weft_abi::entity_flags::CRUSHES), blocks })
+        Some(Body { id, aabb, delta, carry: kind.carry_height as f64, crushes: kind.is(crate::tag_bits::entity::CRUSHES), blocks })
     }
 
     /// Its solid boxes touching `area`, in world space (until `f` returns true).
@@ -638,8 +638,8 @@ pub fn ray_aabb(o: DVec3, d: DVec3, b: &Aabb, max: f64) -> Option<f64> {
     (t0 <= t1).then_some(t0)
 }
 
-/// Amanatides-Woo traversal. Blocks are hit where the ray crosses their selection boxes; blocks
-/// the ray starts inside are skipped.
+/// Amanatides-Woo traversal. Blocks are hit where the ray crosses their selection boxes; of
+/// blocks the ray starts inside, only what is solid where it starts (a head stuck in a block).
 /// First targetable block along the ray; with `liquids` liquids stop it too.
 pub fn raycast(c: &Content, block: &impl Cells, origin: DVec3, dir: DVec3, max: f64, liquids: bool) -> Option<Hit> {
     let dir = dir.normalize();
@@ -663,11 +663,22 @@ pub fn raycast(c: &Content, block: &impl Cells, origin: DVec3, dir: DVec3, max: 
                 if s.flags & bf::NOT_TARGETABLE != 0 && !wanted {
                     continue;
                 }
-                let near = s
-                    .selection
-                    .iter()
-                    .filter_map(|b| ray_box(local, dir, b, max))
-                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                let stuck = t == 0.0
+                    && s.collision
+                        .iter()
+                        .any(|b| (0..3).all(|i| (b[i] as f64..b[i + 3] as f64).contains(&local[i])));
+                let near = if stuck {
+                    // Entered, as it were, through the face it looks most toward.
+                    let axis = (0..3)
+                        .max_by(|&a, &b| dir[a].abs().total_cmp(&dir[b].abs()))
+                        .unwrap_or(0);
+                    Some((0.0, (axis * 2) as u8 + (dir[axis] < 0.0) as u8))
+                } else {
+                    s.selection
+                        .iter()
+                        .filter_map(|b| ray_box(local, dir, b, max))
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                };
                 if let Some((dist, face)) = near {
                     if wanted {
                         return Some(Hit { frame: 0, block: p, face, state, dist });

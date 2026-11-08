@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use weft_abi::{self as abi, verdict};
 
 use super::dim::Dim;
-use crate::content::Content;
+use crate::content::{Content, SourceMod};
 
 thread_local! {
     static EXPLAIN: RefCell<String> = const { RefCell::new(String::new()) };
@@ -209,10 +209,15 @@ pub const BLOCK_REACH: u32 = 6;
 pub const ENTITY_REACH: u32 = 7;
 pub const MINING_SPEED: u32 = 8;
 pub const FOV: u32 = 9;
+pub const CAN_FLY: u32 = 10;
 
 impl Dim {
+    /// A player's base of an attribute that is a rule is the rule's (`comp::attribute::RULE`).
     fn base_attribute(&self, c: &Content, entity: u64, attr: u32) -> Option<f64> {
         let e = self.entities.get(entity)?;
+        if let Some(rule) = c.game.attr_rules[attr as usize].filter(|_| e.player) {
+            return Some(crate::config::get(rule));
+        }
         let def = &c.game.attributes[attr as usize];
         let own = def.comp.and_then(|id| {
             c.components
@@ -233,7 +238,7 @@ impl Dim {
         let def = &c.game.attributes[attr as usize];
         let Some(base) = self.base_attribute(c, entity, attr) else { return def.default };
         if !explain {
-            let (mut add, mut mul_base, mut mul_total) = (0.0, 0.0, 1.0);
+            let (mut add, mut mul_base, mut mul_total, mut set) = (0.0, 0.0, 1.0, None);
             if let Some(b) = self.entities.comps.get(&(entity, c.game.modifiers_comp)) {
                 each_mod(b, |a, op, amount, until, _| {
                     if a == def.hash && (until == 0 || until > self.time) {
@@ -241,12 +246,14 @@ impl Dim {
                             abi::attr_op::ADD => add += amount,
                             abi::attr_op::MULTIPLY_BASE => mul_base += amount,
                             abi::attr_op::MULTIPLY_TOTAL => mul_total *= 1.0 + amount,
-                            _ => {}
+                            _ => set = Some(amount),
                         }
                     }
                 });
             }
-            return ((base + add) * (1.0 + mul_base) * mul_total).clamp(def.min, def.max);
+            return set
+                .unwrap_or((base + add) * (1.0 + mul_base) * mul_total)
+                .clamp(def.min, def.max);
         }
         let mods: Vec<AttrMod> = self
             .modifiers_of(c, entity)
@@ -270,12 +277,13 @@ impl Dim {
         {
             v *= 1.0 + m.amount;
         }
-        let v = v.clamp(def.min, def.max);
+        let set = mods.iter().rev().find(|m| m.op as u32 == abi::attr_op::SET);
+        let v = set.map_or(v, |m| m.amount).clamp(def.min, def.max);
         if explain {
             let parts: Vec<String> = mods
                 .iter()
                 .map(|m| {
-                    let op = ["+", "x base +", "x"][m.op.min(2) as usize];
+                    let op = ["+", "x base +", "x", "= "][m.op.min(3) as usize];
                     let left = if m.until == 0 { String::new() } else { format!(" ({} ticks left)", m.until - self.time) };
                     format!("{} {op}{}{left}", m.id, m.amount)
                 })
@@ -293,7 +301,7 @@ impl Dim {
         let mut mods = self.modifiers_of(c, entity);
         let now = self.time;
         mods.retain(|m| !(m.attr == hash && m.id == id) && (m.until == 0 || m.until > now));
-        mods.push(AttrMod { attr: hash, op: op.min(2) as u8, amount, until: if ticks == 0 { 0 } else { now + ticks }, id: id.to_string() });
+        mods.push(AttrMod { attr: hash, op: op.min(3) as u8, amount, until: if ticks == 0 { 0 } else { now + ticks }, id: id.to_string() });
         self.entities
             .comps
             .insert((entity, c.game.modifiers_comp), encode_mods(&mods));
@@ -309,6 +317,102 @@ impl Dim {
             self.entities
                 .comps
                 .insert((entity, c.game.modifiers_comp), encode_mods(&mods));
+        }
+    }
+
+    /// The modifiers what entities are in, hold, wear, do and are give them
+    /// (`Content::source_mods`), kept up each tick (`keep_sources`).
+    pub(super) fn source_modifiers(&mut self, c: &'static Content) {
+        if c.source_mods.is_empty() {
+            return;
+        }
+        let ids: Vec<u64> = self
+            .entities
+            .list
+            .iter()
+            .filter(|e| !e.removed && e.is_body())
+            .map(|e| e.id)
+            .collect();
+        for id in ids {
+            self.keep_sources(c, id);
+        }
+    }
+
+    /// Entity `id`'s modifiers from its game mode, its main hand's item, its worn items, its pose
+    /// and its kind while their conditions hold: one per attribute and operation,
+    /// `core:source/<op>`.
+    pub fn keep_sources(&mut self, c: &'static Content, id: u64) {
+        let s = &c.source_mods;
+        let Some(e) = self.entities.get(id) else { return };
+        let (kind, pose, pos, mode, body) = (e.kind, e.pose, e.pos, e.mode, e.body());
+        let mut from: Vec<SourceMod> = s.kinds.get(&kind).cloned().unwrap_or_default();
+        from.extend(s.modes.get(&(mode.0 as u32)).into_iter().flatten());
+        from.extend(s.poses.get(&(pose.0 as u32)).into_iter().flatten());
+        let held = self.entities.held(id).item;
+        from.extend(s.items.get(&held).into_iter().flatten().filter(|m| !m.worn));
+        let worn = c.game.entities[kind as usize].worn.clone();
+        let inv = self.entities.inventories.get(&id);
+        for st in inv
+            .and_then(|i| i.get(worn.start as usize..worn.end as usize))
+            .into_iter()
+            .flatten()
+        {
+            from.extend(
+                s.items
+                    .get(&st.item)
+                    .into_iter()
+                    .flatten()
+                    .filter(|m| m.worn),
+            );
+        }
+        if from.is_empty()
+            && !self
+                .entities
+                .comps
+                .contains_key(&(id, c.game.modifiers_comp))
+        {
+            return;
+        }
+        let ask = crate::conditions::Ask { pos, entity: id, body: Some(body), ..Default::default() };
+        let mut want: Vec<(u32, u32, f64)> = Vec::new();
+        for m in from {
+            if m.when
+                .is_some_and(|w| !crate::conditions::on_server(self, c, w, &ask))
+            {
+                continue;
+            }
+            match want.iter_mut().find(|w| (w.0, w.1) == (m.attr, m.op)) {
+                Some(w) if m.op == abi::attr_op::MULTIPLY_TOTAL => w.2 = (1.0 + w.2) * (1.0 + m.amount) - 1.0,
+                Some(w) if m.op == abi::attr_op::SET => w.2 = m.amount,
+                Some(w) => w.2 += m.amount,
+                None => want.push((m.attr, m.op, m.amount)),
+            }
+        }
+        let mut mods = self.modifiers_of(c, id);
+        let ours = |m: &AttrMod| m.id.starts_with("core:source/");
+        let had: Vec<(u64, u8, f64)> = mods
+            .iter()
+            .filter(|m| ours(m))
+            .map(|m| (m.attr, m.op, m.amount))
+            .collect();
+        let now: Vec<(u64, u8, f64)> = want
+            .iter()
+            .map(|&(a, op, x)| (c.game.attributes[a as usize].hash, op.min(3) as u8, x))
+            .collect();
+        if had.len() == now.len() && now.iter().all(|w| had.contains(w)) {
+            return;
+        }
+        mods.retain(|m| !ours(m));
+        mods.extend(
+            now.into_iter()
+                .map(|(attr, op, amount)| AttrMod { attr, op, amount, until: 0, id: format!("core:source/{op}") }),
+        );
+        if mods.is_empty() {
+            self.entities.comps.remove(&(id, c.game.modifiers_comp));
+        } else {
+            self.entities
+                .comps
+                .insert((id, c.game.modifiers_comp), encode_mods(&mods));
         }
     }
 
@@ -336,17 +440,10 @@ impl Dim {
         entity: u64,
     ) -> Vec<weft_abi::ItemStack> {
         let Some(t) = c.loot.get(table) else { return Vec::new() };
-        let mut ctx = ctx.clone();
-        for name in crate::loot::conditions_in(t) {
-            if c.game
-                .condition_names
-                .get(name)
-                .is_some_and(|&id| crate::conditions::on_server(self, c, id, pos, entity))
-            {
-                ctx.holds.push(name.to_string());
-            }
-        }
-        let mut rng = || self.random_unit();
-        crate::loot::roll(c, t, &ctx, &mut rng)
+        let ask = crate::conditions::Ask { pos, entity, state: ctx.state, loot: Some(ctx), ..Default::default() };
+        let me = std::cell::RefCell::new(self);
+        let mut rng = || me.borrow_mut().random_unit();
+        let mut holds = |id| crate::conditions::on_server(&mut me.borrow_mut(), c, id, &ask);
+        crate::loot::roll(c, t, ctx, &mut rng, &mut holds)
     }
 }

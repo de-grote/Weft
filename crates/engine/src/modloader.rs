@@ -35,6 +35,10 @@ pub fn asset_exists(name: &str, kind: &str, ext: &str) -> bool {
         .any(|(id, dir)| id == ns && dir.join(kind).join(format!("{rel}.{ext}")).is_file())
 }
 
+pub fn mod_loaded(id: &str) -> bool {
+    ASSET_ROOTS.read().unwrap().iter().any(|(m, _)| m == id)
+}
+
 pub fn mod_id_name(m: ModId) -> &'static str {
     NAMES
         .get()
@@ -240,6 +244,8 @@ struct Switches {
     file: PathBuf,
     wanted: Vec<String>,
     at_start: Vec<String>,
+    /// Off for this run only: shown off, not written to the file.
+    run_only: Vec<String>,
 }
 
 static OFF: OnceLock<Vec<ModMeta>> = OnceLock::new();
@@ -286,7 +292,13 @@ pub fn toggle(id: &str) {
     if let Some(d) = s.file.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    if let Err(e) = std::fs::write(&s.file, s.wanted.join("\n")) {
+    let saved: Vec<&str> = s
+        .wanted
+        .iter()
+        .filter(|w| !s.run_only.contains(w))
+        .map(String::as_str)
+        .collect();
+    if let Err(e) = std::fs::write(&s.file, saved.join("\n")) {
         log::error!("{}: {e}", s.file.display());
     }
 }
@@ -299,7 +311,11 @@ pub fn restart_pending() -> bool {
         .is_some_and(|s| s.wanted != s.at_start)
 }
 
-pub fn load(mod_dirs: &[PathBuf], cache: &Path, off_file: &Path) -> Result<Vec<LoadedMod>, String> {
+/// What a mod has to be built against to load (`weft --mod-abi`).
+pub const ABI_VERSION: u64 = abi::ABI_VERSION;
+
+/// `also_off`: off for this run only, besides what the player turned off (a launcher's choice).
+pub fn load(mod_dirs: &[PathBuf], cache: &Path, off_file: &Path, also_off: &[String]) -> Result<Vec<LoadedMod>, String> {
     let start = Instant::now();
     let mut wanted: Vec<String> = std::fs::read_to_string(off_file)
         .unwrap_or_default()
@@ -307,8 +323,11 @@ pub fn load(mod_dirs: &[PathBuf], cache: &Path, off_file: &Path) -> Result<Vec<L
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect();
+    wanted.extend(also_off.iter().cloned());
     wanted.sort();
-    *SWITCHES.lock() = Some(Switches { file: off_file.to_path_buf(), at_start: wanted.clone(), wanted: wanted.clone() });
+    wanted.dedup();
+    *SWITCHES.lock() =
+        Some(Switches { file: off_file.to_path_buf(), at_start: wanted.clone(), wanted: wanted.clone(), run_only: also_off.to_vec() });
     let mut off: Vec<ModMeta> = Vec::new();
     let shadow = cache.join("mods");
     std::fs::create_dir_all(&shadow).ok();
@@ -360,16 +379,23 @@ pub fn load(mod_dirs: &[PathBuf], cache: &Path, off_file: &Path) -> Result<Vec<L
                 .collect()
         }
     };
+    // A mod needing one that isn't there is off too, rather than the game not starting.
+    let found: Vec<String> = mods.iter().map(|m| m.id.clone()).collect();
+    let missing = |d: &String| !found.contains(d);
     loop {
-        let Some(i) = mods
-            .iter()
-            .position(|m| wanted.contains(&m.id) || deps_of(m).iter().any(|d| off.iter().any(|o| &o.id == d)))
-        else {
+        let Some(i) = mods.iter().position(|m| {
+            wanted.contains(&m.id)
+                || deps_of(m)
+                    .iter()
+                    .any(|d| missing(d) || off.iter().any(|o| &o.id == d))
+        }) else {
             break;
         };
         let m = mods.remove(i);
         if wanted.contains(&m.id) {
             log::info!("mod {} is turned off", m.id);
+        } else if let Some(d) = deps_of(&m).iter().find(|d| missing(d)) {
+            log::warn!("mod {} is off, as it needs {d}, which isn't there", m.id);
         } else {
             log::warn!("mod {} is off, as it needs one that is", m.id);
         }

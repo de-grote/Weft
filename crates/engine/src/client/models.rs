@@ -359,7 +359,7 @@ pub struct Models {
     pub worn_kinds: FxHashMap<u32, (u32, String)>,
     /// Models read from files, by name, also those that aren't there.
     files: FxHashMap<String, Option<u32>>,
-    /// What a mod's `item_model_for_stack` said for a stack.
+    /// What an item's `condition` said for a stack.
     by_stack: FxHashMap<(u32, u32), Option<u32>>,
     stock: FxHashMap<&'static str, Vec<Arc<Animation>>>,
     /// What items bring along: holders of models added later need it.
@@ -973,13 +973,14 @@ impl Models {
                 log::warn!("item {}: no entity has a bone {bone} to wear {file} on", c.items[i].name);
             }
         }
-        for (entity, file, bone) in &c.game.attached_models {
-            let Some(&holder) = c.game.entity_names.get(entity) else { continue };
-            let Some(kind) = self.load_file(assets, file, None) else {
-                log::error!("attached to {entity}: no model {file}");
-                continue;
-            };
-            self.carry(holder, kind, bone);
+        for (holder, entity) in c.game.entities.iter().enumerate() {
+            for (file, bone) in &entity.bone_models {
+                let Some(kind) = self.load_file(assets, file, None) else {
+                    log::error!("on a bone of {}: no model {file}", entity.name);
+                    continue;
+                };
+                self.carry(holder as u32, kind, bone);
+            }
         }
         for (file, bone, _) in &c.game.bone_motions {
             if self.files.get(file).is_none_or(Option::is_none) && !c.game.entity_names.contains_key(file) {
@@ -1089,10 +1090,7 @@ impl Models {
         said.truncate(AVATAR_BONES);
         let m = &mut self.kinds[k as usize];
         m.live = live_bones("of an avatar", &m.parts, &said);
-        for (entity, file, bone) in &c.game.attached_models {
-            if c.game.entity_names.get(entity) != Some(&c.game.player_kind) {
-                continue;
-            }
+        for (file, bone) in &c.game.entities[c.game.player_kind as usize].bone_models {
             if let (Some(Some(model)), true) =
                 (self.files.get(file).copied(), model::bone_named(&self.kinds[k as usize].parts, bone).is_some())
             {
@@ -1125,7 +1123,7 @@ impl Models {
         gpu.write_buffer(self.corners, 0, bytemuck::cast_slice(corners));
     }
 
-    /// The model `stack` shows as, deciding if nobody has yet (a mod's `item_model_for_stack`).
+    /// The model `stack` shows as, deciding if nobody has yet (its item's `condition`).
     pub fn model_for(&mut self, assets: &Assets, stack: ItemStack) -> Option<u32> {
         let c = content();
         if let Some(&(owner, cb)) = c.game.item_model_for_stack.get(&stack.item) {
@@ -1133,7 +1131,7 @@ impl Models {
             let kind = match self.by_stack.get(&key) {
                 Some(&k) => k,
                 None => {
-                    let mut a = weft_abi::ItemModelArgs { stack, model: weft_abi::Str::new("") };
+                    let mut a = weft_abi::ItemModelArgs { stack, model: weft_abi::Str::new(""), texture: weft_abi::Str::new("") };
                     crate::host::invoke(owner, cb, &mut a);
                     let name = unsafe { a.model.as_str() }.to_string();
                     let k = if name.is_empty() { None } else { self.load_file(assets, &name, Some(stack.item)) };

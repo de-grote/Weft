@@ -4,7 +4,7 @@ Everything you see in the sky is an object registered for a specific dimension, 
 
 ## Note
 Examples that you can copy from:
-- `mods/base/src/lib.rs` has the sun, the moon and the stars
+- `mods/base/src/lib.rs` has the sun, the moon, the stars and the clouds
 - `mods/testmod/src/lib.rs` has Mars, with a sun that doesn't move and two moons that go in opposite directions
 
 ## Quick links
@@ -21,7 +21,7 @@ The texture goes to `assets/textures/sky/planet.png` and can be any size, and ev
 | method | what it does |
 |---|---|
 | `orbit(ticks)` | ticks per turn around the sky, and a negative value makes it go the other way. Without it, the body follows the day of the dimension like the sun does, which means it slows down a little around noon and midnight |
-| `still()` | keeps the body where its phase, tilt and heading put it |
+| `orbit_still()` | keeps the body where its phase, tilt and heading put it |
 | `orbit_day()` | makes the body follow the day again, for example if it comes from another mod and you gave it an orbit |
 | `phase(turns)` | sets where the body starts: 0 is rising in the east, 0.25 is overhead, 0.5 is setting, and 0.75 is under your feet |
 | `tilt(degrees)` | leans the orbit to the south, away from overhead |
@@ -39,14 +39,14 @@ The texture goes to `assets/textures/sky/planet.png` and can be any size, and ev
 Daylight and the light on blocks come from the day of the dimension (`day_length`, `fixed_time`, `daylight` for its curve) and not from any body, which means that if you remove the sun, the day will still happen, and if you give the sun a different orbit, it will no longer match the light.
 
 ## Changing what is there
-When you use an object from another mod, only the fields you set are changed and the object stays the same type, so this example makes the moon bigger, while its texture, phases and orbit stay the same:
+An object of a dimension is `DIM.sky(&OBJECT)`, and it is edited and removed like anything else registered. An edit changes only the fields you set and the object stays the same type, so this example makes the moon bigger, while its texture, phases and orbit stay the same:
 ```rust
 use base_api::{MOON, OVERWORLD, STARS, SUN};
-r.sky_body(&OVERWORLD, &MOON).size(40.0);
-r.sky_body(&OVERWORLD, &SUN).texture("mymod:blue_sun").glow(0x80C0FF);
-r.sky_remove(&OVERWORLD, &STARS);
+r.edit(OVERWORLD.sky(&MOON)).size(40.0);
+r.edit(OVERWORLD.sky(&SUN)).texture("mymod:blue_sun").glow(0x80C0FF);
+r.remove(OVERWORLD.sky(&STARS));
 ```
-Mods run in dependency order, so your mod has to depend on base to change its objects, and if several mods change the same field, the last one wins. All of this works per dimension, and since base registers its three objects in both `OVERWORLD` and `FLATLANDS`, you have to change or remove them in each dimension separately. A resource pack can also replace the textures themselves, for example `textures/sky/sun.png`.
+If several mods change the same field, the one loaded last wins. `r.replace(OVERWORLD.sky(&MOON))` starts it again from nothing, a body unless you say otherwise with `.set(&comps::sky::KIND, abi::sky_kind::DOME)`. All of this works per dimension, and since base registers its four objects in both `OVERWORLD` and `FLATLANDS`, you have to change or remove them in each dimension separately. A resource pack can also replace the textures themselves, for example `textures/sky/sun.png`.
 
 ## Bodies in front of each other
 A body covers everything behind it wherever its texture is opaque, and the body that was registered later or has a higher `order` is drawn in front. Orbits of different lengths bring two bodies together from time to time, so one of them passes in front of the other, and for example orbits of 24000 and 22000 ticks meet about every 11 days.
@@ -62,7 +62,7 @@ Stars turn together on the orbit you give them, or with the day if you don't giv
 ```rust
 r.sky_clouds(&OVERWORLD, &MY_CLOUDS).texture("clouds").height(300.0).drift(0.03).color(0xFFE0E0);
 ```
-Every filled pixel of the texture becomes a box that is 12 blocks wide and 4 blocks high, and the texture repeats across the sky, further than the terrain and distant terrain reach. They are one draw whatever the size of the picture, as a shader walks it pixel by pixel. Without `.height` the underside is at 224.33, and players can raise any clouds in the video settings. Clouds exist in the world, which means that they hide what is behind them and you can fly through them. Rain makes them grey and hides bodies and stars, and which weathers come is the dimension's `.weathers(&[..])`, while `w.raining()`, `w.weather()` and `w.set_weather(&weathers::THUNDER, ticks)` let you read and change it. Weathers are values like any: `r.weather(&ACID_RAIN).darkness(0.5).duration(2400, 6000).weight(1)` adds one, which comes now and then after clear weather where a dimension lists it, and `/weather mymod:acid_rain` sets it. What falls is the biome's: rain, snow with `.snows()`, or your own picture with `r.precipitation(&ASH, "ash", 0.3, 0.4)` and `.precipitation(&ASH)` on the biome.
+Every filled pixel of the texture becomes a box that is 12 blocks wide and 4 blocks high, and the texture repeats across the sky, further than the terrain and distant terrain reach. They are one draw whatever the size of the picture, as a shader walks it pixel by pixel. Without `.height` the underside is at 224.33, and players can raise any clouds in the video settings. Clouds exist in the world, which means that they hide what is behind them and you can fly through them. Rain makes them gray and hides bodies and stars, and which weathers come is the dimension's `.weathers(&[..])`, while `w.raining()`, `w.weather()` and `w.set_weather(&weathers::THUNDER, ticks)` let you read and change it. Weathers are values like any: `r.weather(&ACID_RAIN).darkness(0.5).duration(2400, 6000).weight(1)` adds one, which comes now and then after clear weather where a dimension lists it, and `/weather mymod:acid_rain` sets it. What falls is the biome's: rain, snow with `.snows()`, or your own picture with `r.precipitation(&ASH).texture("ash").speed(0.3).density(0.4)` and `.precipitation(&ASH)` on the biome.
 
 ## Skyboxes
 A dome covers the entire sky at once and doesn't move unless you give it an orbit, and it is drawn over the sky's colors, but under the stars and bodies:
@@ -71,7 +71,7 @@ r.sky_dome(&OVERWORLD, &NEBULA).texture("nebula").opacity(0.0, 1.0).orbit(24000.
 ```
 The layout of a dome is determined by the shape of its texture. A texture that is twice as wide as it is high is treated as a panorama, which is the format that any skybox tool exports, and a texture with a ratio of three to two is treated as the six faces of a box, with down, up and south on the first row, and west, north and east on the second.
 
-A dome stays at full strength during both day and night unless you set its opacity, so if you want a sky that changes, you have to register one dome with `opacity(1.0, 0.0)` and another one with `opacity(0.0, 1.0)`. The horizon still fades into the fog color of the dimension, which is set with `.sky(..)`, and sunsets are drawn over domes, so a sun without `glow` won't have a sunset.
+A dome stays at full strength during both day and night unless you set its opacity, so if you want a sky that changes, you have to register one dome with `opacity(1.0, 0.0)` and another one with `opacity(0.0, 1.0)`. The horizon still fades into the fog color of the dimension, which is set with `.sky_color(..)`, and sunsets are drawn over domes, so a sun without `glow` won't have a sunset.
 
 ## Shaders
 Any object can be colored by a shader snippet instead of its plain texture, which allows you to create auroras and clouds of gas without any texture at all:
@@ -84,11 +84,11 @@ fn shade(p: SkyPixel) -> vec4<f32> {
 }
 ```
 ```rust
-r.sky_dome(&OVERWORLD, &AURORA).shader("aurora");
+r.sky_dome(&OVERWORLD, &AURORA).shader(&AURORA_SHADER);
 ```
 `SkyPixel` contains `dir`, which is the direction of the pixel in the world, `local`, which is the same direction in the object's own frame that turns with its orbit, with x pointing at a body, and also `uv`, `albedo` (the texture, or white if there is none), `color`, `daylight` and `time`. The snippet returns the color and how much it covers, and `opacity` is applied on top of that. You can read more about snippets in the [shaders guide](shaders.md#snippets).
 
 ## The sky's colors
-Behind everything there is a gradient from the `sky(sky_color, fog_color)` of the dimension, with the sky color above and the fog color at the horizon, and both of them get darker during the night like in vanilla. A dome with an opaque texture simply covers this gradient.
+Behind everything there is a gradient from the `sky_color(sky, fog)` of the dimension, with the sky color above and the fog color at the horizon, and both of them get darker during the night like in vanilla. A dome with an opaque texture simply covers this gradient.
 
 If you are inside a liquid, the sky is replaced by the fog of that liquid, and you can read about `fog` and `overlay` in [liquids](modding.md#liquids).

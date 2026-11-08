@@ -16,7 +16,7 @@ impl ClientView {
     pub(crate) fn from_raw(raw: *mut abi::ClientCtx) -> ClientView {
         ClientView { raw }
     }
-    /// The client's actions (`screen_open`, `world_open`, `quit`..), for a button's callback:
+    /// The client's actions (`menu_open`, `world_open`, `quit`..), for a button's callback:
     /// a button may drive the client, a binding that only shows a value may not.
     pub fn client(&self) -> crate::Client {
         crate::Client::from_raw(self.raw)
@@ -80,7 +80,7 @@ impl ClientView {
     }
     /// The local player's mode spares it damage and hunger: no bars to show.
     pub fn outside_survival(&self) -> bool {
-        crate::GameMode::flags_of(self.game_mode()) & abi::game_mode_flags::INVULNERABLE != 0
+        crate::comps::game_mode::INVULNERABLE.on_id(self.game_mode())
     }
     /// `abi::game_mode`.
     pub fn game_mode(&self) -> u32 {
@@ -95,12 +95,12 @@ impl ClientView {
         let p = unsafe { (host().client_component)(self.raw, entity, c.id()) };
         (!p.is_null()).then(|| unsafe { std::ptr::read_unaligned(p as *const T) })
     }
-    /// The entity whose menu is open (a machine), if any.
+    /// The entity the open menu is on (a block entity, a mob), if any.
     pub fn menu_owner(&self) -> Option<u64> {
         let o = unsafe { (host().client_menu_owner)(self.raw) };
         (o != 0).then_some(o)
     }
-    /// A component of the open menu's machine, synced with `SYNC_MENU`, for screens to bind to.
+    /// A component of what the open menu is on, synced with `SYNC_MENU`, for screens to bind to.
     pub fn menu_component<T: Value>(&self, c: &Component<T>) -> Option<T> {
         self.component_of(self.menu_owner()?, c)
     }
@@ -530,7 +530,7 @@ impl Ui {
         });
     }
 
-    /// The open menu's title: what a player named the machine or chest, else the name of the
+    /// The open menu's title: what a player named the furnace or chest, else the name of the
     /// block it was opened on, else the translation `menu.<ns>.<name>`.
     pub fn title(&mut self) {
         self.leaf(node(k::TITLE, S::default()))
@@ -541,7 +541,7 @@ impl Ui {
         self.leaf(node(k::EQUIPMENT, S::default()))
     }
 
-    /// The arrow of a menu that makes recipes (`.recipes(..)` on the menu or machine): clicking
+    /// The arrow of a menu that makes recipes (`.recipes(..)` on the menu): clicking
     /// it opens them in the recipe viewer. Empty, for a crafting grid.
     pub fn recipe_arrow(&mut self) {
         self.leaf(node(k::RECIPE_ARROW, S::default()))
@@ -717,6 +717,11 @@ impl Icons<'_> {
     /// While `f` is above 0 a wave runs along the row, `pixels` high (hearts regenerating).
     pub fn wave_while(self, pixels: f32, f: impl Fn(&ClientView) -> f32 + Send + Sync + 'static) -> Self {
         self.effect(abi::icon_effect::WAVE, pixels, Some(Box::new(f)))
+    }
+    /// The halves the row holds, `f`'s value (none: twice the count): past the count more rows
+    /// go on above, closer the more there are (hearts past twenty health).
+    pub fn max_by(self, f: impl Fn(&ClientView) -> f32 + Send + Sync + 'static) -> Self {
+        self.effect(abi::icon_effect::MAX, 0.0, Some(Box::new(f)))
     }
     /// Any `abi::icon_effect` by `f`'s value (none: 1).
     pub fn effect(mut self, kind: u32, amount: f32, f: Option<Box<dyn Fn(&ClientView) -> f32 + Send + Sync>>) -> Self {

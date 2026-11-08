@@ -7,13 +7,13 @@
 //! static ORBIT: CameraMode = CameraMode::named("orbit");
 //! static ORBIT_KEY: Key = Key::named("orbit");
 //! r.camera(&ORBIT).shot(shot::orbit(6.0)).key(&ORBIT_KEY, "O").transition(0.6, easing::SMOOTH);
-//! r.camera(&cameras::FRONT).without(camera_flags::CYCLE); // F5 skips it
+//! r.edit(&cameras::FRONT).untag(comps::camera::CYCLE); // F5 skips it
 //! ```
 
-use crate::abi::{self, CameraArgs, CameraPose, Str, Vec3, camera_flags as cf};
-use crate::{CameraMode, Key, Registry, World, callback, host};
+use crate::abi::{self, CameraArgs, CameraPose, Vec3, comp::camera as cc};
+use crate::{CameraMode, Key, Registry, WithComponents, World, callback, host};
 
-pub use abi::{camera_flags, easing};
+pub use abi::easing;
 
 /// The engine's camera modes.
 pub mod cameras {
@@ -32,25 +32,18 @@ pub fn ease(kind: u32, t: f32) -> f32 {
     unsafe { (host().ease)(kind, t) }
 }
 
-impl CameraMode {
-    /// Its id as `actions::CAMERA` asks about it (`Ask::amount`), `u32::MAX` if there's none.
-    pub fn camera_id(&self) -> u32 {
-        unsafe { (host().camera_id)(Str::new(self.name())) }
-    }
-}
-
 /// How a camera moves: called each frame on the client with the keys, the player's eyes and
-/// last frame's camera (`CameraArgs`), it sets `out`. It brings the flags it needs along
-/// (a free camera is `DETACHED`), `CameraBuilder::shot` adds them.
+/// last frame's camera (`CameraArgs`), it sets `out`. It brings the tags it needs along
+/// (`comp::camera`: a free camera is `DETACHED`), `CameraBuilder::shot` adds them.
 pub struct Shot {
     f: Box<dyn Fn(&mut CameraArgs) + Send + Sync>,
-    flags: u32,
+    tags: &'static [&'static str],
 }
 
 impl Shot {
-    /// Yours: `|a| a.out.pos = ..`, with these flags.
-    pub fn new(flags: u32, f: impl Fn(&mut CameraArgs) + Send + Sync + 'static) -> Shot {
-        Shot { f: Box::new(f), flags }
+    /// Yours: `|a| a.out.pos = ..`, with these tags (`comp::camera`).
+    pub fn new(tags: &'static [&'static str], f: impl Fn(&mut CameraArgs) + Send + Sync + 'static) -> Shot {
+        Shot { f: Box::new(f), tags }
     }
 }
 
@@ -81,14 +74,14 @@ pub mod shot {
 
     /// From the eyes, as the player looks.
     pub fn eyes() -> Shot {
-        Shot::new(cf::HAND | cf::HUD | cf::EFFECTS, |a| {
+        Shot::new(&[cc::HAND, cc::HUD, cc::EFFECTS], |a| {
             a.out = CameraPose { pos: a.eye, yaw: a.eye_yaw, pitch: a.eye_pitch, ..CameraPose::DEFAULT }
         })
     }
 
     /// `extra` blocks further back than third person (more on a mount), kept out of blocks.
     pub fn behind(extra: f32) -> Shot {
-        Shot::new(cf::BODY | cf::HUD | cf::CLIP, move |a| {
+        Shot::new(&[cc::BODY, cc::HUD, cc::CLIP], move |a| {
             let d = look_dir(a.eye_yaw, a.eye_pitch);
             let back = (a.back + extra) as f64;
             let e = v(a.eye);
@@ -103,14 +96,14 @@ pub mod shot {
 
     /// Around the player at `distance`, turned by the mouse, while the player stands.
     pub fn orbit(distance: f32) -> Shot {
-        Shot::new(cf::BODY | cf::CLIP | cf::DETACHED | cf::NO_INTERACT, move |a| {
-            let d = look_dir(a.keys.yaw, a.keys.pitch);
+        Shot::new(&[cc::BODY, cc::CLIP, cc::DETACHED, cc::NO_INTERACT], move |a| {
+            let d = look_dir(a.yaw, a.pitch);
             let e = v(a.eye);
             let r = distance as f64;
             a.out = CameraPose {
                 pos: at([e[0] - d[0] * r, e[1] - d[1] * r, e[2] - d[2] * r]),
-                yaw: a.keys.yaw,
-                pitch: a.keys.pitch,
+                yaw: a.yaw,
+                pitch: a.pitch,
                 ..CameraPose::DEFAULT
             };
         })
@@ -121,23 +114,28 @@ pub mod shot {
     /// doesn't go through blocks.
     pub fn free(speed: f32) -> Shot {
         let vel = std::sync::Mutex::new([0.0f64; 3]);
-        Shot::new(cf::BODY | cf::SOLID | cf::DETACHED | cf::NO_INTERACT, move |a| {
+        Shot::new(&[cc::BODY, cc::SOLID, cc::DETACHED, cc::NO_INTERACT], move |a| {
             let mut vel = vel.lock().unwrap();
             if a.first != 0 {
                 *vel = [0.0; 3];
             }
-            let k = &a.keys;
+            use crate::client::keys;
+            let k = crate::client::Keys::of(a.keys, a.yaw, a.pitch);
             let ahead = look_dir(k.yaw, k.pitch);
             let right = [k.yaw.cos() as f64, 0.0, -k.yaw.sin() as f64];
-            let up = k.up as f64 - k.down as f64;
+            let (forward, aside, up) = (
+                k.axis(&keys::FORWARD, &keys::BACK) as f64,
+                k.axis(&keys::RIGHT, &keys::LEFT) as f64,
+                k.axis(&keys::JUMP, &keys::SNEAK) as f64,
+            );
             let mut wish = [0.0; 3];
             for i in 0..3 {
-                wish[i] = ahead[i] * k.forward as f64 + right[i] * k.strafe as f64 + if i == 1 { up } else { 0.0 };
+                wish[i] = ahead[i] * forward + right[i] * aside + if i == 1 { up } else { 0.0 };
             }
             let len = (wish[0] * wish[0] + wish[1] * wish[1] + wish[2] * wish[2])
                 .sqrt()
                 .max(1.0);
-            let s = speed as f64 * if k.sprint != 0 { 2.0 } else { 1.0 } / len;
+            let s = speed as f64 * if k.held(&keys::SPRINT) { 2.0 } else { 1.0 } / len;
             let blend = (a.dt as f64 * 8.0).min(1.0);
             let mut p = v(a.out.pos);
             for i in 0..3 {
@@ -150,7 +148,7 @@ pub mod shot {
 
     /// Straight down from `height` blocks over the player, north up (a map, a top-down game).
     pub fn top_down(height: f32) -> Shot {
-        Shot::new(cf::BODY | cf::HUD, move |a| {
+        Shot::new(&[cc::BODY, cc::HUD], move |a| {
             let e = v(a.eye);
             a.out = CameraPose { pos: at([e[0], e[1] + height as f64, e[2]]), yaw: 0.0, pitch: -1.5707, ..CameraPose::DEFAULT };
         })
@@ -159,7 +157,7 @@ pub mod shot {
     /// From `pos`, always looking at the player (a security camera).
     pub fn fixed(pos: impl Into<Vec3>) -> Shot {
         let pos = pos.into();
-        Shot::new(cf::BODY | cf::HUD, move |a| {
+        Shot::new(&[cc::BODY, cc::HUD], move |a| {
             let (yaw, pitch) = look_at(pos, a.eye);
             a.out = CameraPose { pos, yaw, pitch, ..CameraPose::DEFAULT };
         })
@@ -168,7 +166,7 @@ pub mod shot {
     /// Through `points` (position, yaw, pitch), `secs` from each to the next, eased by `easing`
     /// each way; stays on the last (a cutscene: force it, then release it after).
     pub fn path(points: Vec<(Vec3, f32, f32)>, secs: f32, easing: u32) -> Shot {
-        Shot::new(cf::BODY, move |a| {
+        Shot::new(&[cc::BODY], move |a| {
             let Some(&last) = points.last() else { return };
             let leg = (a.time / secs.max(1e-3)) as usize;
             let (from, to) = match (points.get(leg), points.get(leg + 1)) {
@@ -191,77 +189,46 @@ pub mod shot {
 /// `Registry::camera`: registers when dropped.
 pub struct CameraBuilder<'a> {
     reg: &'a mut Registry,
-    mode: &'static CameraMode,
-    flags: u32,
-    off: u32,
-    key: Option<&'static Key>,
-    shot: Option<Shot>,
-    transition: f32,
-    easing: u32,
+    e: crate::entry::Entry,
 }
 
+crate::entry::entry_builder!(CameraMode => CameraBuilder, camera;);
+
 impl Registry {
-    /// A camera mode, or the edits to one already there (the engine's `cameras::*`, another
-    /// mod's): flags added and taken away, its shot, key and change replaced.
+    /// A camera mode; `r.edit(&cameras::FRONT)` changes one already there (the engine's,
+    /// another mod's): flags added and taken away, its shot, key and change replaced.
     pub fn camera(&mut self, mode: &'static CameraMode) -> CameraBuilder<'_> {
-        CameraBuilder { reg: self, mode, flags: 0, off: 0, key: None, shot: None, transition: f32::NAN, easing: easing::IN_OUT }
+        CameraBuilder { reg: self, e: crate::entry::Entry::of(mode) }
     }
 }
 
 impl CameraBuilder<'_> {
-    /// How it moves, with the flags that takes.
-    pub fn shot(mut self, shot: Shot) -> Self {
-        self.flags |= shot.flags;
-        self.shot = Some(shot);
-        self
-    }
-    /// These `camera_flags` on.
-    pub fn with(mut self, flags: u32) -> Self {
-        (self.flags, self.off) = (self.flags | flags, self.off & !flags);
-        self
-    }
-    /// These off.
-    pub fn without(mut self, flags: u32) -> Self {
-        (self.flags, self.off) = (self.flags & !flags, self.off | flags);
-        self
+    /// How it moves, with the tags that takes.
+    pub fn shot(self, shot: Shot) -> Self {
+        let tags = shot.tags;
+        let call = callback(move |a: &mut CameraArgs| (shot.f)(a));
+        tags.iter()
+            .fold(self, |b, t| b.tag(t))
+            .set(&crate::comps::camera::CALL, call)
     }
     /// One F5 goes through.
     pub fn in_cycle(self) -> Self {
-        self.with(cf::CYCLE)
+        self.tag(cc::CYCLE)
     }
-    /// Only where the server lets it (`actions::CAMERA`).
-    pub fn ask(self) -> Self {
-        self.with(cf::ASK)
+    /// Only where this holds for the player, asked on the server, and the server lets it
+    /// (`actions::CAMERA`): `.when(Cond::attribute(&attribute::CAN_FLY, 1.0, f64::MAX))`.
+    pub fn when(self, c: impl Into<crate::Cond>) -> Self {
+        self.push(&crate::comps::camera::WHEN, c.into().0)
     }
     /// A key that turns it on and back off, `default` as `Registry::key` takes it.
-    pub fn key(mut self, key: &'static Key, default: &str) -> Self {
-        unsafe { (host().reg_key)(self.reg.raw, Str::new(key.name()), Str::new(default)) }
-        self.key = Some(key);
-        self
+    pub fn key(self, key: &'static Key, default: &str) -> Self {
+        drop(self.reg.key(key, default));
+        self.set_text(&crate::comps::camera::KEY, key.name())
     }
     /// The change into it takes `secs`, eased by `easing` (`easing::*`).
-    pub fn transition(mut self, secs: f32, easing: u32) -> Self {
-        (self.transition, self.easing) = (secs, easing);
-        self
-    }
-}
-
-impl Drop for CameraBuilder<'_> {
-    fn drop(&mut self) {
-        let call = self
-            .shot
-            .take()
-            .map_or(abi::Callback::NONE, |s| callback(move |a: &mut CameraArgs| (s.f)(a)));
-        let desc = abi::CameraDesc {
-            name: Str::new(self.mode.name()),
-            flags: self.flags,
-            flags_off: self.off,
-            key: self.key.map_or(Str::EMPTY, |k| Str::new(k.name())),
-            call,
-            transition: self.transition,
-            easing: self.easing,
-        };
-        unsafe { (host().reg_camera)(self.reg.raw, &desc) }
+    pub fn transition(self, secs: f32, easing: u32) -> Self {
+        self.set(&crate::comps::camera::TRANSITION, secs)
+            .set(&crate::comps::camera::EASING, easing)
     }
 }
 
@@ -269,11 +236,11 @@ impl World {
     /// Puts `player` in camera `mode` and keeps it there until `release_camera`; the change
     /// over `over` (seconds, `easing::*`) or as the mode says.
     pub fn force_camera(&self, player: u64, mode: &CameraMode, over: Option<(f32, u32)>) {
-        self.send_camera(player, mode.camera_id(), true, over)
+        self.send_camera(player, mode.id(), true, over)
     }
     /// Puts `player` in camera `mode`, which it may leave as usual.
     pub fn set_camera(&self, player: u64, mode: &CameraMode, over: Option<(f32, u32)>) {
-        self.send_camera(player, mode.camera_id(), false, over)
+        self.send_camera(player, mode.id(), false, over)
     }
     /// Back to the camera the player had chosen, free to change it again.
     pub fn release_camera(&self, player: u64, over: Option<(f32, u32)>) {

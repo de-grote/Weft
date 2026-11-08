@@ -1112,19 +1112,23 @@ impl UiRenderer {
                     .iter()
                     .find(|e| e.kind == fx::PREVIEW && e.value > *value)
                     .map(|e| (e.value, 0.5 - 0.5 * (now / e.amount.max(0.1) * std::f32::consts::TAU).cos()));
+                // Past `count` the rows go on above (or to the right of a column).
+                let (icons, rows, step) = super::icon_rows(*count, effects);
                 let wave = effects
                     .iter()
                     .find(|e| e.kind == fx::WAVE && e.value > 0.0)
-                    .map(|e| ((tick % (*count as i64 + 5)) as u32, e.amount));
+                    .map(|e| ((tick % (icons as i64 + 5)) as u32, e.amount));
                 let shaking = effects
                     .iter()
                     .filter(|e| e.kind == fx::SHAKE)
                     .map(|e| e.value.max(0.0) * if e.amount > 0.0 { e.amount } else { 1.0 })
                     .fold(if shake.is_some_and(|s| *value <= s) { 1.0f32 } else { 0.0 }, f32::max);
-                for i in 0..*count {
+                for i in 0..icons {
                     // A value counts halves of an icon, as vanilla's bars do.
                     let v = shown / 2.0 - i as f32;
-                    let slot = if matches!(*dir, ui_dir::LEFT | ui_dir::UP) { count - 1 - i } else { i } as f32 * 8.0 * scale;
+                    let (row, col) = (i / count.max(&1), i % count.max(&1));
+                    let slot = if matches!(*dir, ui_dir::LEFT | ui_dir::UP) { count - 1 - col } else { col } as f32 * 8.0 * scale;
+                    let across = if matches!(*dir, ui_dir::UP | ui_dir::DOWN) { row } else { rows - 1 - row } as f32 * step * scale;
                     let mut jump = if shaking > 0.0 {
                         let h = weft_noise::hash(0, tick, i as i64, 0);
                         ((h % 1000) as f32 / 1000.0 * (shaking + 1.0))
@@ -1138,7 +1142,7 @@ impl UiRenderer {
                     {
                         jump -= high.max(1.0);
                     }
-                    let (dx, dy) = if matches!(*dir, ui_dir::UP | ui_dir::DOWN) { (0.0, slot) } else { (slot, 0.0) };
+                    let (dx, dy) = if matches!(*dir, ui_dir::UP | ui_dir::DOWN) { (across, slot) } else { (slot, across) };
                     let rr = Rect { x: r.x + dx, y: r.y + dy + jump * scale, w: 9.0 * scale, h: 9.0 * scale };
                     if let Some((idx, _, _)) = empty {
                         self.image(rr, idx, [0.0, 0.0, 1.0, 1.0], 0xFFFFFFFF);

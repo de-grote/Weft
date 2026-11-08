@@ -4,12 +4,20 @@ use weft_engine::Options;
 use weft_engine::paths::{self, Dirs};
 use weft_render::{Backend, BackendDesc, Error};
 
+mod submit;
+
 #[global_allocator]
 static ALLOC: weft_engine::diag::CountingAlloc = weft_engine::diag::CountingAlloc;
 
 fn vulkan(desc: &BackendDesc) -> Result<Box<dyn Backend>, Error> {
     Ok(Box::new(weft_vulkan::VulkanBackend::new(desc)?))
 }
+
+fn wgpu(desc: &BackendDesc) -> Result<Box<dyn Backend>, Error> {
+    Ok(Box::new(weft_wgpu::WgpuBackend::new(desc)?))
+}
+
+const RENDERERS: weft_engine::Renderers = &[("vulkan", vulkan), ("wgpu", wgpu)];
 
 /// Where `run` (and, in the source tree, `mods`) live: the working directory if it has either,
 /// otherwise the nearest folder above the executable that does (a development build runs from
@@ -35,6 +43,7 @@ fn main() {
         cache_dir: PathBuf::new(),
         // Mod sources of the game itself; players' mods go into `<run dir>/mods`, added below.
         mod_dirs: vec![root.join("mods")],
+        mods_off: Vec::new(),
         gpu_debug: false,
         world: None,
         seed: None,
@@ -44,6 +53,7 @@ fn main() {
         automated: false,
         no_vsync: false,
         view: None,
+        renderer: None,
     };
     let mut chosen_run: Option<PathBuf> = None;
     let mut verbose = false;
@@ -51,6 +61,7 @@ fn main() {
     let mut server = false;
     let mut pack: Option<PathBuf> = None;
     let mut dist: Option<PathBuf> = None;
+    let (mut submit, mut owner): (Option<PathBuf>, Option<String>) = (None, None);
     // Options the engine does not know go to mods (`--test furnace`, `--script x.txt`).
     let mut extra: Vec<(String, String)> = Vec::new();
     let mut args = std::env::args().skip(1).peekable();
@@ -59,6 +70,17 @@ fn main() {
         match a.as_str() {
             "--run-dir" => chosen_run = Some(PathBuf::from(value())),
             "--mods" => opts.mod_dirs.push(PathBuf::from(value())),
+            "--off" => opts.mods_off.extend(
+                value()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty()),
+            ),
+            // What a mod has to be built against to load here, for a launcher.
+            "--mod-abi" => {
+                println!("{:016x}", weft_engine::modloader::ABI_VERSION);
+                return;
+            }
             "--gpu-debug" => opts.gpu_debug = true,
             "--verbose" => verbose = true,
             "--log" => log_spec = value(),
@@ -70,8 +92,12 @@ fn main() {
             // Engine shaders and assets live from the source tree in a release build too.
             "--dev" => opts.dev = true,
             "--view" => opts.view = value().parse().ok(),
+            "--renderer" => opts.renderer = Some(value()),
             "--pack-mod" => pack = Some(PathBuf::from(value())),
             "--dist" => dist = Some(PathBuf::from(value())),
+            // Sends a mod's pushed commit to the mod index, see `submit.rs`.
+            "--submit-mod" => submit = Some(PathBuf::from(value())),
+            "--owner" => owner = Some(value()),
             "--size" => {
                 let v: Vec<u32> = value().split('x').filter_map(|s| s.parse().ok()).collect();
                 if v.len() == 2 {
@@ -86,6 +112,16 @@ fn main() {
                 None => eprintln!("unknown argument {other}"),
             },
         }
+    }
+    if let Some(dir) = submit {
+        match submit::run(&dir, owner) {
+            Ok(done) => println!("{done}"),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
     }
     let dirs = chosen_run.map_or_else(|| paths::of_install(&root), |run| Dirs::under(&run));
     (opts.run_dir, opts.cache_dir) = (dirs.data, dirs.cache);
@@ -141,7 +177,7 @@ fn main() {
         }
         return;
     }
-    if let Err(e) = weft_engine::run(vulkan, opts) {
+    if let Err(e) = weft_engine::run(RENDERERS, opts) {
         log::error!("{e}");
         std::process::exit(1);
     }
@@ -277,6 +313,8 @@ fn make_dist(root: &std::path::Path, out: &std::path::Path) -> Result<(), String
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(out).map_err(|e| e.to_string())?;
     std::fs::copy(&exe, out.join(exe.file_name().unwrap())).map_err(|e| e.to_string())?;
+    // What mods have to be built against, for a launcher to read without starting the game.
+    std::fs::write(out.join("mod-abi.txt"), format!("{:016x}", weft_engine::modloader::ABI_VERSION)).map_err(|e| e.to_string())?;
     copy_dir(&root.join("crates").join("engine").join("assets"), &out.join("assets").join("core"))?;
     for dir in subdirs(&root.join("mods")) {
         // Development tools (the test kit) mark themselves `dist = false` in Cargo.toml.

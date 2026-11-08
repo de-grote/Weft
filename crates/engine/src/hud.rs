@@ -441,7 +441,7 @@ impl Hud {
             }
             Part::HeldName if editing => drop(ui.text(text::rich(lang.get("hud.edit.sample_name"), lang, None), "label")),
             Part::HeldName => {}
-            Part::Hotbar if client.mode.has(weft_abi::game_mode_flags::NO_HUD) => {}
+            Part::Hotbar if client.mode.has(crate::tag_bits::game_mode::NO_HUD) => {}
             Part::Hotbar => {
                 ui.container(Style::row().gap(0.0), |ui| {
                     for i in 0..content().game.player_layout.hotbar as u64 {
@@ -668,59 +668,58 @@ impl Place {
         }
     }
 
-    pub fn from_abi(d: &weft_abi::TextPlaceDesc) -> Place {
-        let s = |v: weft_abi::Str| unsafe { v.as_str().to_string() };
-        let name = s(d.name);
-        let anchor = s(d.anchor);
-        let class = s(d.class);
+    /// A place from its entry: plain text where it says nothing.
+    pub fn bake(e: &crate::entries::Entry) -> Place {
+        use weft_abi::comp::text_place as t;
+        let anchor = e.text(t::ANCHOR).unwrap_or_default().to_string();
+        let class = e.text(t::CLASS).unwrap_or("label").to_string();
         Place {
-            element: name.clone(),
-            at: anchor.is_empty().then_some(d.at),
+            element: if e.has(t::NO_ELEMENT) { String::new() } else { e.name.clone() },
+            at: (anchor.is_empty() && !e.has(t::OWN_AT)).then(|| e.or(t::AT, [0.5, 0.5, 0.0, 0.0])),
+            own_at: e.get(t::OWN_AT),
             anchor,
-            order: d.order,
-            scale: if d.scale > 0.0 { d.scale } else { 1.0 },
-            times: d.times.map(|t| t.max(0.0)),
-            stacks: d.stacks != 0,
-            class: if class.is_empty() { "label".into() } else { class },
-            sample: s(d.sample),
-            ..Place::plain(&name)
+            order: e.or(t::ORDER, 0),
+            scale: e.get::<f32>(t::SCALE).filter(|s| *s > 0.0).unwrap_or(1.0),
+            times: e.or(t::TIMES, [0.0f32, 2.5, 0.5]).map(|v| v.max(0.0)),
+            stacks: e.has(t::STACKS),
+            wrap: e.has(t::WRAP),
+            class,
+            sample: e.text(t::SAMPLE).unwrap_or_default().to_string(),
+            ..Place::plain(&e.name)
         }
     }
 }
 
 /// The engine's places, by `abi::show_place`: vanilla's numbers, with the crosshair between a
 /// title and its subtitle.
-pub fn engine_places() -> Vec<Place> {
+pub fn engine_places() -> Vec<crate::entries::RawEntry> {
+    use weft_abi::comp::text_place as t;
     let n = weft_abi::show_place::NAMES;
+    let e = |name: &str| crate::entries::RawEntry::engine(weft_abi::entry_kind::TEXT_PLACE, name);
+    let title = |name: &str, scale: f32, dy: f32, sample: &str| {
+        e(name)
+            .set(t::SCALE, scale)
+            .set(t::TIMES, [0.5f32, 3.5, 1.0])
+            .set(t::AT, [0.5f32, 0.5, 0.0, dy])
+            .set(t::SAMPLE, sample.to_string())
+    };
     vec![
-        Place { own_at: Some([0.5, 0.5]), ..Place::plain(n[0]) },
-        Place { times: [0.0, 10.0, 0.0], class: "chat".into(), wrap: true, ..Place::plain(n[1]) },
-        Place {
-            stacks: false,
-            element: n[2].into(),
-            anchor: weft_abi::hud_anchor::ABOVE_HOTBAR.into(),
-            order: 1,
-            sample: "hud.edit.sample_hint".into(),
-            ..Place::plain(n[2])
-        },
-        Place {
-            scale: 4.0,
-            times: [0.5, 3.5, 1.0],
-            stacks: false,
-            element: n[3].into(),
-            at: Some([0.5, 0.5, 0.0, -24.0]),
-            sample: "hud.edit.sample_title".into(),
-            ..Place::plain(n[3])
-        },
-        Place {
-            scale: 2.0,
-            times: [0.5, 3.5, 1.0],
-            stacks: false,
-            element: n[4].into(),
-            at: Some([0.5, 0.5, 0.0, 18.0]),
-            sample: "hud.edit.sample_subtitle".into(),
-            ..Place::plain(n[4])
-        },
+        e(n[0])
+            .set(t::OWN_AT, [0.5f32, 0.5])
+            .tag(t::STACKS)
+            .tag(t::NO_ELEMENT),
+        e(n[1])
+            .set(t::TIMES, [0.0f32, 10.0, 0.0])
+            .set(t::CLASS, "chat".to_string())
+            .tag(t::WRAP)
+            .tag(t::STACKS)
+            .tag(t::NO_ELEMENT),
+        e(n[2])
+            .set(t::ANCHOR, weft_abi::hud_anchor::ABOVE_HOTBAR.to_string())
+            .set(t::ORDER, 1i32)
+            .set(t::SAMPLE, "hud.edit.sample_hint".to_string()),
+        title(n[3], 4.0, -24.0, "hud.edit.sample_title"),
+        title(n[4], 2.0, 18.0, "hud.edit.sample_subtitle"),
     ]
 }
 

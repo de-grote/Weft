@@ -87,12 +87,32 @@ pub fn damage(stack: &ItemStack) -> u32 {
     u32_of(stack, crate::content::try_content().and_then(|c| c.ids.damage))
 }
 
-/// The pictures a stack shows as, if it has its own (`abi::comp::LAYERS`): a tool made of parts.
+/// The pictures a stack shows as, if it has its own (`abi::comp::LAYERS`: a tool made of parts)
+/// or its item's `condition` gives it a texture.
 pub fn layers(stack: &ItemStack) -> Option<&'static str> {
     let c = crate::content::try_content()?;
-    value(stack.data, c.ids.layers?)
+    c.ids
+        .layers
+        .and_then(|l| value(stack.data, l))
         .and_then(|b| std::str::from_utf8(b).ok())
         .filter(|s| !s.trim().is_empty())
+        .or_else(|| condition_texture(c, stack))
+}
+
+/// What the item's `condition` says `stack` shows as, asked once per kind of stack.
+fn condition_texture(c: &crate::content::Content, stack: &ItemStack) -> Option<&'static str> {
+    static SEEN: std::sync::LazyLock<RwLock<FxHashMap<(u32, u32), Option<&'static str>>>> = std::sync::LazyLock::new(Default::default);
+    let &(owner, cb) = c.game.item_model_for_stack.get(&stack.item)?;
+    let key = (stack.item, stack.data);
+    if let Some(&t) = SEEN.read().get(&key) {
+        return t;
+    }
+    let mut a = weft_abi::ItemModelArgs { stack: *stack, model: weft_abi::Str::new(""), texture: weft_abi::Str::new("") };
+    crate::host::invoke(owner, cb, &mut a);
+    let t = unsafe { a.texture.as_str() };
+    let t = (!t.is_empty()).then(|| &*Box::leak(t.to_string().into_boxed_str()));
+    SEEN.write().insert(key, t);
+    t
 }
 
 /// `layers` text as (texture name, tint 0xRRGGBB) pairs, white where none is given.

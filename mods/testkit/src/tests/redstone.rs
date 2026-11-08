@@ -17,7 +17,18 @@ const NAMES: [&str; 6] = ["west", "east", "down", "up", "north", "south"];
 const VECS: [[i32; 3]; 6] = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]];
 
 fn wire(faces: &[u8]) -> String {
-    format!("base:redstone[faces={}]", faces.iter().fold(0, |m, f| m | 1 << f))
+    let sides: Vec<String> = faces
+        .iter()
+        .map(|&f| format!("{}=true", NAMES[f as usize]))
+        .collect();
+    format!("base:redstone[{}]", sides.join(","))
+}
+
+/// The sides a state of wire lies on, a bit per face.
+fn wire_sides(state: u32) -> u8 {
+    (0..6u8)
+        .filter(|&f| state_prop(state, NAMES[f as usize]) == Some("true"))
+        .fold(0, |m, f| m | 1 << f)
 }
 
 fn on_floor(name: &str, front: u8, rest: &str) -> String {
@@ -99,12 +110,19 @@ pub async fn redstone_on_walls(t: T) -> R {
     Ok(())
 }
 
-/// Blocks carry a lever's power on to wire, except blockers; wire on a block powers a device next
-/// to it but not other wire.
+/// Blocks carry a lever's power on to wire, a lamp too, except blockers; wire on a block powers a
+/// device next to it but not other wire.
 pub async fn redstone_conduction(t: T) -> R {
     t.flat().await?;
     let f = t.feet();
-    for (z, block, carries) in [(-3, "base:stone", true), (-6, "base:glass", false), (-9, "base:oak_planks", true)] {
+    let blocks = [
+        (-3, "base:stone", true),
+        (-6, "base:glass", false),
+        (-9, "base:oak_planks", true),
+        (-15, "base:redstone_lamp", true),
+        (-18, "base:golden_lamp", false),
+    ];
+    for (z, block, carries) in blocks {
         t.set(add(f, [4, 0, z]), block).await?;
         t.set(add(f, [3, 0, z]), &format!("base:lever[attach=east,front=north,power=on]"))
             .await?;
@@ -168,6 +186,19 @@ pub async fn redstone_torch(t: T) -> R {
     t.set(lamp, "base:redstone_lamp").await?;
     settle(&t).await?;
     t.check(!lit(&t, lamp).await?, "a torch powers the block above it");
+    // On a wall it powers the block in front and the one above, through to what is past them.
+    let z = -15;
+    t.set(add(f, [4, 1, z]), "base:stone").await?;
+    t.set(add(f, [5, 1, z]), "base:redstone_torch[attach=west]")
+        .await?;
+    t.set(add(f, [6, 1, z]), "base:stone").await?;
+    t.set(add(f, [5, 2, z]), "base:stone").await?;
+    let (ahead, over) = (add(f, [7, 1, z]), add(f, [5, 3, z]));
+    t.set(ahead, "base:redstone_lamp").await?;
+    t.set(over, "base:redstone_lamp").await?;
+    settle(&t).await?;
+    t.check(lit(&t, ahead).await?, "through the block in front");
+    t.check(lit(&t, over).await?, "and the one above");
     Ok(())
 }
 
@@ -564,6 +595,37 @@ pub async fn redstone_timing(t: T) -> R {
     }
     let took = start.elapsed().as_secs_f32();
     t.probe("seconds a gate of 8 ticks put back takes", took, took > 0.3);
+
+    // An observer goes on 2 ticks after what it watches changes, wire's power too, for 2 ticks.
+    let z = -18;
+    let (dust, observer) = (add(f, [3, 0, z]), add(f, [3, 0, z - 1]));
+    t.set(dust, &wire(&[DOWN])).await?;
+    t.set(observer, "base:observer[facing=south]").await?;
+    t.set(add(f, [3, 0, z - 2]), "base:redstone_lamp").await?;
+    settle(&t).await?;
+    t.op(&format!("trace {} {} {} {} {} {} 40", dust[0], dust[1], dust[2], observer[0], observer[1], observer[2]))
+        .await?;
+    t.set(add(f, [3, 0, z + 1]), &lever(true)).await?;
+    t.secs(0.5).await?;
+    let seen = t.op("traced").await?;
+    let when = |at: [i32; 3], what: &dyn Fn(&str) -> bool| {
+        let cell = format!("{},{},{}", at[0], at[1], at[2]);
+        seen.lines()
+            .map(|l| l.split(' ').collect::<Vec<_>>())
+            .find(|w| w.len() == 4 && w[1] == cell && what(&format!("{} {}", w[2], w[3])))
+            .and_then(|w| w[0].parse::<i64>().ok())
+    };
+    let lit_wire = when(dust, &|s| s.ends_with(" 15"));
+    let on = when(observer, &|s| s.contains("power=on"));
+    let off = on.and_then(|on| {
+        seen.lines()
+            .filter_map(|l| l.split_once(' '))
+            .filter(|(tick, rest)| rest.contains("observer") && rest.contains("power=off") && tick.parse::<i64>().is_ok_and(|t| t > on))
+            .find_map(|(tick, _)| tick.parse::<i64>().ok())
+    });
+    let ticks = |a: Option<i64>, b: Option<i64>| a.zip(b).map(|(a, b)| b - a);
+    t.check_eq(ticks(lit_wire, on), Some(2), "ticks from the wire to the observer");
+    t.check_eq(ticks(on, off), Some(2), "ticks the observer is on");
     Ok(())
 }
 
@@ -906,7 +968,28 @@ pub async fn redstone_floater(t: T) -> R {
     let (b, took) = (along(t.clone(), id.clone()).await?, began.elapsed().as_secs_f64());
     let speed = (b - a) / took;
     t.probe("blocks a second with full power", speed as f32, (speed - 7.5).abs() < 1.5);
-    t.op(&format!("remove {id}")).await?;
+    // Its floater broken on the way, it lands as it would without power.
+    let mut floater = None;
+    for x in -1..=1 {
+        if t.op(&format!("sblock {id} {x} 0 0"))
+            .await?
+            .contains("floater")
+        {
+            floater = Some(x);
+        }
+    }
+    t.check(floater.is_some(), "the floater is on it");
+    t.op(&format!("sblock {id} {} 0 0 core:air", floater.unwrap_or(0)))
+        .await?;
+    t.secs(1.0).await?;
+    t.check(t.op(&format!("entity {id}")).await.is_err(), "it landed");
+    let mut landed = Vec::new();
+    for x in 1..30 {
+        if t.block(add(f, [x, y + 12, z])).await?.contains("slime") {
+            landed.push(x);
+        }
+    }
+    t.check(landed.len() == 1, format!("with its blocks: {landed:?}"));
 
     // Powered from the world only: out of reach of that it stops, and on a whole block.
     t.cmd(&format!("/tp {} {} {}", f[0], f[1] + 14, f[2]))
@@ -1456,6 +1539,24 @@ pub async fn redstone_contest(t: T) -> R {
     settle(&t).await?;
     t.check(t.block(block).await?.contains("piston_head"), "the other one does once one of them stops wanting it");
 
+    // Two sticky ones at one block both come back without it.
+    let z = -20;
+    let (block, a, b) = (add(f, [5, 0, z]), add(f, [3, 0, z]), add(f, [5, 0, z + 2]));
+    t.set(block, "base:cobblestone").await?;
+    t.set(a, "base:sticky_piston[facing=east]").await?;
+    t.set(b, "base:sticky_piston[facing=north]").await?;
+    for p in [[2, 0, z], [2, 0, z + 1], [2, 0, z + 2], [3, 0, z + 2], [4, 0, z + 2]] {
+        t.set(add(f, p), &wire(&[DOWN])).await?;
+    }
+    let switch = add(f, [1, 0, z + 1]);
+    t.set(switch, &lever(true)).await?;
+    settle(&t).await?;
+    t.check(lit(&t, a).await? && lit(&t, b).await?, "both out at it");
+    t.set(switch, &lever(false)).await?;
+    settle(&t).await?;
+    t.check(!lit(&t, a).await? && !lit(&t, b).await?, "both back");
+    t.check(t.block(block).await?.contains("cobblestone"), "and it stays");
+
     // Asleep behind what it can't move, until that is swapped for something it can.
     let z = -12;
     let (piston, there) = (add(f, [3, 0, z]), add(f, [4, 0, z]));
@@ -1633,30 +1734,18 @@ pub async fn redstone_by_hand(t: T) -> R {
     t.look_at(wall);
     t.frames(2).await?;
     t.press("core:use");
-    t.until("dust on the wall", Duration::from_secs(2), |t| {
-        t.c()
-            .block(cell)
-            .is_some_and(|s| state_prop(s, "faces") == Some("16"))
-    })
-    .await?;
+    t.until("dust on the wall", Duration::from_secs(2), |t| t.c().block(cell).is_some_and(|s| wire_sides(s) == 16))
+        .await?;
     t.look_at(add(cell, [0, -1, 0]));
     t.secs(0.3).await?;
     t.press("core:use");
-    t.until("dust on the floor as well", Duration::from_secs(2), |t| {
-        t.c()
-            .block(cell)
-            .is_some_and(|s| state_prop(s, "faces") == Some("20"))
-    })
-    .await?;
+    t.until("dust on the floor as well", Duration::from_secs(2), |t| t.c().block(cell).is_some_and(|s| wire_sides(s) == 20))
+        .await?;
     t.look_at(wall);
     t.secs(0.3).await?;
     t.press("core:attack");
-    t.until("the wall's piece gone", Duration::from_secs(2), |t| {
-        t.c()
-            .block(cell)
-            .is_some_and(|s| state_prop(s, "faces") == Some("4"))
-    })
-    .await?;
+    t.until("the wall's piece gone", Duration::from_secs(2), |t| t.c().block(cell).is_some_and(|s| wire_sides(s) == 4))
+        .await?;
     // The one left goes with its floor.
     t.set(add(cell, [0, -1, 0]), "air").await?;
     settle(&t).await?;
@@ -1947,12 +2036,9 @@ fn state_of(part: Part, way: ([usize; 3], [i32; 3])) -> Option<u32> {
     let first = |name: &str| Block::lookup(name);
     Some(match part {
         Part::Solid(n) | Part::Plain(n) => first(n)?,
-        Part::Wire(mask) => {
-            let m = (0..6u8)
-                .filter(|d| mask & (1 << d) != 0)
-                .fold(0u32, |m, d| m | 1 << turned_dir(way, d));
-            first("base:redstone")? + m
-        }
+        Part::Wire(mask) => (0..6u8)
+            .filter(|d| mask & (1 << d) != 0)
+            .try_fold(first("base:redstone")?, |s, d| state_with(s, NAMES[turned_dir(way, d) as usize], "true"))?,
         Part::Device(n, attach, front, prop) => {
             let mut s = first(n)?;
             if let Some(a) = attach {
@@ -2016,7 +2102,7 @@ pub async fn redstone_on_a_structure(t: T) -> R {
     // Added by what mods can do.
     let structure_set = |x: i32, block: &str| format!("structureset {id} {x} 1 0 {block}");
     t.op(&structure_set(0, "base:redstone_block")).await?;
-    t.op(&structure_set(1, "base:redstone[faces=4]")).await?;
+    t.op(&structure_set(1, "base:redstone[down=true]")).await?;
     t.frames(5).await?;
     let name = format!("test-{}", t.name());
     t.c().world_leave();
@@ -2035,7 +2121,7 @@ pub async fn redstone_on_a_structure(t: T) -> R {
         .ok_or(format!("no lift among {list}"))?
         .to_string();
     // Wire next to what was saved, which is what used to be fatal.
-    t.op(&format!("structureset {id} 2 1 0 base:redstone[faces=4]"))
+    t.op(&format!("structureset {id} 2 1 0 base:redstone[down=true]"))
         .await?;
     settle(&t).await?;
     t.check(t.state().frame > 0, "still here");
@@ -2043,7 +2129,7 @@ pub async fn redstone_on_a_structure(t: T) -> R {
     // Wire on it is drawn, in its power's color, where the structure is.
     t.op(&format!("structureset {id} 0 0 -1 base:stone"))
         .await?;
-    t.op(&format!("structureset {id} 0 1 -1 base:redstone[faces=4]"))
+    t.op(&format!("structureset {id} 0 1 -1 base:redstone[down=true]"))
         .await?;
     let uid: u64 = id.parse().map_err(|_| "not an id".to_string())?;
     // From above.

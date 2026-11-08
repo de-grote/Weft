@@ -37,6 +37,6 @@ pub async fn menu_sync(t: T) -> R {
         "coal burn time synced",
     );
     t.shot("progress").await?;
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await
 }

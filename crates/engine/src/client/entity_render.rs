@@ -1206,7 +1206,9 @@ impl EntityRenderer {
             let body = own_view && hand.as_ref().is_some_and(|h| h.body);
             let in_view = own_view && !body;
             let effect = if own_view { (0, 0.0) } else { effect };
-            let (mut layers, mut layer_count) = self.layers(look, id, &e.worn, lit, effect);
+            // Arms held in the view are bare, as vanilla's: armor is for a body.
+            let worn: &[u32] = if in_view { &[] } else { &e.worn };
+            let (mut layers, mut layer_count) = self.layers(look, id, worn, lit, effect);
             if layer_count == 0 {
                 continue;
             }
@@ -1344,7 +1346,7 @@ impl EntityRenderer {
             .draw(gpu, list, frame, super::models::Batch::World, self.model_pipe, vb);
 
         if let Some((hit, at)) = target {
-            outline_boxes(&mut boxes, &c.states[hit.state as usize].selection, rel(hit.block.as_dvec3() + at));
+            outline_boxes(&mut boxes, c.states[hit.state as usize].outlined(), rel(hit.block.as_dvec3() + at));
         }
         gizmo_line_boxes(&mut boxes, gizmo_lines, cam.pos);
         let overlay_start = boxes.len();
@@ -1892,7 +1894,7 @@ fn crack_boxes(out: &mut Vec<GpuBox>, breaking: &[Crack], textures: &GameTexture
         let shape = c
             .states
             .get(state as usize)
-            .map_or(&[][..], |s| &s.selection[..]);
+            .map_or(&[][..], |s| s.outlined());
         for b in shape {
             let (mn, mx) = (Vec3::new(b[0], b[1], b[2]), Vec3::new(b[3], b[4], b[5]));
             let (a, b) = (mn - Vec3::splat(0.004), mx + Vec3::splat(0.004));

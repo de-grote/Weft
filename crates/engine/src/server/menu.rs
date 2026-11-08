@@ -121,10 +121,10 @@ fn call(
     c: &Content,
     player: u64,
     slot: u32,
-    pick: impl Fn(&crate::registry::MenuDef) -> Option<abi::Callback>,
+    pick: impl Fn(&crate::registry::MenuDef) -> Option<(abi::ModId, abi::Callback)>,
 ) {
     let def = &c.game.menus[m.kind as usize];
-    let Some(cb) = pick(def) else { return };
+    let Some((by, cb)) = pick(def) else { return };
     let owner = match m.on {
         None => abi::Holder::NONE,
         Some(Inv { at: At::Entity(id), storage }) => abi::Holder { storage, ..abi::Holder::entity(id) },
@@ -133,11 +133,12 @@ fn call(
     let mut call = MenuCall { menu: m as *mut OpenMenu, dim: dim as *mut Dim, player };
     let mut ctx = host::CallCtx { dim: dim as *mut Dim };
     let mut args = abi::MenuArgs { world: ctx.raw(), menu: &mut call as *mut MenuCall as *mut abi::MenuCtx, player, owner, slot };
-    host::invoke(def.owner, cb, &mut args);
+    host::invoke(by, cb, &mut args);
 }
 
-/// The slots of menu `kind` opened on `on`, from its groups.
-pub fn slots(c: &Content, kind: u32, on: Option<Inv>, player: u64) -> Vec<SlotRef> {
+/// The slots of menu `kind` opened on `on`, from its groups. `worn`: the equipment slots of the
+/// entity it is on, if that wears.
+pub fn slots(c: &Content, kind: u32, on: Option<Inv>, worn: Option<u32>, player: u64) -> Vec<SlotRef> {
     use abi::slot_owner as so;
     let def = &c.game.menus[kind as usize];
     let layout = &c.game.player_layout;
@@ -150,13 +151,15 @@ pub fn slots(c: &Content, kind: u32, on: Option<Inv>, player: u64) -> Vec<SlotRe
                 u32::MAX - 1
             }),
         };
-        let o = match g.owner {
-            so::MENU => Owner::Temp,
-            so::MACHINE => Owner::On(on.unwrap_or(Inv::own(At::Entity(0)))),
-            _ => Owner::Player,
+        let (o, first) = match (g.owner, worn) {
+            (so::MENU, _) => (Owner::Temp, None),
+            (so::HOLDER, _) => (Owner::On(on.unwrap_or(Inv::own(At::Entity(0)))), None),
+            (so::WORN, Some(w)) => (Owner::On(on.unwrap_or(Inv::own(At::Entity(0)))), Some(w + g.start)),
+            (so::WORN, None) => (Owner::Player, Some(layout.worn.start + g.start)),
+            _ => (Owner::Player, None),
         };
         for i in 0..n {
-            let index = g.index(layout, i);
+            let index = first.map_or_else(|| g.index(layout, i), |f| f + i);
             // The stack the menu is open on can't be moved while it is.
             let locked = o == Owner::Player && on.is_some_and(|inv| inv.at == At::Stack { entity: player, slot: index });
             let flags = if locked { g.flags | sf::LOCKED } else { g.flags };
@@ -164,6 +167,13 @@ pub fn slots(c: &Content, kind: u32, on: Option<Inv>, player: u64) -> Vec<SlotRe
         }
     }
     out
+}
+
+/// Where the equipment of the entity `on` is starts in its inventory, if it wears.
+fn worn_on(dim: &Dim, c: &Content, on: Option<Inv>) -> Option<u32> {
+    let Some(Inv { at: At::Entity(id), storage: 0 }) = on else { return None };
+    let w = &c.game.entities[dim.entities.get(id)?.kind as usize].worn;
+    (!w.is_empty()).then_some(w.start)
 }
 
 pub fn open(dim: &mut Dim, c: &Content, player: u64, kind: u32, on: Option<Inv>) -> OpenMenu {
@@ -177,7 +187,7 @@ pub fn open(dim: &mut Dim, c: &Content, player: u64, kind: u32, on: Option<Inv>)
         kind,
         on,
         held_item,
-        slots: slots(c, kind, on, player),
+        slots: slots(c, kind, on, worn_on(dim, c, on), player),
         temp: vec![ItemStack::EMPTY; def.temp_slots as usize],
         cursor: ItemStack::EMPTY,
         sent_slots: Vec::new(),
@@ -377,7 +387,7 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
         let creative = dim
             .entities
             .get(player)
-            .is_some_and(|e| e.mode.has(weft_abi::game_mode_flags::NO_COSTS));
+            .is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::NO_COSTS));
         let there = if (slot as usize) < m.slots.len() { get(m, dim, player, slot) } else { ItemStack::EMPTY };
         if creative && m.cursor.is_empty() && !there.is_empty() {
             m.cursor = ItemStack { count: c.max_stack(there.item), ..there };

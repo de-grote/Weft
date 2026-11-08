@@ -10,6 +10,47 @@ pub use shader::{BufferKind, Shader, ShaderError};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
+/// Handles to a backend's objects: indices into a list with free slots reused.
+pub struct Slab<T> {
+    pub items: Vec<Option<T>>,
+    free: Vec<u32>,
+}
+
+impl<T> Default for Slab<T> {
+    fn default() -> Self {
+        Slab { items: Vec::new(), free: Vec::new() }
+    }
+}
+
+impl<T> Slab<T> {
+    pub fn insert(&mut self, v: T) -> u32 {
+        if let Some(i) = self.free.pop() {
+            self.items[i as usize] = Some(v);
+            i
+        } else {
+            self.items.push(Some(v));
+            self.items.len() as u32 - 1
+        }
+    }
+    pub fn remove(&mut self, i: u32) -> Option<T> {
+        let v = self.items.get_mut(i as usize)?.take();
+        if v.is_some() {
+            self.free.push(i);
+        }
+        v
+    }
+    pub fn get(&self, i: u32) -> &T {
+        self.items[i as usize]
+            .as_ref()
+            .expect("stale render handle")
+    }
+    pub fn get_mut(&mut self, i: u32) -> &mut T {
+        self.items[i as usize]
+            .as_mut()
+            .expect("stale render handle")
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BufferId(pub u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

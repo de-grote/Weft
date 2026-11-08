@@ -50,14 +50,22 @@ impl Server {
         let id = r.new_id();
         let mut e = Entity::new(id, c.game.player_kind, pos, health);
         e.player = true;
-        e.mode = self
-            .storage
-            .as_ref()
-            .map_or(GameMode::SURVIVAL, |s| saved_mode(&s.lock(), &key));
+        let (mode, deaths) = self.storage.as_ref().map_or((None, None), |s| {
+            let s = s.lock();
+            (saved_field(&s, &key, "mode").and_then(|m| GameMode::parse(&m)), saved_field(&s, &key, "deaths").and_then(|d| d.parse().ok()))
+        });
+        // A new player gets the mode the world was made with.
+        e.mode = mode.unwrap_or_else(|| {
+            self.storage
+                .as_ref()
+                .map_or(GameMode::SURVIVAL, |s| s.lock().meta.game_mode)
+        });
         (e.yaw, e.pitch) = (look[0], look[1]);
         (e.flying, e.fire) = (flying, fire);
-        // The first connection is the one playing on this machine, the world's owner.
-        let permission = if pi == 0 && !self.cfg.dedicated {
+        // The first connection is the one playing on this machine, the world's owner, with
+        // commands if the world was made with cheats.
+        let cheats = self.storage.as_ref().is_none_or(|s| s.lock().meta.cheats);
+        let permission = if pi == 0 && !self.cfg.dedicated && cheats {
             abi::permission::OWNER
         } else {
             self.storage
@@ -70,7 +78,7 @@ impl Server {
         let selected = e.selected;
         let mode = e.mode;
         r.entities.insert_with(c, e, inv, comps);
-        mode_modifiers(c, r, id, mode);
+        r.keep_sources(c, id);
         let worn = worn_of(c, &r.entities, id);
         // Known only now that the modifiers are back; a new player (no saved health) starts full.
         let max = r.max_health(c, id);
@@ -90,6 +98,7 @@ impl Server {
         p.dim = dim;
         p.entity = id;
         p.last_place = (None, pos);
+        p.deaths = deaths.unwrap_or(0);
         p.first_sync = true;
         p.glow_sent = false;
         log::info!("{} joined", p.name);
@@ -165,6 +174,9 @@ pub(super) fn save_player(s: &Storage, p: &Player, d: &Dim) {
     if e.mode != GameMode::SURVIVAL {
         text.push_str(&format!("mode = {}\n", e.mode.name()));
     }
+    if p.deaths > 0 {
+        text.push_str(&format!("deaths = {}\n", p.deaths));
+    }
     if let Some(inv) = d.entities.inventories.get(&p.entity) {
         let items: Vec<String> = inv
             .iter()
@@ -192,11 +204,10 @@ pub(super) fn save_player(s: &Storage, p: &Player, d: &Dim) {
     }
 }
 
-pub(super) fn saved_mode(s: &Storage, key: &str) -> GameMode {
-    let src = std::fs::read_to_string(s.player_path(key)).unwrap_or_default();
-    crate::kv::get(&src, "mode")
-        .and_then(GameMode::parse)
-        .unwrap_or_default()
+/// What a player's file says of `field`.
+fn saved_field(s: &Storage, key: &str, field: &str) -> Option<String> {
+    let src = std::fs::read_to_string(s.player_path(key)).ok()?;
+    crate::kv::get(&src, field).map(str::to_string)
 }
 
 /// Dimension (`None`: unknown now), position, health, inventory, components.

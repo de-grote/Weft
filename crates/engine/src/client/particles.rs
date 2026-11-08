@@ -6,8 +6,9 @@
 
 use std::collections::VecDeque;
 
+use crate::tag_bits::particle as pf;
 use glam::{DVec3, IVec3, Vec3};
-use weft_abi::{ParticleBurst, particle_flags as pf};
+use weft_abi::ParticleBurst;
 use weft_render::*;
 
 use super::textures::GameTextures;

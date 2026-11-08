@@ -194,14 +194,24 @@ pub fn load(assets: &Assets, c: &Content) -> (Looks, Names) {
         let Some(m) = from_pack(&format!("{ns}:block/{path}")) else { continue };
         for st in b.first_state..b.first_state + b.states {
             let s = &c.states[st as usize];
+            // The file is written for the block unturned, as the mod's own model is.
+            let t = s.turn;
+            let own = |i: usize| s.textures[t.face(i)];
             let mut look = StateLook::default();
             match &m.cube {
                 // Only a cube is kept one: it hides the faces against its neighbors. Anything
                 // else is redrawn as a cube's box.
                 Some(cube) if s.model == BlockModel::Cube => {
-                    look.textures = Some(std::array::from_fn(|i| if cube[i].is_empty() { s.textures[i] } else { id(&cube[i]) }))
+                    let own: [u32; 6] = std::array::from_fn(|i| if cube[i].is_empty() { own(i) } else { id(&cube[i]) });
+                    look.textures = Some(crate::content::turned_faces(t, own));
                 }
-                _ => look.boxes = Some(file_boxes(&m, &|i| s.textures[i], &mut id)).filter(|b| !b.is_empty()),
+                _ => {
+                    let boxes: Vec<ModelBox> = file_boxes(&m, &own, &mut id)
+                        .iter()
+                        .map(|b| b.turned(t))
+                        .collect();
+                    look.boxes = Some(boxes).filter(|b| !b.is_empty());
+                }
             }
             if looks.states.len() <= st as usize {
                 looks.states.resize_with(st as usize + 1, || None);

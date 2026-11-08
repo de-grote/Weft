@@ -831,7 +831,7 @@ impl Terrain {
             return;
         }
         // Edits that came while it was being made.
-        let lit = !area::catch_up(content(), &self.edits, pos, &mut cube);
+        let lit = !area::catch_up(&self.edits, pos, &mut cube);
         self.waiting.insert(pos, (cube, lit));
     }
 

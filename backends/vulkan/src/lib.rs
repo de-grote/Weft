@@ -14,43 +14,6 @@ const FRAMES: usize = 2;
 const MAX_MARKS: u32 = 16;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
-struct Slab<T> {
-    items: Vec<Option<T>>,
-    free: Vec<u32>,
-}
-
-impl<T> Slab<T> {
-    fn new() -> Self {
-        Slab { items: Vec::new(), free: Vec::new() }
-    }
-    fn insert(&mut self, v: T) -> u32 {
-        if let Some(i) = self.free.pop() {
-            self.items[i as usize] = Some(v);
-            i
-        } else {
-            self.items.push(Some(v));
-            self.items.len() as u32 - 1
-        }
-    }
-    fn remove(&mut self, i: u32) -> Option<T> {
-        let v = self.items.get_mut(i as usize)?.take();
-        if v.is_some() {
-            self.free.push(i);
-        }
-        v
-    }
-    fn get(&self, i: u32) -> &T {
-        self.items[i as usize]
-            .as_ref()
-            .expect("stale render handle")
-    }
-    fn get_mut(&mut self, i: u32) -> &mut T {
-        self.items[i as usize]
-            .as_mut()
-            .expect("stale render handle")
-    }
-}
-
 struct Buffer {
     raw: vk::Buffer,
     alloc: Allocation,
@@ -147,6 +110,9 @@ pub struct VulkanBackend {
     samplers: [vk::Sampler; 4],
     free_tex: Vec<u32>,
     next_tex: u32,
+    /// What a freed texture's slot shows until it is taken again: whoever still has its number
+    /// samples nothing rather than freed memory (a lost device on Intel, garbage elsewhere).
+    blank_view: vk::ImageView,
     capture_requested: bool,
     capture: Option<(vk::Buffer, Allocation, u32, u32, vk::Format)>,
     device_name: String,
@@ -388,11 +354,15 @@ impl VulkanBackend {
                 .fill_mode_non_solid(true)
                 .shader_int16(true);
             let mut f11 = vk::PhysicalDeviceVulkan11Features::default().storage_buffer16_bit_access(true);
+            // Texture slots are written while the frame before may still be drawing, which only
+            // this makes legal; where it is missing, it was so before too.
+            let unused_while_pending = has12.descriptor_binding_update_unused_while_pending != vk::FALSE;
             let mut f12 = vk::PhysicalDeviceVulkan12Features::default()
                 .descriptor_indexing(true)
                 .runtime_descriptor_array(true)
                 .descriptor_binding_partially_bound(true)
                 .descriptor_binding_sampled_image_update_after_bind(true)
+                .descriptor_binding_update_unused_while_pending(unused_while_pending)
                 .shader_sampled_image_array_non_uniform_indexing(true)
                 // Metal has no such draw, and nothing needs it yet.
                 .draw_indirect_count(has12.draw_indirect_count != vk::FALSE)
@@ -477,7 +447,10 @@ impl VulkanBackend {
                 });
             }
 
-            let flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND;
+            let mut flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND;
+            if unused_while_pending {
+                flags |= vk::DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING;
+            }
             let binding_flags = [flags, vk::DescriptorBindingFlags::empty(), Default::default(), Default::default(), Default::default()];
             let bindings = [
                 vk::DescriptorSetLayoutBinding::default()
@@ -605,9 +578,9 @@ impl VulkanBackend {
                 want_size: (desc.width, desc.height),
                 vsync: desc.vsync,
                 dirty_swapchain: true,
-                buffers: Slab::new(),
-                textures: Slab::new(),
-                pipelines: Slab::new(),
+                buffers: Slab::default(),
+                textures: Slab::default(),
+                pipelines: Slab::default(),
                 uploads: Vec::new(),
                 global_layout,
                 global_pool,
@@ -615,6 +588,7 @@ impl VulkanBackend {
                 samplers,
                 free_tex: Vec::new(),
                 next_tex: 0,
+                blank_view: vk::ImageView::null(),
                 capture_requested: false,
                 capture: None,
                 device_name,
@@ -623,6 +597,12 @@ impl VulkanBackend {
                 gpu_times: Vec::new(),
             };
             backend.recreate_swapchain()?;
+            let blank = backend.create_texture(
+                &TextureDesc { width: 1, height: 1, mips: 1, format: Format::Rgba8Srgb, render_target: false },
+                "freed slot",
+            );
+            backend.write_texture(blank, 0, &[0; 4]);
+            backend.blank_view = backend.textures.get(blank.0).view;
             Ok(backend)
         }
     }
@@ -831,12 +811,22 @@ impl VulkanBackend {
                     self.allocator.free(a).ok();
                 }
                 Deferred::Texture(image, view, a, index) => {
+                    if index != u32::MAX {
+                        let info = [vk::DescriptorImageInfo::default()
+                            .image_view(self.blank_view)
+                            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+                        let write = vk::WriteDescriptorSet::default()
+                            .dst_set(self.global_set)
+                            .dst_binding(0)
+                            .dst_array_element(index)
+                            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                            .image_info(&info);
+                        self.device.update_descriptor_sets(&[write], &[]);
+                        self.free_tex.push(index);
+                    }
                     self.device.destroy_image_view(view, None);
                     self.device.destroy_image(image, None);
                     self.allocator.free(a).ok();
-                    if index != u32::MAX {
-                        self.free_tex.push(index);
-                    }
                 }
                 Deferred::Pipeline(p, l, s) => {
                     self.device.destroy_pipeline(p, None);

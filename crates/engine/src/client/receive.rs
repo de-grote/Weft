@@ -114,9 +114,8 @@ impl Client {
             ToClient::Players(names) => self.players = names,
             ToClient::GameMode(mode) => {
                 self.mode = mode;
-                self.player.flying =
-                    mode.has(weft_abi::game_mode_flags::ALWAYS_FLY) || (mode.has(weft_abi::game_mode_flags::CAN_FLY) && self.player.flying);
-                self.player.noclip = mode.has(weft_abi::game_mode_flags::NOCLIP);
+                self.player.flying = mode.has(crate::tag_bits::game_mode::ALWAYS_FLY) || (self.can_fly() && self.player.flying);
+                self.player.noclip = mode.has(crate::tag_bits::game_mode::NOCLIP);
                 self.player.fly_speed = 1.0;
             }
             ToClient::Inventory(slots) => {
@@ -173,6 +172,8 @@ impl Client {
                 self.player.speed_mul = self.attributes[a::MOVEMENT_SPEED as usize] as f64;
                 self.player.jump_mul = self.attributes[a::JUMP_STRENGTH as usize] as f64;
                 self.player.can_sprint = self.attributes[a::CAN_SPRINT as usize] >= 1.0;
+                // Flight goes with what allowed it (a mode, a ring), which comes a tick after the mode.
+                self.player.flying &= self.can_fly() || self.mode.has(crate::tag_bits::game_mode::ALWAYS_FLY);
             }
             ToClient::BreakRefused { frame, pos } => {
                 self.refused_break = Some((frame, pos));
@@ -305,7 +306,7 @@ impl Client {
             Some(o) if (sample - o).abs() < 0.25 => self.offset_target += (sample - self.offset_target) * 0.1,
             _ => (self.tick_offset, self.offset_target) = (Some(sample), sample),
         }
-        let solid = |k: u32| content().game.entities[k as usize].is(weft_abi::entity_flags::SOLID);
+        let solid = |k: u32| content().game.entities[k as usize].is(crate::tag_bits::entity::SOLID);
         // Physics looks a step of its own back, many ticks at a high `/tick rate`.
         let keep = ((self.tick_rate * STEP).ceil() as usize * 2 + 4).max(8);
         // The mount this client steers goes where it moves it.

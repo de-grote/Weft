@@ -15,7 +15,7 @@ pub async fn missing_dimension(t: T) -> R {
     t.op("put me 3 diamond 5").await?;
     t.op("stash base:chest stick 7").await?;
     t.screen("core:menu").await?;
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await?;
     let flat = Dimension::lookup("base:flatlands").ok_or("no flatlands")?;
     t.cmd("/dim base:flatlands").await?;
@@ -36,7 +36,7 @@ pub async fn missing_dimension(t: T) -> R {
         std::fs::write(f.path(), src.replace("dim = base:flatlands", "dim = ghost:gone")).map_err(|e| e.to_string())?;
     }
     // Opened from the list like a player would: the missing mod is named first.
-    t.c().screen_open(&screens::WORLDS);
+    t.c().menu_open(&screens::WORLDS);
     t.screen("core:worlds").await?;
     t.frames(2).await?;
     // A click lasts 50 ms; buttons act on release.
@@ -208,7 +208,7 @@ pub async fn camera(t: T) -> R {
     t.secs(0.3).await?;
     t.check_eq(t.state().camera, 0, "its key again comes back");
 
-    let orbit = CameraMode::generated("testmod:orbit".to_string()).camera_id();
+    let orbit = CameraMode::generated("testmod:orbit".to_string()).id();
     t.press("testmod:orbit");
     t.secs(0.8).await?;
     t.check_eq(t.state().camera, orbit, "a mod's camera on its key");
@@ -231,7 +231,31 @@ pub async fn camera(t: T) -> R {
 
 /// Mods change a player's state from the server, and its client follows: a mace's smash by the
 /// fall it reads, then the look, the hand, flight and fire set from outside.
-pub async fn entity_edit(t: T) -> R {
+/// `r.edit` of an item and a biome: the edit's values win, the rest stays (testkit's own, see
+/// its registration; its ore, liquid, dimension and terrain edits of testmod's would fail the load
+/// if they found nothing). A block's edit reaches every state, or the states of a key, and a
+/// template's blocks; `r.set` and `r.tag` by tag and by state.
+pub async fn edits(t: T) -> R {
+    t.flat().await?;
+    t.check_eq(
+        t.op("edited").await?,
+        "8 3 2 true true/true/false 4 true base:cobblestonex2,testkit:editedx1 true true true true [0.9, 2.5, 1.0] 3 4/15/1.5/false,4/3/1.5/true 40 true"
+            .to_string(),
+        "max stack, damage, warmth, tag, a weather's tags, an attribute's default, a recipe removed, a loot table's pools, a liquid's id, its block's and item's tag, a column of Mars, Mars' tag, an entity kind's size and eye, its value after the edits, a block's states after an edit of every state and one of a key (light, opacity, a value set by tag, a tag set on one state), a stair's states and their edited light",
+    );
+    // The edit of the menu adds two slots to the equipment (four and the other hand) and the
+    // player's 36.
+    t.op(&format!("emenu testkit:gear {}", t.c().player()))
+        .await?;
+    let gear = Menu::lookup("testkit:gear").unwrap_or(u32::MAX);
+    t.until("the edited menu open", Duration::from_secs(5), |t| t.c().menu().is_some_and(|m| m.kind == gear))
+        .await?;
+    t.check_eq(t.c().menu().map(|m| m.slots), Some(43), "the slots of a menu an edit added a group to");
+    t.c().menu_close();
+    t.no_screen().await
+}
+
+pub async fn entity_modify(t: T) -> R {
     t.flat().await?;
     let (dmg, fell) = {
         let s = t.op("attack_damage testmod:mace 5").await?;
@@ -291,7 +315,7 @@ pub async fn virtual_menus(t: T) -> R {
         .await?;
     t.check_eq(t.c().menu_slot(1).count, 10, "second stash slot");
     t.shot("virtual_chest").await?;
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await?;
 
     // On a held stack: what goes in stays in that stack, and the menu closes when it goes.
@@ -308,7 +332,7 @@ pub async fn virtual_menus(t: T) -> R {
     t.op("hmenu testmod:pouch 8").await?;
     t.frames(10).await?;
     t.check(t.c().menu_slot(2).is_empty(), "a new pouch shows the old one's items");
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await?;
 
     let f = t.feet();
@@ -341,7 +365,7 @@ pub async fn virtual_menus(t: T) -> R {
             .await?;
         t.screen("core:menu").await?;
     }
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await
 }
 
@@ -1076,17 +1100,15 @@ pub async fn dimensions(t: T) -> R {
     t.cmd(&format!("/setblock {} {y} {z} base:stone", x + 1))
         .await?;
     t.check_eq(t.block([x + 1, y, z]).await?, "core:air".to_string(), "debug blocks refuse /setblock");
-    // Breaking is refused like placing, and nothing holds the grid up.
-    let at = t.op("find 160 base:stone").await?;
-    let s: Vec<i32> = at
-        .split_whitespace()
-        .filter_map(|v| v.parse().ok())
-        .collect();
-    let [sx, sy, sz] = s[..] else { return Err(format!("no stone among the debug blocks: {at}")) };
+    // Breaking is refused like placing, and nothing holds the grid up: the debug block beside
+    // the water's.
+    let (sx, sy, sz) = (x + 2, y, z);
+    let was = t.block([sx, sy, sz]).await?;
+    t.check(was != "core:air", format!("a debug block beside the water: {was}"));
     // Refused, not just undone: a refused break sends the block back to the player's client.
     let broke = t.op(&format!("break {sx} {sy} {sz}")).await?;
     t.check_eq(broke, "0".to_string(), "breaking a debug block is refused");
-    t.check_eq(t.block([sx, sy, sz]).await?, "base:stone".to_string(), "debug blocks refuse breaking");
+    t.check_eq(t.block([sx, sy, sz]).await?, was, "debug blocks refuse breaking");
     t.check_eq(t.block([sx, sy - 1, sz]).await?, "core:air".to_string(), "no floor under the debug blocks");
     t.cmd("/rule core:mob_spawning 1").await?;
     t.secs(4.5).await?;

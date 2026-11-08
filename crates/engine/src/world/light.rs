@@ -224,7 +224,11 @@ impl<'a, M: CubeMap> Lighter<'a, M> {
         if c == SKY {
             return 0;
         }
-        let own = self.c.tight[state as usize].light[c - 1];
+        let (cp, i) = split(p);
+        let parts = self
+            .lookup(cp)
+            .map_or(0, |cube| parts_glow(&self.c.tight, cube.extras(i))[c - 1]);
+        let own = self.c.tight[state as usize].light[c - 1].max(parts);
         match self.extra {
             Some(extra) if !extra.is_empty() => extra.get(&p).map_or(own, |e| own.max(e[c - 1])),
             _ => own,
@@ -292,7 +296,10 @@ impl<'a, M: CubeMap> Lighter<'a, M> {
         let emits = cube
             .palette()
             .iter()
-            .any(|&s| states[s as usize].light != [0; 3]);
+            .any(|&s| states[s as usize].light != [0; 3])
+            || cube
+                .all_extras()
+                .any(|(_, parts)| parts_glow(states, parts) != [0; 3]);
         self.map.cube_mut(cp).unwrap().fill_light(0);
         self.cache.set((IVec3::MAX, std::ptr::null()));
         self.changed.insert(cp);
@@ -583,6 +590,27 @@ pub fn outward<M: CubeMap>(map: &M, c: &Content, sky: bool, cp: IVec3, out: &mut
     }
 }
 
+/// The light the other blocks of a cell give, per channel: each part shines.
+fn parts_glow(t: &[Tight], parts: &[u32]) -> [u8; 3] {
+    parts
+        .iter()
+        .fold([0; 3], |m, &s| std::array::from_fn(|i| m[i].max(t[s as usize].light[i])))
+}
+
+/// What changing the other blocks of the cell at `p` does to the light around it, as
+/// `block_changed`.
+pub fn parts_changed(
+    map: &mut impl CubeMap,
+    c: &crate::content::Content,
+    sky: bool,
+    glow: &rustc_hash::FxHashMap<IVec3, [u8; 3]>,
+    p: IVec3,
+) -> Vec<IVec3> {
+    let mut lighter = Lighter::new(map, c, sky).with_extra(glow);
+    lighter.source_changed(p);
+    std::mem::take(&mut lighter.changed).into_iter().collect()
+}
+
 /// Lights a cube alone, as if open sky were above it and nothing beside it: the expensive
 /// inside part of `light_new`, done on a generation worker.
 pub fn prelight(c: &Content, cube: &mut Cube, sky: bool) {
@@ -590,7 +618,12 @@ pub fn prelight(c: &Content, cube: &mut Cube, sky: bool) {
     let palette = cube.palette();
     let all_opaque = palette.iter().all(|&s| t[s as usize].dark());
     let all_clear = palette.iter().all(|&s| t[s as usize].clear());
-    let emits = palette.iter().any(|&s| t[s as usize].light != [0; 3]);
+    let parts: Vec<(usize, [u8; 3])> = cube
+        .all_extras()
+        .map(|(i, parts)| (i, parts_glow(t, parts)))
+        .filter(|g| g.1 != [0; 3])
+        .collect();
+    let emits = palette.iter().any(|&s| t[s as usize].light != [0; 3]) || !parts.is_empty();
     let sky = sky && !all_opaque;
     if !emits && (!sky || all_clear) {
         cube.fill_light(if sky { SKY_FULL as u32 } else { 0 });
@@ -661,6 +694,12 @@ pub fn prelight(c: &Content, cube: &mut Cube, sky: bool) {
                 if e > 0 {
                     light[ch + 1][i] = e;
                     queue.push((i as u16, e));
+                }
+            }
+            for &(i, glow) in &parts {
+                if glow[ch] > light[ch + 1][i] {
+                    light[ch + 1][i] = glow[ch];
+                    queue.push((i as u16, glow[ch]));
                 }
             }
             flood(&mut light[ch + 1], &mut queue, ch + 1);

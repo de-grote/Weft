@@ -27,6 +27,7 @@
 //! via x y z yaw pitch # a camera waypoint (eye position), or: via x y z @ tx ty tz (look at a point)
 //! travel 8            # fly through the waypoints in 8 s: spline, eased, a little hand shake
 //! glide yaw pitch 3   # turn smoothly in place over 3 s
+//! op trace 0 4 0 9 6 9 40   # a testkit server operation (`/tk`), its answer into the log
 //! quit
 //! ```
 
@@ -90,6 +91,10 @@ pub async fn run(t: T, src: String) -> R {
             }
             "look" => t.c().set_look(num(0, 0.0), num(1, 0.0)),
             "chat" => t.c().say(rest),
+            "op" => {
+                let answer = t.op(rest).await?;
+                weft_sdk::info!("op {rest}:\n{answer}");
+            }
             // `view 64 vsync off`-like settings, past what `same_conditions` fixed.
             "view" => weft_sdk::settings::VIEW_DISTANCE.set(rest.parse().map_err(|_| "view: a number")?),
             "vsync" => weft_sdk::settings::VSYNC.set(rest == "on"),

@@ -1,10 +1,11 @@
 //! Entities of one dimension: core state in a dense list, mod components as raw bytes, inventories
 //! as an engine contract every mod can read and write.
 
+use crate::tag_bits::entity as ef;
 use glam::{DVec3, IVec3};
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
-use weft_abi::{ItemStack, entity_flags as ef};
+use weft_abi::ItemStack;
 
 use crate::content::Content;
 use crate::physics;
@@ -184,6 +185,11 @@ impl Entity {
     }
 
     /// Its collision box now.
+    /// What it is doing, as conditions ask (`conditions::Body`).
+    pub fn body(&self) -> crate::conditions::Body {
+        crate::conditions::Body { in_liquid: self.in_liquid, flying: self.flying, sprinting: self.sprinting }
+    }
+
     pub fn aabb(&self, c: &Content) -> physics::Aabb {
         let physics::Dims { half_width: hw, height: h, .. } = self.dims(c);
         physics::Aabb::around(self.pos, hw, h)
@@ -201,7 +207,7 @@ impl Entity {
 
     /// Something that stands in the world and can be hit: not a dropped item or a spectator either.
     pub fn is_body(&self) -> bool {
-        self.in_world() && self.item.is_empty() && !self.mode.has(weft_abi::game_mode_flags::HIDDEN)
+        self.in_world() && self.item.is_empty() && !self.mode.has(crate::tag_bits::game_mode::HIDDEN)
     }
 
     /// It comes and goes with the world's cube it is in: players have a file of their own, what is
@@ -211,10 +217,9 @@ impl Entity {
     }
 
     pub fn state(&self, c: &Content, max_health: f32) -> weft_abi::EntityState {
-        let k = &c.game.entities[self.kind as usize];
         weft_abi::EntityState {
             kind: self.kind,
-            flags: k.flags | if self.blocked { ef::BLOCKED } else { 0 },
+            flags: if self.blocked { weft_abi::entity_state::BLOCKED } else { 0 },
             pose: self.pose.0 as u32,
             flying: self.flying as u32,
             pos: self.pos.to_array().into(),
@@ -247,8 +252,9 @@ pub struct Entities {
     pub dirty_comp: FxHashSet<(u64, u32)>,
     /// Synced components as last sent, to find what changed (`find_changes`).
     sent: FxHashMap<(u64, u32), Box<[u8]>>,
-    /// Block entities by the frame their block is in (0: the world) and where in it.
-    pub anchors: FxHashMap<(u64, IVec3), u64>,
+    /// Block entities by the frame their block is in (0: the world) and where in it, one per
+    /// block of the cell that has one, the cell's block first.
+    pub anchors: FxHashMap<(u64, IVec3), Vec<u64>>,
     /// Killed this tick: clients play the death animation when they go.
     pub killed: Vec<u64>,
     /// Item entities picked up whole this tick, and by whom (clients pull them in).
@@ -333,7 +339,10 @@ impl Entities {
                 .or_insert_with(|| vec![ItemStack::EMPTY; c.game.player_layout.slots as usize]);
         }
         if let Some(a) = e.anchor {
-            self.anchors.insert((e.block_frame(), a), id);
+            self.anchors
+                .entry((e.block_frame(), a))
+                .or_default()
+                .push(id);
         }
         self.index.insert(id, self.list.len());
         self.list.push(e);
@@ -383,10 +392,33 @@ impl Entities {
         e.anchor = Some(at);
         e.frame = (frame != 0).then_some(frame);
         e.pos = pos;
-        if let Some(was) = was.filter(|was| self.anchors.get(was) == Some(&id)) {
-            self.anchors.remove(&was);
+        if let Some(was) = was {
+            self.unanchor(was, id);
         }
-        self.anchors.insert((frame, at), id);
+        self.anchors.entry((frame, at)).or_default().push(id);
+    }
+
+    /// The block entity of the cell at `at` in `frame`: of its block, else of another in it.
+    pub fn anchored(&self, frame: u64, at: IVec3) -> Option<u64> {
+        self.anchors.get(&(frame, at))?.first().copied()
+    }
+
+    /// The block entity of kind `kind` in the cell at `at` in `frame`.
+    pub fn anchored_kind(&self, frame: u64, at: IVec3, kind: u32) -> Option<u64> {
+        self.anchors
+            .get(&(frame, at))?
+            .iter()
+            .copied()
+            .find(|&id| self.get(id).is_some_and(|e| e.kind == kind))
+    }
+
+    pub fn unanchor(&mut self, at: (u64, IVec3), id: u64) {
+        if let Some(ids) = self.anchors.get_mut(&at) {
+            ids.retain(|&x| x != id);
+            if ids.is_empty() {
+                self.anchors.remove(&at);
+            }
+        }
     }
 
     /// Who decides which region `e` is in: the body holding it, if it is a block on one.
@@ -411,7 +443,7 @@ impl Entities {
             e.removed = true;
             if let Some(a) = e.anchor {
                 let frame = e.block_frame();
-                self.anchors.remove(&(frame, a));
+                self.unanchor((frame, a), id);
             }
         }
     }
@@ -477,7 +509,7 @@ impl Entities {
             .collect();
         // Its block is the new region's now; here, the place would still count as taken.
         if let Some(a) = e.anchor {
-            self.anchors.remove(&(e.block_frame(), a));
+            self.unanchor((e.block_frame(), a), id);
         }
         let inv = self.inventories.remove(&id);
         let keys: Vec<(u64, u32)> = self.comps.keys().filter(|k| k.0 == id).copied().collect();
@@ -520,10 +552,10 @@ impl Entities {
     /// Merges into matching stacks, then empty slots. Returns the rest.
     pub fn insert_item(&mut self, c: &Content, owner: u64, mut stack: ItemStack) -> ItemStack {
         let max = c.max_stack(stack.item);
-        // Pickups never go into a player's equipment.
-        let is_player = self.get(owner).is_some_and(|e| e.player);
-        let off = c.game.player_layout.off.filter(|_| is_player);
-        let worn = if is_player { c.game.player_layout.worn.clone() } else { 0..0 };
+        // Pickups never go into equipment.
+        let Some(e) = self.get(owner) else { return stack };
+        let off = c.game.player_layout.off.filter(|_| e.player);
+        let worn = c.game.entities[e.kind as usize].worn.clone();
         let Some(inv) = self.inventories.get_mut(&owner) else { return stack };
         for (_, s) in inv
             .iter_mut()

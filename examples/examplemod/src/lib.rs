@@ -62,14 +62,13 @@ fn config(r: &mut Registry) {
 
 /// Your blocks, texture is `block/<name>.png`, translation is `block.examplemod.<name>`.
 /// More at `mods/base/src/blocks.rs` (support rules, plants, falling sand, torches, axis, etc.)
-/// And `mods/testmod/src/lib.rs` (machines, facing, replacing another mod's block etc.)
+/// And `mods/testmod/src/lib.rs` (block entities, facing, editing a block etc.)
 fn blocks(_r: &mut Registry) {
     // static RUBY_ORE: Block = Block::named("ruby_ore");
     // static NATURAL: CreativeTab = CreativeTab::named("base:natural");
     // r.block(&RUBY_ORE)
     //     .hardness(3.0)
-    //     .mineable("pickaxe")
-    //     .needs_tool_level(tool_tier::IRON)      // drops nothing without at least an iron pickaxe
+    //     .mined_by("pickaxe", tool_tier::IRON)   // drops nothing without at least an iron pickaxe
     //     .drops("ruby", 1)
     //     .tab(&NATURAL);
     //
@@ -99,6 +98,13 @@ fn blocks(_r: &mut Registry) {
     // for color in ["red", "blue"] {
     //     r.block(Block::generated(format!("{color}_brick"))).hardness(2.0);
     // }
+    //
+    // Another mod's block changed: what you set goes on every state, `state_where` on some.
+    // `r.replace(&X)` registers it again from scratch, `r.remove(&X)` takes it out.
+    // static FURNACE: Block = Block::named("base:furnace");
+    // r.edit(&FURNACE).hardness(5.0).state_where("lit=true", |s| s.light(15));
+    // The same edit on everything a pattern names (`#tag`, a name with `*`, `base:furnace[lit=true]`):
+    // r.edit_pattern::<kind::Block>("#logs").hardness(3.0);
 }
 
 /// Your items, texture is `item/<name>.png`, translation is `item.examplemod.<name>`
@@ -107,7 +113,7 @@ fn items(r: &mut Registry) {
     r.item(&EXAMPLE_ITEM).tab(&INGREDIENTS).tag("gems/example");
     // Tools, weapons, food, fuel are all components or tags, so other mods can use them:
     // static RUBY_PICKAXE: Item = Item::named("ruby_pickaxe");
-    // r.item(&RUBY_PICKAXE).tool("pickaxe").tool_level(tool_tier::DIAMOND).mining_speed(8.0).durability(1200).attack_damage(4.0);
+    // r.item(&RUBY_PICKAXE).tool("pickaxe", tool_tier::DIAMOND).mining_speed(8.0).durability(1200).attack_damage(4.0);
     // r.item(&RUBY_APPLE).set(&FOOD, ...)     // see `mods/base/src/items.rs` for food and armor
     // static FUEL: Component<u32> = Component::named("fuel");   // the common burn time, in ticks
     // r.set("examplemod:example_item", &FUEL, 1600);
@@ -121,6 +127,8 @@ fn recipes(_r: &mut Registry) {
     // r.shaped(&CRAFTING, "ruby_pickaxe", 1, &["rrr", " s ", " s "], &[('r', "#gems/ruby"), ('s', "#stick")]);
     // r.shapeless(&CRAFTING, "ruby", 9, &["ruby_block"], 0);
     // r.shapeless(&SMELTING, "ruby", 1, &["ruby_ore"], 200);    // 200 ticks in a furnace
+    // Each is named `<mod>:<kind>/<output>` (this one `examplemod:smelting/ruby`), so any is removed by it:
+    // r.remove(&Recipe::named("base:crafting/torch"));
 }
 
 /// Ores, biomes, structures and dimensions. Ores go into every dimension whose stone they replace.
@@ -129,17 +137,24 @@ fn recipes(_r: &mut Registry) {
 fn worldgen(_r: &mut Registry) {
     // static OVERWORLD: Dimension = Dimension::named("base:overworld");
     // static RUBY_ORE: Block = Block::named("ruby_ore");
-    // r.ore(&RUBY_ORE).y(-64, 16).veins(2).vein_size(5).replace("#stone_ore_replaceables");
+    // r.ore(&RUBY_ORE).y(-64, 16).veins(2).vein_size(5).replaces("#stone_ore_replaceables");
     // static SHRINE: Template = Template::named("shrine");
     // r.template(&SHRINE).layer(&["ccc", "c c", "ccc"]).key('c', "base:cobblestone");
-    // r.structure(&OVERWORLD, &SHRINE).spacing(256).chance(0.3);
+    // r.structure(&SHRINE).dimension(&OVERWORLD).spacing(256).chance(0.3);
     // Something new in the sky, on an orbit of its own (textures/sky/planet.png):
     // static PLANET: SkyObject = SkyObject::named("planet");
     // r.sky_body(&OVERWORLD, &PLANET).texture("planet").size(6.0).orbit(96000.0).phase(0.1).tilt(20.0);
+    // A weather of your own in base's overworld: lists take `push`, `insert_before`, `remove_item`..
+    // static ACID_RAIN: Weather = Weather::named("acid_rain");
+    // r.weather(&ACID_RAIN).darkness(0.5).duration(2400, 6000).weight(1);
+    // r.edit(&OVERWORLD).push(&comps::dimension::WEATHERS, ACID_RAIN.name().to_string());
+    // Base's iron, twice as common (an ore is named like its block):
+    // static IRON_ORE: Block = Block::named("base:iron_ore");
+    // r.edit(IRON_ORE.ore()).veins(12);
 }
 
 /// Mobs and other entities
-/// Models in code (`biped`, `quadruped`) or Blockbench files in `assets/models`
+/// Models in code (`humanoid`, `quadruped`, `spider`) or Blockbench files in `assets/models`
 /// More at `mods/base/src/mobs.rs` (AI goals, spawn rules, etc.).
 fn entities(_r: &mut Registry) {
     // static GHOST: EntityKind = EntityKind::named("ghost");
@@ -148,12 +163,12 @@ fn entities(_r: &mut Registry) {
 }
 
 /// Reacting to the game, events arrive batched once per tick
-/// for "may this happen" use `r.intercept`
+/// for "may this happen" use `r.before_event`
 /// to change a number use `r.modify`
 /// For more info check "Hooking into the game" in `docs/modding.md`
 fn events(r: &mut Registry) {
     // Players joining get an example item if the setting allows it.
-    r.on(&PLAYER_JOINED, |batch| {
+    r.on_event(&PLAYER_JOINED, |batch| {
         if !GIFT_ON_JOIN.get() {
             return;
         }
@@ -164,8 +179,8 @@ fn events(r: &mut Registry) {
             info!("gave player {} an example item", joined.player);
         }
     });
-    // r.on(&actions::BREAK_BLOCK, |b| for e in b.iter() { /* e.player, e.pos, e.state */ });
-    // r.intercept(&actions::BREAK_BLOCK, |q| if q.pos().y < -60 { Verdict::Deny } else { Verdict::Abstain });
+    // r.on_event(&actions::BREAK_BLOCK, |b| for e in b.iter() { /* e.player, e.pos, e.state */ });
+    // r.before_event(&actions::BREAK_BLOCK, |q| if q.pos().y < -60 { Verdict::Deny } else { Verdict::Abstain });
     // r.modify(&chain::DAMAGE, stage::MULTIPLY, |m| m.value *= 0.9);
 }
 
@@ -174,7 +189,7 @@ fn events(r: &mut Registry) {
 /// you only read the values by name.
 fn commands(_r: &mut Registry) {
     // Text on a player's screen, all one call with different defaults (docs: Text on the screen).
-    // r.on(&PLAYER_JOINED, |b| for e in b.iter() {
+    // r.on_event(&PLAYER_JOINED, |b| for e in b.iter() {
     //     b.world().hint(e.player, "examplemod.hello", &[]);
     //     b.world().show(e.player, "examplemod.hello", &[]).at(0.5, 0.1).scale(2.0).times(0.5, 2.0, 0.5);
     // });
@@ -187,14 +202,14 @@ fn commands(_r: &mut Registry) {
 /// Client side: screens, HUD, key bindings, packets.
 /// More at:
 /// `mods/base/src/player.rs` (HUD),
-/// `mods/testmod/src/lib.rs` (screens, machine panels),
+/// `mods/testmod/src/lib.rs` (screens, block entity panels),
 /// `mods/testmod/src/looks.rs` (particles, shaders, sounds).
 fn client(_r: &mut Registry) {
     // static DASH: Key = Key::named("dash");
-    // static ABOUT: Screen = Screen::named("about");
+    // static ABOUT: Menu = Menu::named("about");
     // static MANA: HudElement = HudElement::named("mana");
-    // r.key(&DASH, "R").on_press_server(|p| { let w = p.world(); info!("{} dashes", p.player()); w.game_time(); });
-    // r.screen(&ABOUT, |ui| ui.panel("background", S::column().pad(8.0), |ui| ui.text("examplemod.about")));
+    // r.key(&DASH, "R").on_server(|p| { let w = p.world(); info!("{} dashes", p.player()); w.game_time(); });
+    // r.menu(&ABOUT).screen(|ui| ui.panel("background", S::column().pad(8.0), |ui| ui.text("examplemod.about")));
     // r.hud_element(&MANA, hud_anchor::HOTBAR_RIGHT, 2, |ui| ui.text_bind(|c, out| { /* ... */ }));
     //
     // In the hands: both or none, one with its own action, first on a right click. An item's clips
@@ -230,13 +245,13 @@ fn client(_r: &mut Registry) {
     // r.stack_component(&GRADE, 0);
     // fn made(grade: u32) -> ItemStack { CHISEL.stack(1).with(&GRADE, grade).with_wear(5) }
     //
-    // Sparks around a mob while it lives, the engine's steps and idle noises kept:
+    // Sparks around a mob while it lives, the engine's steps and idle noises kept (`.own_effects()`
+    // on the kind would turn those off):
     // static WISP: EntityKind = EntityKind::named("wisp");
     // static SPARK: Particle = Particle::named("spark");
-    // r.client_entity_cosmetics(&WISP, |c, e| {
+    // r.client_entity_frame(&WISP, |c, e| {
     //     if e.dying().is_none() {
     //         c.spawn_particles(&SPARK, e.pos());
     //     }
-    //     e.run_engine_effects();
     // });
 }

@@ -33,6 +33,18 @@ pub struct IconEffect {
     pub amount: f32,
     pub value: f32,
 }
+
+/// A row of icons as `abi::icon_effect::MAX` makes it: how many icons, in how many rows of
+/// `count`, and the pixels from one row to the next (vanilla's hearts: closer the more there are).
+pub fn icon_rows(count: u32, effects: &[IconEffect]) -> (u32, u32, f32) {
+    let count = count.max(1);
+    let icons = effects
+        .iter()
+        .find(|e| e.kind == weft_abi::icon_effect::MAX)
+        .map_or(count, |e| (e.value.max(0.0) / 2.0).ceil() as u32);
+    let rows = icons.div_ceil(count).max(1);
+    (icons, rows, (12.0 - rows as f32).clamp(3.0, 10.0))
+}
 pub type ItemBind = Box<dyn Fn(&Ctx) -> (u32, u32)>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -257,10 +269,12 @@ pub enum Kind {
         max: usize,
         on_change: Option<Rc<dyn Fn(&mut Ctx, &str)>>,
     },
+    /// Focused by a click, the arrow keys move it a step of `steps` across.
     Slider {
         value: f32,
         bind: FloatBind,
         on_change: Rc<dyn Fn(&mut Ctx, f32)>,
+        steps: u32,
     },
     /// Engine-drawn content (slots, 3D previews) identified by a tag.
     Custom {
@@ -629,10 +643,11 @@ impl Ui {
         } else {
             match &self.nodes[id].kind {
                 Kind::Item { .. } => [16.0, 16.0],
-                Kind::Icons { count, dir, .. } if matches!(*dir, weft_abi::ui_dir::UP | weft_abi::ui_dir::DOWN) => {
-                    [9.0, *count as f32 * 8.0 + 1.0]
+                Kind::Icons { count, dir, effects, .. } => {
+                    let (_, rows, step) = icon_rows(*count, effects);
+                    let (along, across) = (*count as f32 * 8.0 + 1.0, 9.0 + (rows - 1) as f32 * step);
+                    if matches!(*dir, weft_abi::ui_dir::UP | weft_abi::ui_dir::DOWN) { [across, along] } else { [along, across] }
                 }
-                Kind::Icons { count, .. } => [*count as f32 * 8.0 + 1.0, 9.0],
                 Kind::Slider { .. } => [100.0, 12.0],
                 Kind::Input { .. } => [120.0, 18.0],
                 _ => {

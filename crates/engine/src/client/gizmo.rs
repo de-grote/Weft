@@ -124,17 +124,27 @@ impl Gizmos {
             // monsters may spawn now, yellow where they may at night, green where never.
             let dim = client.world.dim;
             let hostile = |s: &&crate::registry::SpawnRule| {
-                c.game.categories[s.category as usize].name == "core:hostile" && s.dimension.is_none_or(|d| d == dim)
+                c.game.categories[s.category as usize].name == "core:hostile" && (s.dims.is_empty() || s.dims.contains(&dim))
             };
-            let rules: Vec<[u32; 2]> = c
+            let rules: Vec<Option<u32>> = c
                 .game
                 .spawns
                 .iter()
                 .filter(hostile)
-                .map(|s| s.light)
+                .map(|s| s.when)
                 .collect();
             let day = client.daylight();
-            let spawns = |light: u32| rules.iter().any(|r| (r[0]..=r[1]).contains(&light));
+            let spawns = |p: IVec3, below: u32, daylight: f32| {
+                let ask = crate::conditions::Ask {
+                    pos: p.as_dvec3() + DVec3::splat(0.5),
+                    state: below,
+                    daylight: Some(daylight),
+                    ..Default::default()
+                };
+                rules
+                    .iter()
+                    .any(|w| w.is_none_or(|w| crate::conditions::on_client(Some(client), w, &ask)))
+            };
             for dy in -4..=4 {
                 for dz in -6..=6 {
                     for dx in -6..=6 {
@@ -146,12 +156,10 @@ impl Gizmos {
                         if !solid(below) || solid(here) {
                             continue;
                         }
-                        let l = client.world.light(p);
-                        let block = weft_abi::light::block(l).min(15);
-                        let now = weft_abi::light::effective(l, day);
-                        let color = if spawns(now) {
+                        let block = weft_abi::light::block(client.world.light(p)).min(15);
+                        let color = if spawns(p, below, day) {
                             0xFF5040FF
-                        } else if spawns(block) {
+                        } else if spawns(p, below, 0.0) {
                             0xFFD040FF
                         } else {
                             0x60FF60FF

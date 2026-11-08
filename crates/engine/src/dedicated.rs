@@ -13,7 +13,7 @@ use crate::{config, modloader, net, saves, settings::Settings};
 
 pub fn run(opts: Options) -> Result<(), String> {
     let off = modloader::off_file(&opts.run_dir, false);
-    let _mods = modloader::load(&opts.mod_dirs, &opts.cache_dir, &off)?;
+    let _mods = modloader::load(&opts.mod_dirs, &opts.cache_dir, &off, &opts.mods_off)?;
     crate::settings::migrate(&opts.run_dir);
     config::load(&opts.run_dir);
     if let Some(port) = crate::app::api::launch_options().get("port") {

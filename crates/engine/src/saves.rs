@@ -17,7 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::app::{Ctx, Request};
 use crate::content::{AIR, Content};
-use crate::screens::{BuildCx, Screen, button, frame, label};
+use crate::screens::{BuildCx, Screen, bound_button, button, frame, label, on_off};
 use crate::ui::text::{self, Arg};
 use crate::ui::{Kind, Style, Ui};
 use crate::world::Cube;
@@ -52,6 +52,10 @@ pub struct WorldMeta {
     pub configs: Vec<(String, f64)>,
     /// Mods (id, version) the world was last played with.
     pub mods: Vec<(String, String)>,
+    /// What a player new to the world starts in.
+    pub game_mode: crate::world::GameMode,
+    /// Its owner may use commands (the player on this machine; a server's operators are `ops`).
+    pub cheats: bool,
 }
 
 pub fn now_secs() -> u64 {
@@ -78,6 +82,8 @@ impl WorldMeta {
             next_entity: 1,
             configs: Vec::new(),
             mods: Vec::new(),
+            game_mode: crate::world::GameMode::SURVIVAL,
+            cheats: true,
         };
         for (_, k, v) in crate::kv::pairs(&src) {
             match k {
@@ -86,6 +92,8 @@ impl WorldMeta {
                 "seed" => m.seed = v.parse().unwrap_or(0),
                 "last_played" => m.last_played = v.parse().unwrap_or(0),
                 "next_entity" => m.next_entity = v.parse().unwrap_or(1),
+                "game_mode" => m.game_mode = crate::world::GameMode::parse(v).unwrap_or_default(),
+                "cheats" => m.cheats = v != "false",
                 _ => {
                     if let Some(d) = k.strip_prefix("weather.") {
                         let w: Vec<&str> = v.split_whitespace().collect();
@@ -146,6 +154,7 @@ impl WorldMeta {
         for (id, v) in &self.mods {
             s.push_str(&format!("mod.{id} = {v}\n"));
         }
+        s.push_str(&format!("game_mode = {}\ncheats = {}\n", self.game_mode.name(), self.cheats));
         let _ = std::fs::create_dir_all(&self.dir);
         // Whole or not at all: a crash in the middle must not leave half of it.
         let tmp = self.dir.join("world.new");
@@ -198,6 +207,8 @@ pub fn create(saves: &Path, name: &str, seed: u64) -> WorldMeta {
         next_entity: 1,
         configs: Vec::new(),
         mods: Vec::new(),
+        game_mode: crate::world::GameMode::SURVIVAL,
+        cheats: true,
     };
     m.save();
     m
@@ -517,7 +528,7 @@ impl Storage {
         Some((cube?, data[4 + len..].to_vec()))
     }
 
-    pub fn save(&mut self, c: &Content, dim: u32, pos: IVec3, cube: &Cube, entities: &[u8]) {
+    pub fn save(&mut self, c: &Content, dim: u32, pos: IVec3, cube: &Cube, around: &crate::server::lod_tops::Around, entities: &[u8]) {
         if !c.dims[dim as usize].saved {
             return;
         }
@@ -555,7 +566,7 @@ impl Storage {
         }
         self.saved[dim as usize].insert(pos);
         let seed = self.meta.seed;
-        self.lod[dim as usize].saved(c, dim, seed, pos, &cube);
+        self.lod[dim as usize].saved(c, dim, seed, pos, &cube, around);
     }
 
     pub fn flush(&mut self) {
@@ -753,6 +764,11 @@ impl Screen for WorldSelect {
     }
 }
 
+/// The `i`-th game mode, the engine's first.
+fn game_mode(i: usize) -> crate::world::GameMode {
+    crate::world::GameMode::all().nth(i).unwrap_or_default()
+}
+
 fn format_age(s: u64) -> String {
     match s {
         0..=59 => format!("{s}s"),
@@ -762,7 +778,19 @@ fn format_age(s: u64) -> String {
     }
 }
 
-pub struct CreateWorld;
+/// A new world: its name and seed, the mode new players start in, whether its owner has commands,
+/// its rules (`ConfigScreen` over the world's settings, which start at their defaults here).
+pub struct CreateWorld {
+    mode: Rc<std::cell::Cell<usize>>,
+    cheats: Rc<std::cell::Cell<bool>>,
+}
+
+impl CreateWorld {
+    pub fn new() -> CreateWorld {
+        crate::config::load_world(&[]);
+        CreateWorld { mode: Rc::default(), cheats: Rc::new(std::cell::Cell::new(false)) }
+    }
+}
 
 impl Screen for CreateWorld {
     fn name(&self) -> &str {
@@ -779,13 +807,28 @@ impl Screen for CreateWorld {
                 let seed = ui.add(Kind::input("", 32), Style::default().h(18.0).stretch());
                 ui.set_id(seed, "seed");
             });
+            let modes = crate::world::GameMode::all().count();
+            let mode = self.mode.clone();
+            let shown = self.mode.clone();
+            bound_button(
+                ui,
+                260.0,
+                move || ("world.game_mode".into(), vec![Arg::Key(format!("gamemode.{}", game_mode(shown.get()).name()))]),
+                move |_| mode.set((mode.get() + 1) % modes),
+            );
+            let (cheats, shown) = (self.cheats.clone(), self.cheats.clone());
+            bound_button(ui, 260.0, move || ("world.cheats".into(), vec![on_off(shown.get())]), move |_| cheats.set(!cheats.get()));
+            button(ui, cx, "world.rules", &[], 260.0, |c| c.requests.push(Request::Screen("core:world_rules".into())));
             ui.container(Style::row().gap(6.0), |ui| {
-                button(ui, cx, "world.create", &[], 120.0, |c| {
+                let (mode, cheats) = (self.mode.clone(), self.cheats.clone());
+                button(ui, cx, "world.create", &[], 120.0, move |c| {
                     let name = c.input_text("name").unwrap_or_default();
                     let seed = parse_seed(&c.input_text("seed").unwrap_or_default());
                     let name = if name.trim().is_empty() { "World".to_string() } else { name.trim().to_string() };
-                    c.requests
-                        .push(Request::StartWorldAnyway(create(&c.settings.saves_dir(), &name, seed)));
+                    let mut meta = create(&c.settings.saves_dir(), &name, seed);
+                    (meta.game_mode, meta.cheats, meta.configs) = (game_mode(mode.get()), cheats.get(), crate::config::world_values());
+                    meta.save();
+                    c.requests.push(Request::StartWorldAnyway(meta));
                 });
                 button(ui, cx, "menu.cancel", &[], 120.0, |c| c.requests.push(Request::Close));
             });

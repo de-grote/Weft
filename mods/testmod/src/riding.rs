@@ -18,6 +18,6 @@ pub fn register(r: &mut Registry) {
         .riders_fall()
         .rideable()
         .model(quadruped([10.0, 8.0, 18.0], 8.0, [6.0, 6.0, 7.0]));
-    // Base's leather; testmod adds its tin to this table from outside (`loot_edit`).
+    // Base's leather; testmod adds its tin to this table from outside (`r.edit(STEED.loot())`).
     r.loot(&STEED).pool(Pool::new().items("base:leather", 0, 2));
 }

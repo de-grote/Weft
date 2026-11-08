@@ -73,7 +73,7 @@ pub async fn body_chest(t: T) -> R {
     // Still open after it flew on.
     t.secs(0.4).await?;
     t.check_eq(t.c().screen(), open, "and stays open as it flies");
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await?;
 
     // Saved with it.

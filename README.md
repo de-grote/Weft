@@ -43,7 +43,7 @@ Weft is a voxel sandbox engine written in Rust. The game itself is a mod, `mods/
 
 Get the latest build for your system from [Releases](https://github.com/Weft-Rust/Weft/releases), unpack it and run `weft`. You need a GPU with Vulkan; on macOS it comes with the game (Apple Silicon, macOS 12 or newer). Windows is the main tested platform; Linux and macOS are reported to work well too. The release notes have the steps for each system.
 
-Weft ships with its own textures. If Minecraft is installed through the official launcher or Prism, Weft builds a resource pack from that copy when it starts. The pack stays on your computer and can be turned off in Settings > Resource Packs. If you have a custom installation path, you can set it with `MINECRAFT_DIR_LOOKUP` like that:
+Weft ships with its own textures. If Minecraft is installed through the official launcher or Prism, Weft builds a resource pack from that copy when it starts. The pack stays on your computer, off until you turn it on in Settings > Resource Packs. If you have a custom installation path, you can set it with `MINECRAFT_DIR_LOOKUP` like that:
 
 ```bash
 MINECRAFT_DIR_LOOKUP=path-to-prism-dir:path-to-dot-minecraft-dir cargo run --release

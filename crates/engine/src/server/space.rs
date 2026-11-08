@@ -67,6 +67,8 @@ pub struct Space {
     pub in_touch: bool,
     /// Going to a whole block, to land there.
     pub(super) stopping: bool,
+    /// Floaters set it off: without any left it stops, as without power.
+    pub(super) floated: bool,
     /// Where it was and which way it was going when it last looked at what is ahead.
     pub(super) looked_from: Option<(IVec3, IVec3)>,
     /// A moving structure's block bounds (inclusive) and cubes to light again.

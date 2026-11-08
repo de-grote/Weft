@@ -18,12 +18,12 @@ use crate::{ClientView, World};
 pub trait View {
     /// The weather's id now (`weathers::RAIN.id()`).
     fn weather(&self) -> u32;
-    /// Something falls from the sky (`weather_flags::FALLS`): rain, snow.
+    /// Something falls from the sky (the weather isn't `comps::weather::DRY`): rain, snow.
     fn raining(&self) -> bool {
-        crate::Weather::flags_of(self.weather()) & crate::abi::weather_flags::FALLS != 0
+        !crate::comps::weather::DRY.on_id(self.weather())
     }
     fn thundering(&self) -> bool {
-        crate::Weather::flags_of(self.weather()) & crate::abi::weather_flags::LIGHTNING != 0
+        crate::comps::weather::LIGHTNING.on_id(self.weather())
     }
     fn day_time(&self) -> u64;
     /// The block at `pos`, `None` where it isn't loaded.

@@ -3,15 +3,16 @@
 
 mod advancements;
 mod beds;
+mod block_entities;
 mod blocks;
 mod commands;
 mod items;
-mod machines;
 mod mobs;
 mod player;
 mod recipes;
 mod redstone;
 mod sounds;
+mod woodcutter;
 mod worldgen;
 
 use weft_sdk::*;
@@ -39,7 +40,7 @@ fn init(r: &mut Registry) {
     commands::register(r);
     items::register(r);
     player::register(r);
-    machines::register(r);
+    block_entities::register(r);
     recipes::register(r);
     sounds::register(r);
     mobs::register(r);
@@ -47,6 +48,7 @@ fn init(r: &mut Registry) {
     advancements::register(r);
     beds::register(r);
     redstone::register(r);
+    woodcutter::register(r);
     // Its terrain is described in `worldgen`.
     r.dimension(&OVERWORLD)
         .player_spawn()

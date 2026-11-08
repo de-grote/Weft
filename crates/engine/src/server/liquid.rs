@@ -2,7 +2,7 @@
 //! block reacts to neighbor changes by scheduling a tick after its delay; a tick recomputes the
 //! level from the neighbors, falls if it can and otherwise spreads sideways only towards the
 //! nearest way down within `slope_find`. Mods describe liquids and reactions as data
-//! (`abi::LiquidDesc`, `abi::ReactionDesc`), nothing calls into a mod per update.
+//! (`abi::comp::liquid`, `abi::comp::reaction`), nothing calls into a mod per update.
 
 use glam::{DVec3, IVec3};
 use weft_abi::{ItemStack, block_flags as bf};
@@ -64,7 +64,7 @@ impl Dim {
     }
 
     /// Room for liquid: neither solid nor a ladder (unloaded counts as solid).
-    fn holds_liquid(&self, c: &Content, p: IVec3) -> bool {
+    fn has_room(&self, c: &Content, p: IVec3) -> bool {
         let room = |s: u32| c.states[s as usize].flags & (bf::SOLID | bf::CLIMBABLE) == 0;
         self.get(p).is_some_and(room) && self.space.extras(p).iter().all(|&s| room(s))
     }
@@ -101,11 +101,11 @@ impl Dim {
     }
 
     fn is_hole(&self, c: &Content, below: IVec3, l: u16) -> bool {
-        self.fluid(c, below).is_some_and(|f| f.id == l) || self.holds_liquid(c, below)
+        self.fluid(c, below).is_some_and(|f| f.id == l) || self.has_room(c, below)
     }
 
     fn passes(&self, c: &Content, p: IVec3, l: u16) -> bool {
-        !self.fluid(c, p).is_some_and(|f| f.id == l && f.source) && self.holds_liquid(c, p)
+        !self.fluid(c, p).is_some_and(|f| f.id == l && f.source) && self.has_room(c, p)
     }
 
     /// Whether `l` may flow into `p` from direction `dir`: into empty room, or down into another
@@ -114,7 +114,7 @@ impl Dim {
         match self.fluid(c, p) {
             Some(f) if f.id == l => false,
             Some(_) => falling_in && self.falls_into(c, l, p).is_some(),
-            None => self.holds_liquid(c, p),
+            None => self.has_room(c, p),
         }
     }
 
@@ -123,7 +123,7 @@ impl Dim {
         let mine = c.liquids[l as usize].first_state;
         c.reactions
             .iter()
-            .find(|r| r.falls_into.is_some() && c.matches(&r.liquid, mine) && c.matches(&r.touching, state))
+            .find(|r| r.falls_into.is_some() && c.matchers.has(r.liquid, mine) && c.matchers.has(r.touching, state))
             .and_then(|r| r.falls_into)
     }
 
@@ -251,7 +251,7 @@ impl Dim {
             let hit = c
                 .reactions
                 .iter()
-                .find(|r| c.matches(&r.liquid, state) && c.matches(&r.touching, n));
+                .find(|r| c.matchers.has(r.liquid, state) && c.matchers.has(r.touching, n));
             if let Some(b) = hit.and_then(|r| if f.source { r.source } else { r.flowing }) {
                 // In with a block it just goes: what it would turn into has no room.
                 if self.space.extras(p).is_empty() && self.get(p) == Some(state) {
@@ -274,16 +274,16 @@ impl Dim {
         let creative = self
             .entities
             .get(player)
-            .is_some_and(|e| e.mode.has(weft_abi::game_mode_flags::NO_COSTS));
+            .is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::NO_COSTS));
         if let Some(&(l, empty)) = c.item_liquid.get(&held.item) {
             let hit = self
                 .look_ray(c, player, self.block_reach(c, player), false)
                 .filter(|h| h.frame == 0)?;
             let source = c.liquids[l as usize].first_state;
             // Into what holds liquid, with the same say as placing a block.
-            if c.states[hit.state as usize].flags & bf::HOLDS_LIQUID != 0
+            if c.states[hit.state as usize].liquid.is_none()
                 && self.fluid(c, hit.block).is_none()
-                && self.can_hold_liquid(c, hit.block)
+                && self.can_hold_liquid(c, hit.block, source)
             {
                 let mut q = weft_abi::Query {
                     entity: player,

@@ -17,28 +17,27 @@ pub fn register(r: &mut Registry) {
     );
     r.system(&SMELTING, tick_furnaces);
     // The furnace's state syncs to whoever has it open: the screen binds to it directly.
-    r.machine(&FURNACE, &FURNACE_MENU)
-        .block(|b| {
-            // Front towards the player; unlit and lit.
-            b.sound_group("stone")
-                .facing(Facings::HORIZONTAL, Toward::Player)
-                .prop("lit", ["false", "true"])
-                .states(|p, s| {
-                    let lit = p.is("lit", "true");
-                    let s =
-                        s.front_faces(p.facing(), "furnace_side", "furnace_top", if lit { "furnace_front_lit" } else { "furnace_front" });
-                    if lit { s.light_rgb(13, 11, 8) } else { s }
-                })
-                .hardness(3.5)
-                .mineable("pickaxe")
-                .needs_tool_level(0)
-                .tab(&crate::tabs::FUNCTIONAL)
+    r.block(&FURNACE)
+        // Front towards the player; unlit and lit.
+        .sound_group("stone")
+        .facing(Facings::HORIZONTAL, Toward::Player)
+        .prop("lit", ["false", "true"])
+        .states(|p, s| {
+            let lit = p.is("lit", "true");
+            let s = s.front_faces("furnace_side", "furnace_top", if lit { "furnace_front_lit" } else { "furnace_front" });
+            if lit { s.light_rgb(13, 11, 8) } else { s }
         })
-        .group("input", Slots::single())
-        .group("fuel", Slots::single().accepts("fuel"))
-        .group("output", Slots::single().output())
+        .hardness(3.5)
+        .mined_by("pickaxe", 0)
+        .tab(&crate::tabs::FUNCTIONAL)
+        .entity(|e| e.attach(&SMELTING).inventory(3))
+        .opens(&FURNACE_MENU);
+    r.menu(&FURNACE_MENU)
+        .group("input", Slots::single().holder())
+        .group("fuel", Slots::single().accepts("fuel").holder())
+        .group("output", Slots::single().output().holder())
         .recipes(&crate::recipes::SMELTING)
-        .attach(&SMELTING)
+        .player_inventory()
         .screen(|ui| {
             ui.panel("panel", S::column().pad(7.0).gap(4.0).stretch(), |ui| {
                 ui.title();
@@ -63,19 +62,20 @@ pub fn register(r: &mut Registry) {
             });
         });
 
-    r.machine(&CHEST, &CHEST_MENU)
-        .block(|b| {
-            b.sound_group("wood")
-                .facing(Facings::HORIZONTAL, Toward::Player)
-                .states(|p, s| {
-                    s.front_faces(p.facing(), "chest_side", "chest_top", "chest_front")
-                        .model_box([1.0, 0.0, 1.0], [15.0, 14.0, 15.0])
-                })
-                .hardness(2.5)
-                .mineable("axe")
-                .tab(&crate::tabs::FUNCTIONAL)
+    r.block(&CHEST)
+        .sound_group("wood")
+        .facing(Facings::HORIZONTAL, Toward::Player)
+        .states(|_, s| {
+            s.front_faces("chest_side", "chest_top", "chest_front")
+                .model_box([1.0, 0.0, 1.0], [15.0, 14.0, 15.0])
         })
-        .group("chest", Slots::chest(3))
+        .hardness(2.5)
+        .mined_by("axe", tool_tier::HAND)
+        .tab(&crate::tabs::FUNCTIONAL)
+        .entity(|e| e.inventory(27))
+        .opens(&CHEST_MENU);
+    r.menu(&CHEST_MENU)
+        .group("chest", Slots::chest(3).holder())
         .default_screen();
 }
 

@@ -11,14 +11,15 @@
 //!     .rideable();
 //! ```
 
-use crate::abi::{self, MountInput, Steer, Vec3};
+use crate::abi::{self, Steer, Vec3};
+use crate::client::{Keys, keys};
 use crate::{EntityState, World, host};
 
 /// A place on a mount: where a rider's feet go, from the mount's position in its own frame
 /// (+Z ahead, +X right, turned with it), whether who sits there steers, where they get off.
 #[derive(Clone)]
 pub struct Seat {
-    pub(crate) desc: abi::SeatDesc,
+    pub(crate) desc: abi::Seat,
     pub(crate) exit: Option<ExitFn>,
 }
 
@@ -26,12 +27,13 @@ pub(crate) type ExitFn = std::sync::Arc<dyn Fn(&World, u64, u64, Vec3) -> Vec3 +
 
 impl Seat {
     pub fn at(pos: impl Into<Vec3>) -> Seat {
-        Seat { desc: abi::SeatDesc { pos: pos.into(), ..abi::SeatDesc::DEFAULT }, exit: None }
+        let desc = abi::Seat { pos: pos.into(), steers: false, exit: abi::seat_exit::NEAREST, exit_at: Vec3::new(2.0, 0.0, 0.0) };
+        Seat { desc, exit: None }
     }
     /// Who sits here steers: a player with its keys (`steering`), a mob with its AI. With nobody
     /// steering a mount moves by its own AI.
     pub fn steers(mut self) -> Seat {
-        self.desc.steers = 1;
+        self.desc.steers = true;
         self
     }
     /// Where a rider of this seat gets off (`Exit::nearest(2.0)` unless told otherwise).
@@ -80,11 +82,11 @@ impl Exit {
 /// How a player's keys move a mount: called on that player's client each tick with its keys
 /// and the mount as it is, giving what the mount does. `steer::*` are the usual ones; `and`
 /// puts two together (a walk with a jump).
-pub struct Steering(pub(crate) Box<dyn Fn(&MountInput, &EntityState) -> Steer + Send + Sync>);
+pub struct Steering(pub(crate) Box<dyn Fn(&Keys, &EntityState) -> Steer + Send + Sync>);
 
 impl Steering {
     /// Yours from scratch.
-    pub fn new(f: impl Fn(&MountInput, &EntityState) -> Steer + Send + Sync + 'static) -> Steering {
+    pub fn new(f: impl Fn(&Keys, &EntityState) -> Steer + Send + Sync + 'static) -> Steering {
         Steering(Box::new(f))
     }
     /// Both: the first's movement and facing unless it gives none, the higher jump, flying if
@@ -108,50 +110,59 @@ impl Steering {
 
 /// Ready-made steering. Speeds are times the kind's walking speed.
 pub mod steer {
-    use super::Steering;
+    use super::{Keys, Steering, keys};
     use crate::abi::Steer;
+
+    fn ahead(k: &Keys) -> f32 {
+        k.axis(&keys::FORWARD, &keys::BACK)
+    }
+
+    fn aside(k: &Keys) -> f32 {
+        k.axis(&keys::RIGHT, &keys::LEFT)
+    }
 
     /// W and S go ahead and back, A and D turn it at `degrees` a second (a horse).
     pub fn walk_turn(speed: f32, degrees: f32) -> Steering {
-        Steering::new(move |i, m| Steer {
-            forward: i.forward,
+        Steering::new(move |k, m| Steer {
+            forward: ahead(k),
             speed,
             // A tick is a twentieth of a second.
-            yaw: m.yaw - i.strafe * degrees.to_radians() / 20.0,
+            yaw: m.yaw - aside(k) * degrees.to_radians() / 20.0,
             ..Steer::DEFAULT
         })
     }
     /// Faces where its rider looks; the keys walk it that way and to the sides (a pig with a
     /// carrot on a stick, a boat).
     pub fn walk_look(speed: f32) -> Steering {
-        Steering::new(move |i, _| Steer { forward: i.forward, strafe: i.strafe, speed, yaw: i.yaw, ..Steer::DEFAULT })
+        Steering::new(move |k, _| Steer { forward: ahead(k), strafe: aside(k), speed, yaw: k.yaw, ..Steer::DEFAULT })
     }
     /// `walk_look` that doesn't turn: A and D go sideways (a cart on a track, a crab).
     pub fn strafe(speed: f32) -> Steering {
-        Steering::new(move |i, _| Steer { forward: i.forward, strafe: i.strafe, speed, ..Steer::DEFAULT })
+        Steering::new(move |k, _| Steer { forward: ahead(k), strafe: aside(k), speed, ..Steer::DEFAULT })
     }
     /// Flies where its rider looks, jump and sneak taking it up and down at `climb` blocks a
     /// second (a happy ghast).
     pub fn fly(speed: f32, climb: f32) -> Steering {
-        Steering::new(move |i, _| Steer {
-            forward: i.forward,
-            strafe: i.strafe,
+        Steering::new(move |k, _| Steer {
+            forward: ahead(k),
+            strafe: aside(k),
             speed,
-            yaw: i.yaw,
+            yaw: k.yaw,
             flies: 1,
-            rise: (i.up as f32 - i.down as f32) * climb,
+            rise: k.axis(&keys::JUMP, &keys::SNEAK) * climb,
             ..Steer::DEFAULT
         })
     }
     /// Jumps at `speed` blocks a second up the moment jump is pressed, from the ground.
     pub fn jump(speed: f32) -> Steering {
-        Steering::new(move |i, _| Steer { jump: if i.jump_held == 1 { speed } else { 0.0 }, ..Steer::DEFAULT })
+        Steering::new(move |k, _| Steer { jump: if k.state(&keys::JUMP).held_ticks == 1 { speed } else { 0.0 }, ..Steer::DEFAULT })
     }
     /// Jumps when jump is let go, the higher the longer it was held, full after `ticks` (a horse).
     pub fn charged_jump(most: f32, ticks: u32) -> Steering {
-        Steering::new(move |i, _| {
-            let share = (i.jump_released as f32 / ticks.max(1) as f32).min(1.0);
-            Steer { jump: if i.jump_released > 0 { most * share.max(0.2) } else { 0.0 }, ..Steer::DEFAULT }
+        Steering::new(move |k, _| {
+            let held = k.state(&keys::JUMP).released;
+            let share = (held as f32 / ticks.max(1) as f32).min(1.0);
+            Steer { jump: if held > 0 { most * share.max(0.2) } else { 0.0 }, ..Steer::DEFAULT }
         })
     }
 }
@@ -240,15 +251,15 @@ pub(crate) fn register_rules(r: &mut crate::Registry, kind: &'static crate::Enti
         }
     };
     if rules.hits.is_some() {
-        r.intercept(&question::ATTACK, deny(rules.hits.clone()));
+        r.before_event(&question::ATTACK, deny(rules.hits.clone()));
     }
     if rules.builds.is_some() {
-        r.intercept(&actions::PLACE_BLOCK, deny(rules.builds.clone()));
-        r.intercept(&actions::BREAK_BLOCK, deny(rules.builds.clone()));
+        r.before_event(&actions::PLACE_BLOCK, deny(rules.builds.clone()));
+        r.before_event(&actions::BREAK_BLOCK, deny(rules.builds.clone()));
     }
     let share = rules.hurt_share;
     if share > 0.0 {
-        r.on(&actions::HURT, move |b| {
+        r.on_event(&actions::HURT, move |b| {
             let w = b.world();
             for h in b
                 .iter()

@@ -10,6 +10,7 @@ use glam::{DVec3, IVec3};
 use weft_abi::{ItemStack, ParticleBurst};
 
 use super::{ToClient, ToServer};
+use crate::server::lod_tops::{LodColumn, Span};
 use crate::world::{Cube, GameMode, Pose};
 
 #[derive(Default)]
@@ -165,6 +166,27 @@ macro_rules! tuples {
 }
 tuples!((0 A, 1 B), (0 A, 1 B, 2 C), (0 A, 1 B, 2 C, 3 D), (0 A, 1 B, 2 C, 3 D, 4 E), (0 A, 1 B, 2 C, 3 D, 4 E, 5 F), (0 A, 1 B, 2 C, 3 D, 4 E, 5 F, 6 G));
 
+impl Wire for Span {
+    fn put(&self, w: &mut W) {
+        (self.bottom, self.top, self.block, self.light).put(w);
+    }
+    fn get(r: &mut R) -> Option<Self> {
+        let (bottom, top, block, light) = Wire::get(r)?;
+        Some(Span { bottom, top, block, light })
+    }
+}
+
+impl Wire for LodColumn {
+    fn put(&self, w: &mut W) {
+        (self.x, self.z, self.y, self.top, self.under, self.light).put(w);
+        self.spans.put(w);
+    }
+    fn get(r: &mut R) -> Option<Self> {
+        let (x, z, y, top, under, light) = Wire::get(r)?;
+        Some(LodColumn { x, z, y, top, under, light, spans: Wire::get(r)? })
+    }
+}
+
 impl Wire for IVec3 {
     fn put(&self, w: &mut W) {
         self.to_array().put(w);
@@ -296,7 +318,7 @@ impl Wire for ParticleBurst {
 macro_rules! items {
     ($($t:ty),*) => {$(impl Item for $t {})*};
 }
-items!(u32, u64, i32, f32, f64, bool, String, IVec3, DVec3, ItemStack, Arc<Cube>, Msg, ParticleBurst);
+items!(u32, u64, i32, f32, f64, bool, String, IVec3, DVec3, ItemStack, Arc<Cube>, Msg, ParticleBurst, Span, LodColumn);
 
 pub fn encode_client(m: &ToClient) -> Vec<u8> {
     let mut w = W::default();

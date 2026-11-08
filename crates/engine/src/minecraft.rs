@@ -1,8 +1,8 @@
 //! A resource pack made from the player's own copy of Minecraft. Mojang's textures can't ship
 //! with the game, but a player who owns Minecraft has them on disk already: on start the game
 //! finds the newest client jar of the official launcher or Prism, and builds
-//! `resourcepacks/minecraft/` from it, enabling it the first time. The pack never leaves the
-//! computer it was made on.
+//! `resourcepacks/minecraft/` from it, there to be turned on in the packs screen. The pack never
+//! leaves the computer it was made on.
 //!
 //! What goes where is data of each mod (and the engine for `core:`): `assets/minecraft.txt`
 //! lists `ours = theirs` texture paths, and files under `assets/minecraft/` are copied into the
@@ -76,9 +76,8 @@ fn jars() -> Vec<(PathBuf, String)> {
     found.into_iter().map(|(_, p, v)| (p, v)).collect()
 }
 
-/// Makes or refreshes the pack; true when it was made for the first time (the caller enables it).
-/// `mods` are (namespace, assets folder), the engine's `core` among them.
-pub fn ensure_pack(run_dir: &Path, mods: &[(String, PathBuf)]) -> bool {
+/// Makes or refreshes the pack. `mods` are (namespace, assets folder), the engine's `core` among them.
+pub fn ensure_pack(run_dir: &Path, mods: &[(String, PathBuf)]) {
     let maps: Vec<(String, PathBuf, String)> = mods
         .iter()
         .filter_map(|(ns, dir)| {
@@ -88,10 +87,9 @@ pub fn ensure_pack(run_dir: &Path, mods: &[(String, PathBuf)]) -> bool {
         })
         .collect();
     if maps.is_empty() {
-        return false;
+        return;
     }
     let out = crate::packs::resource_dir(run_dir).join(PACK);
-    let fresh = !out.is_dir();
     // Snapshots and modded versions can't be told from releases by name: a jar without the
     // textures is skipped.
     for (jar, version) in jars() {
@@ -107,17 +105,16 @@ pub fn ensure_pack(run_dir: &Path, mods: &[(String, PathBuf)]) -> bool {
         let key = format!("{:016x}", fnv(&key));
         let cfg = std::fs::read_to_string(out.join("pack.cfg")).unwrap_or_default();
         if crate::kv::get(&cfg, "source").is_some_and(|k| k == key) {
-            return false;
+            return;
         }
         match build(&jar, &version, &maps, &out, &key) {
             Ok(n) => {
                 log::info!("made the {PACK} resource pack from {} ({n} files)", jar.display());
-                return fresh;
+                return;
             }
             Err(e) => log::warn!("{}: {e}", jar.display()),
         }
     }
-    false
 }
 
 /// A mod's own files for the pack, for the pack to be made again when they change.

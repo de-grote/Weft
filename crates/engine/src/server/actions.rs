@@ -67,8 +67,8 @@ impl Server {
         let off_hand = c.game.player_layout.off == Some(slot);
         let Some((r, entity)) = self.region(pi) else { return false };
         let Some(e) = r.entities.get(entity) else { return false };
-        let creative = e.mode.has(weft_abi::game_mode_flags::NO_COSTS);
-        let no_place = e.mode.has(weft_abi::game_mode_flags::NO_PLACE);
+        let creative = e.mode.has(crate::tag_bits::game_mode::NO_COSTS);
+        let no_place = e.mode.has(crate::tag_bits::game_mode::NO_PLACE);
         let held = r.entities.inventory_slot(entity, slot);
         let Some(state) = c
             .items
@@ -83,7 +83,7 @@ impl Server {
             let hit = hit.map(|v| v.clamp(0.0, 1.0));
             let target = d.place_clicked(c, pos, face, state, look, hit, entity, held.item)?;
             // What the stack carries goes onto the block entity it becomes (a renamed chest).
-            if let Some(id) = d.anchored(target) {
+            if let Some(id) = d.anchored_part(c, target, state) {
                 for &comp in &c.game.carried {
                     if let Some(v) = crate::stack::value(held.data, comp) {
                         d.entities.comps.insert((id, comp), v.into());
@@ -92,8 +92,9 @@ impl Server {
             }
             Some(())
         });
+        // Where it can't be placed, it is used like any item (a seed's own use, a bucket of it).
         if !matches!(placed, Some(Some(()))) {
-            return false;
+            return self.use_in_hand(c, pi, slot, (frame == 0).then_some((pos, face)), false);
         }
         if !creative {
             r.entities
@@ -141,8 +142,8 @@ impl Server {
                     used = true;
                 }
             }
-        } else if let Some(cb) = def.on_use {
-            let a = r.call(def.owner, cb, |w| abi::ItemUseArgs {
+        } else if let Some((by, cb)) = def.on_use {
+            let a = r.call(by, cb, |w| abi::ItemUseArgs {
                 world: w,
                 player: entity,
                 stack: held,
@@ -198,7 +199,7 @@ impl Server {
             M::Use { face, .. } | M::UseItem { target: Some((_, face)) } if *face >= 6 => false,
             M::Respawn => !e.alive(),
             M::Break { .. } | M::Use { .. } | M::UseItem { .. } | M::Attack(_) | M::Swing | M::Interact(_) | M::Drop { .. } => {
-                e.alive() && !e.mode.has(weft_abi::game_mode_flags::NO_INTERACT)
+                e.alive() && !e.mode.has(crate::tag_bits::game_mode::NO_INTERACT)
             }
             M::Move { .. } | M::OpenInventory | M::Click { .. } | M::Drag { .. } | M::CreativeTake { .. } | M::Pick { .. } => e.alive(),
             _ => true,
@@ -240,7 +241,7 @@ impl Server {
                 let Some(e) = r
                     .entities
                     .get(entity)
-                    .filter(|e| !e.mode.has(weft_abi::game_mode_flags::NO_INTERACT))
+                    .filter(|e| !e.mode.has(crate::tag_bits::game_mode::NO_INTERACT))
                 else {
                     return;
                 };
@@ -318,12 +319,13 @@ impl Server {
             ToServer::Camera(mode) => {
                 let Some(m) = c.game.cameras.get(mode as usize) else { return };
                 let Some((r, entity)) = self.region(pi) else { return };
-                let flies = r
-                    .entities
-                    .get(entity)
-                    .is_some_and(|e| e.mode.has(weft_abi::game_mode_flags::CAN_FLY));
+                let pos = r.entities.get(entity).map_or(DVec3::ZERO, |e| e.pos);
+                let ask = crate::conditions::Ask { pos, entity, ..Default::default() };
                 let mut q = weft_abi::Query { entity, amount: mode as f64, ..weft_abi::Query::DEFAULT };
-                let may = !m.has(weft_abi::camera_flags::ASK) || r.ask_or(c, weft_abi::action::CAMERA, &mut q, flies);
+                let holds = m
+                    .when
+                    .is_none_or(|w| crate::conditions::on_server(r, c, w, &ask));
+                let may = r.ask_or(c, weft_abi::action::CAMERA, &mut q, holds);
                 if may {
                     self.players[pi]
                         .conn
@@ -331,14 +333,14 @@ impl Server {
                 }
             }
 
-            ToServer::Break { pos, part, face, frame } => {
+            ToServer::Break { pos, part, face, hit, frame } => {
                 let Some((r, _)) = self.region(pi) else { return };
                 let (frame, pos) = r.landed_as(frame, pos);
                 let mining = self.players[pi].mining.take();
                 let Some((r, entity)) = self.region(pi) else { return };
                 let Some(e) = r.entities.get(entity) else { return };
-                let (eye, sel, creative) = (e.pos + DVec3::Y * e.eye(c), e.selected, e.mode.has(weft_abi::game_mode_flags::INSTANT_BREAK));
-                let no_break = e.mode.has(weft_abi::game_mode_flags::NO_BREAK);
+                let (eye, sel, creative) = (e.pos + DVec3::Y * e.eye(c), e.selected, e.mode.has(crate::tag_bits::game_mode::INSTANT_BREAK));
+                let no_break = e.mode.has(crate::tag_bits::game_mode::NO_BREAK);
                 let reach = r.block_reach(c, entity);
                 let rate = r.mining_rate_of(c, entity, frame, pos, part);
                 let progress = mining
@@ -359,7 +361,7 @@ impl Server {
                     let done = within(o.to_local(eye), pos, reach)
                         && !too_soon
                         && !keeps
-                        && d.break_face(c, pos, part, face, held, entity, !creative);
+                        && d.break_piece(c, pos, part, face, hit, held, entity, !creative);
                     // The client already shows air: a refused break sends the block back.
                     if !done && d.get(pos).is_some() {
                         d.resend_cell(pos);
@@ -421,7 +423,7 @@ impl Server {
             ToServer::Pick { item } => {
                 let Some((r, entity)) = self.region(pi) else { return };
                 let Some(e) = r.entities.get(entity) else { return };
-                let (sel, creative) = (e.selected, e.mode.has(weft_abi::game_mode_flags::NO_COSTS));
+                let (sel, creative) = (e.selected, e.mode.has(crate::tag_bits::game_mode::NO_COSTS));
                 let Some(inv) = r.entities.inventories.get(&entity) else { return };
                 let current = inv.get(sel as usize).copied().unwrap_or_default();
                 if let Some(j) = c
@@ -518,7 +520,7 @@ impl Server {
                 let p = &mut players[pi];
                 let creative = dims[p.dim as usize]
                     .entity(p.entity)
-                    .is_some_and(|e| e.mode.has(weft_abi::game_mode_flags::CREATIVE_INVENTORY));
+                    .is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::CREATIVE_INVENTORY));
                 if let (true, Some(m), true) = (creative, &mut p.menu, item != 0 && (item as usize) < c.items.len()) {
                     // Like vanilla: the same item adds one, anything else held is thrown away
                     // first, an empty hand takes a stack (left) or one (right).
@@ -571,11 +573,7 @@ impl Server {
                 if let Some((r, entity)) = self.region(pi) {
                     r.entities.reset_components(c, entity);
                     // The game mode's modifiers went with the rest.
-                    let mode = r
-                        .entities
-                        .get(entity)
-                        .map_or(GameMode::SURVIVAL, |e| e.mode);
-                    mode_modifiers(c, r, entity, mode);
+                    r.keep_sources(c, entity);
                     // After the components: modifiers are gone with them. Sent as any change.
                     let max = r.max_health(c, entity);
                     if let Some(e) = r.entities.get_mut(entity) {
@@ -584,6 +582,11 @@ impl Server {
                         e.hurt_cooldown = 0;
                     }
                     r.emit_engine(c, abi::event::PLAYER_RESPAWNED, &abi::PlayerEvent { player: entity });
+                }
+                // Out of lives: on as a spectator, as in vanilla's hardcore.
+                let lives = crate::config::get(c.game.lives) as u32;
+                if lives > 0 && self.players[pi].deaths >= lives {
+                    self.set_mode(pi, crate::world::GameMode::SPECTATOR);
                 }
             }
             ToServer::Chat(text) => {
@@ -712,7 +715,7 @@ pub(super) fn within(eye: DVec3, block: IVec3, reach: f64) -> bool {
 pub(super) fn wear(c: &Content, d: &mut Dim, player: u64, slot: u32, amount: u32) {
     if d.entities
         .get(player)
-        .is_some_and(|e| e.mode.has(weft_abi::game_mode_flags::NO_COSTS))
+        .is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::NO_COSTS))
     {
         return;
     }

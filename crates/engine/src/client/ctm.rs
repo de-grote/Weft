@@ -422,9 +422,7 @@ pub fn load(assets: &Assets, c: &Content, looks: &Looks, mut names: Names) -> (C
             // References like anywhere else: names, `name[prop=value]`, `#tag`, `#pattern/*`.
             let mut blocks = Vec::new();
             for b in kv.get("blocks").map_or("", |v| *v).split_whitespace() {
-                match crate::refs::Ref::parse(b)
-                    .and_then(|r| crate::refs::blocks(&r, &c.block_names, &c.blocks, &c.components, c.states.len() as u32))
-                {
+                match crate::refs::blocks(b, &c.block_names, &c.blocks, &c.components) {
                     Ok(list) => blocks.extend(list),
                     Err(e) => log::error!("{name}.ctm: blocks: {e}"),
                 }
@@ -433,9 +431,7 @@ pub fn load(assets: &Assets, c: &Content, looks: &Looks, mut names: Names) -> (C
                 let (invert, list) = v.strip_prefix('!').map_or((false, *v), |r| (true, r));
                 let mut set = vec![0u64; c.biomes.len() / 64 + 1];
                 for b in list.split_whitespace() {
-                    match crate::refs::Ref::parse(b)
-                        .and_then(|r| crate::refs::biomes(&r, &c.biome_names, &c.components, c.biomes.len() as u32))
-                    {
+                    match crate::refs::set(b, crate::components::BIOME, &c.biome_names, c.biomes.len() as u32, &c.components, "biome") {
                         Ok(list) => list
                             .into_iter()
                             .for_each(|i| set[i as usize / 64] |= 1 << (i % 64)),

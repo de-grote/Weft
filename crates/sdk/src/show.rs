@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 
 use crate::abi::{self, Slice, Str, Who, show_place as place};
 use crate::ui::raw_args;
-use crate::{Arg, Client, Id, Registry, TextPlace, World, callback, host};
+use crate::{Arg, Client, Id, Registry, TextPlace, WithComponents, World, callback, host};
 
 /// The engine's places for text; `show_at` takes them or a mod's own (`Registry::text_place`).
 pub mod text_places {
@@ -27,81 +27,48 @@ pub mod text_places {
 /// move and hide, and how text there looks unless `show` says otherwise.
 pub struct TextPlaceBuilder<'a> {
     reg: &'a mut Registry,
-    handle: &'static TextPlace,
-    anchor: String,
-    sample: String,
-    class: String,
-    desc: abi::TextPlaceDesc,
+    e: crate::entry::Entry,
 }
+
+crate::entry::entry_builder!(TextPlace => TextPlaceBuilder, text_place;);
 
 impl Registry {
     pub fn text_place<'a>(&'a mut self, place: &'static TextPlace) -> TextPlaceBuilder<'a> {
-        TextPlaceBuilder {
-            reg: self,
-            handle: place,
-            anchor: String::new(),
-            sample: String::new(),
-            class: String::new(),
-            desc: abi::TextPlaceDesc::DEFAULT,
-        }
+        TextPlaceBuilder { reg: self, e: crate::entry::Entry::of(place) }
     }
 }
 
 impl TextPlaceBuilder<'_> {
     /// Where the HUD puts it by default: an anchor (`hud_anchor::TOP_RIGHT`) and its order there.
-    pub fn hud(mut self, anchor: &str, order: i32) -> Self {
-        self.anchor = anchor.to_string();
-        self.desc.order = order;
-        self
+    pub fn hud(self, anchor: &str, order: i32) -> Self {
+        self.set_text(&crate::comps::text_place::ANCHOR, anchor)
+            .set(&crate::comps::text_place::ORDER, order)
     }
     /// A spot of its own by default instead: this point of it at the same point of the window,
     /// moved by `dx`, `dy` GUI pixels.
-    pub fn at(mut self, x: f32, y: f32, dx: f32, dy: f32) -> Self {
-        self.anchor.clear();
-        self.desc.at = [x, y, dx, dy];
-        self
+    pub fn at(self, x: f32, y: f32, dx: f32, dy: f32) -> Self {
+        self.unset(&crate::comps::text_place::ANCHOR)
+            .set(&crate::comps::text_place::AT, [x, y, dx, dy])
     }
     /// How big, 1 being menu text.
-    pub fn scale(mut self, scale: f32) -> Self {
-        self.desc.scale = scale;
-        self
+    pub fn scale(self, scale: f32) -> Self {
+        self.set(&crate::comps::text_place::SCALE, scale)
     }
     /// Seconds of fading in, staying and fading out, by default.
-    pub fn times(mut self, fade_in: f32, stay: f32, fade_out: f32) -> Self {
-        self.desc.times = [fade_in, stay, fade_out];
-        self
+    pub fn times(self, fade_in: f32, stay: f32, fade_out: f32) -> Self {
+        self.set(&crate::comps::text_place::TIMES, [fade_in, stay, fade_out])
     }
     /// Several texts at once, one under another; by default a new one replaces what is there.
-    pub fn stacks(mut self) -> Self {
-        self.desc.stacks = 1;
-        self
+    pub fn stacks(self) -> Self {
+        self.tag(abi::comp::text_place::STACKS)
     }
     /// Theme class of its text (`label` by default).
-    pub fn class(mut self, class: &str) -> Self {
-        self.class = class.to_string();
-        self
+    pub fn class(self, class: &str) -> Self {
+        self.set_text(&crate::comps::text_place::CLASS, class)
     }
     /// The translation the HUD editor shows while the place is empty.
-    pub fn sample(mut self, key: &str) -> Self {
-        self.sample = key.to_string();
-        self
-    }
-}
-
-impl Drop for TextPlaceBuilder<'_> {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            return;
-        }
-        let d = abi::TextPlaceDesc {
-            name: Str::new(self.handle.name()),
-            cell: self.handle.id_cell(),
-            anchor: Str::new(&self.anchor),
-            class: Str::new(&self.class),
-            sample: Str::new(&self.sample),
-            ..self.desc
-        };
-        unsafe { (host().reg_text_place)(self.reg.raw, &d) }
+    pub fn sample(self, key: &str) -> Self {
+        self.set_text(&crate::comps::text_place::SAMPLE, key)
     }
 }
 

@@ -28,9 +28,12 @@ static GLOW_FLOWER: Block = Block::named("glow_flower");
 static SNOW_LAYER: Block = Block::named("snow_layer");
 static GLOW_CRYSTAL: Block = Block::named("glow_crystal");
 static GLOW: TintKind = TintKind::named("glow");
+static PLAINS: Biome = Biome::named("base:plains");
 static SPIRITS: EntityCategory = EntityCategory::named("spirits");
 static HURT: Condition = Condition::named("hurt");
 static DREAM_KEY: Key = Key::named("dream");
+static DREAM_EFFECT: Shader = Shader::named("dream");
+static DREAM_COLD: Shader = Shader::named("dream_cold");
 static RUNE: Item = Item::named("rune");
 /// Drawn from `models/item/totem.json`: a stone base and a crystal, no icon of its own.
 static TOTEM: Item = Item::named("totem");
@@ -58,7 +61,7 @@ pub fn register(r: &mut Registry) {
         .color(0xFFFFFFFF, 0xFFFFFF60)
         .fullbright()
         .translucent()
-        .shader("twinkle");
+        .shader(&Shader::named("twinkle"));
     // A drop that rings where it falls into water and is gone where it hits the ground.
     r.particle(&DROP)
         .textures(&["core:generic_0"])
@@ -83,7 +86,8 @@ pub fn register(r: &mut Registry) {
         obelisk = obelisk.layer(&["   ", " g ", "   "]);
     }
     drop(obelisk.key('s', "base:sandstone").key('g', "glow_crystal"));
-    r.structure(&crate::MARS, &OBELISK)
+    r.structure(&OBELISK)
+        .dimension(&crate::MARS)
         .spacing(128)
         .chance(0.5)
         .biome("#dry")
@@ -93,24 +97,26 @@ pub fn register(r: &mut Registry) {
         .dimension(&crate::MARS)
         .veins(3)
         .vein_size(6)
-        .replace("#stone_ore_replaceables")
+        .replaces("#stone_ore_replaceables")
         .biome("#cave");
     // A 64x64 texture among 16x16 ones: every texture keeps its own size.
-    r.block(&MOSAIC).hardness(1.5).mineable("pickaxe");
+    r.block(&MOSAIC)
+        .hardness(1.5)
+        .mined_by("pickaxe", tool_tier::HAND);
     // A tint kind of the mod's own: violet by default (and on the item), teal in plains.
     r.tint_kind(&GLOW, 0xc080ff);
-    r.biome_tint(&Biome::named("base:plains"), &GLOW, 0x40e0c0);
+    r.edit(&PLAINS).tint(&GLOW, 0x40e0c0);
     r.block(&GLOW_MOSS)
         .tint(&GLOW)
         .hardness(0.6)
-        .mineable("shovel");
+        .mined_by("shovel", tool_tier::HAND);
     // A glowing birch (a log's `tree` component grows it from a sapling or worldgen) and
     // flower; not generated in the world, only from the creative tabs.
     static TREE_LEAVES: Component<BlockRef> = Component::named("tree_leaves");
     r.block(&GLOW_LOG)
         .textures("glow_log_top", "glow_log", "glow_log_top")
         .hardness(2.0)
-        .mineable("axe")
+        .mined_by("axe", tool_tier::HAND)
         .tag("logs")
         .set_text(&TREE_LEAVES, "glow_leaves");
     r.block(&GLOW_LEAVES)
@@ -119,7 +125,7 @@ pub fn register(r: &mut Registry) {
         .tint(&GLOW)
         .hardness(0.2)
         .tag("leaves")
-        .mineable("shears");
+        .mined_by("shears", tool_tier::HAND);
     r.block(&SNOW_LAYER)
         .texture("base:snow")
         .model_box([0.0, 0.0, 0.0], [16.0, 2.0, 16.0])
@@ -133,7 +139,7 @@ pub fn register(r: &mut Registry) {
         .tint(&GLOW);
     r.block(&GLOW_CRYSTAL)
         .hardness(1.5)
-        .mineable("pickaxe")
+        .mined_by("pickaxe", tool_tier::HAND)
         // Sparks now and then, shown by the client near the player.
         .ambient_particles(&["spark", "core:smoke"]);
 
@@ -145,13 +151,13 @@ pub fn register(r: &mut Registry) {
         .size(0.4, 0.4)
         .max_health(4.0)
         .walk_speed(1.5)
-        .flags(entity_flags::NO_GRAVITY)
+        .tag(abi::comp::entity::NO_GRAVITY)
         .unpushable()
         .model(
             Model::from(vec![ModelPart::new("wisp", [0.0, 3.0, 0.0]).cuboid([-3.0, -3.0, -3.0], [6.0, 6.0, 6.0], [0.0, 0.0])])
                 .uv_size(32, 16),
         )
-        .shader("ghost")
+        .shader(&Shader::named("ghost"))
         .on_tick(wisps);
 
     r.entity(&IDOL)
@@ -168,7 +174,7 @@ pub fn register(r: &mut Registry) {
                 // Bows to whoever used it.
                 let w = e.world();
                 if let (Some(me), Some(them)) = (w.entity(id), w.entity(e.other())) {
-                    w.entity_edit(id).yaw(yaw_toward(me.pos, them.pos));
+                    w.entity_modify(id).yaw(yaw_toward(me.pos, them.pos));
                 }
                 bowed.push(id);
                 w.action_play(id, "bow", false);
@@ -182,7 +188,7 @@ pub fn register(r: &mut Registry) {
     r.entity(&ORB)
         .size(0.6, 0.9)
         .max_health(4.0)
-        .flags(entity_flags::NO_GRAVITY)
+        .tag(abi::comp::entity::NO_GRAVITY)
         .model(
             Model::from(vec![
                 ModelPart::new("core", [0.0, 8.0, 0.0]).mesh(sphere_mesh([0.0, 8.0, 0.0], 4.0, 8, 12, [0.0, 0.0, 16.0, 16.0])),
@@ -206,10 +212,14 @@ pub fn register(r: &mut Registry) {
         .no_creative_break()
         .attack_damage(16f32)
         .attack_speed(0.7)
+        .condition(|s, v| {
+            if s.wear() > 0 {
+                v.model("katana_broken");
+            }
+        })
         .on_use(|_| true);
     // A metre of katana in the hand, on the ground and in a slot; much less of one once damaged.
     r.set_model(&GREATSWORD, "katana");
-    r.item_model_for_stack(&GREATSWORD, |s| (s.wear() > 0).then_some("testmod:katana_broken"));
     // Its apple has a model of its own, by one line and a file.
     r.set_model(&crate::APPLE, "food/apple");
     // Its chain hangs and sways by itself: its bones are called `hanging_..`.
@@ -249,11 +259,11 @@ pub fn register(r: &mut Registry) {
             .is_some_and(|m| m.health < m.max_health)
     });
 
-    r.key(&DREAM_KEY, "N").on_press_client(|c| {
+    r.key(&DREAM_KEY, "N").on_client(|c| {
         let on = DREAM.fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
-        let effect = if DREAM_STYLE.get() == 1 { "dream_cold" } else { "dream" };
-        c.post_effect("dream", 0.0);
-        c.post_effect("dream_cold", 0.0);
+        let effect = if DREAM_STYLE.get() == 1 { &DREAM_COLD } else { &DREAM_EFFECT };
+        c.post_effect(&DREAM_EFFECT, 0.0);
+        c.post_effect(&DREAM_COLD, 0.0);
         if !on {
             c.post_effect(effect, DREAM_STRENGTH.get());
         }
@@ -283,7 +293,7 @@ fn wisps(t: &EntityTick) {
             st.yaw = a;
         }
         st.vel.y = ((time as f64 + phase as f64) * 0.1).sin() * 0.8;
-        w.entity_edit(id).yaw(st.yaw).velocity(st.vel);
+        w.entity_modify(id).yaw(st.yaw).velocity(st.vel);
         w.walk(id, yaw_dir(st.yaw), 1.0, false);
         if (time + phase) % 20 == 0 {
             w.spawn_particles(&SPARK, [st.pos.x, st.pos.y + 0.2, st.pos.z])

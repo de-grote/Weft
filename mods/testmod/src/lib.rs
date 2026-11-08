@@ -155,6 +155,16 @@ fn init(r: &mut Registry) {
     // Faces the file leaves to the block (`#top`, `#side`) show these.
     r.block(&PEDESTAL)
         .textures("machine_top", "generator", "machine_top")
+        // Without its crystal, a state on a model of its own with a texture of its own.
+        .prop("crystal", ["true", "false"])
+        .states(|p, s| {
+            if p.is("crystal", "false") {
+                s.model_file("pedestal_empty")
+                    .model_texture("socket", "base:gold_block")
+            } else {
+                s
+            }
+        })
         .hardness(1.0)
         .tab(&BASE_BUILDING);
 
@@ -171,13 +181,13 @@ fn init(r: &mut Registry) {
         .light_rgb(15, 13, 10)
         .hardness(0.0)
         .tab(&BASE_BUILDING);
-    r.block(&TORCH)
-        .replacing()
+    r.edit(&TORCH)
         .retexture("base:torch", "soul_torch")
         .light_rgb(3, 9, 35)
         .hardness(0.0);
 
-    // Machines: block, entity with the machine and energy components, menu, all in one builder.
+    // Machines: a block whose block entity has the state and energy components and the slots,
+    // opening a menu.
     // The components sync to open menus; screens bind to them.
     // Each kind ticks as a system over its own state: every machine of a region in one call.
     r.entity_component(&BURNER, Burner::default(), component_flags::SAVE | component_flags::SYNC_MENU);
@@ -190,23 +200,27 @@ fn init(r: &mut Registry) {
         .files(&["test/thump"])
         .category(&MACHINES)
         .pitch(0.45, 0.5);
-    r.machine(&GENERATOR, &GENERATOR_MENU)
-        .block(|b| {
-            b.textures("machine_top", "generator", "machine_top")
-                .hardness(3.0)
-                .mineable("pickaxe")
-                .needs_tool_level(0)
+    r.block(&GENERATOR)
+        .textures("machine_top", "generator", "machine_top")
+        .hardness(3.0)
+        .mined_by("pickaxe", 0)
+        .entity(|e| {
+            e.attach(&BURNER)
+                .attach_with(&ENERGY, Energy { stored: 0, capacity: 20_000, max_in: 0, max_out: 200 })
+                .inventory(1)
         })
+        .opens(&GENERATOR_MENU);
+    r.menu(&GENERATOR_MENU)
         // Only fuel goes in (the base game's `fuel` component), and stays in until burnt.
         .group(
             "fuel",
             Slots::single()
                 .accepts("fuel")
                 .input()
-                .tooltip("testmod.fuel_slot"),
+                .tooltip("testmod.fuel_slot")
+                .holder(),
         )
-        .attach(&BURNER)
-        .attach_with(&ENERGY, Energy { stored: 0, capacity: 20_000, max_in: 0, max_out: 200 })
+        .player_inventory()
         .screen(|ui| {
             machine_screen(ui, |ui| {
                 ui.column(S::column().gap(2.0).center(), |ui| {
@@ -219,26 +233,31 @@ fn init(r: &mut Registry) {
             })
         });
     // Eight buckets of one liquid, in and out by bucket.
-    r.machine(&TANK, &TANK_MENU)
-        .block(|b| {
-            b.textures("machine_top", "machine_top", "machine_top")
-                .hardness(3.0)
-        })
-        .group("liquid", Slots::single().liquid(8000))
+    r.block(&TANK)
+        .textures("machine_top", "machine_top", "machine_top")
+        .hardness(3.0)
+        .entity(|e| e.inventory(1))
+        .opens(&TANK_MENU);
+    r.menu(&TANK_MENU)
+        .group("liquid", Slots::single().liquid(8000).holder())
+        .player_inventory()
         .screen(|ui| machine_screen(ui, |ui| ui.group("liquid")));
-    r.machine(&ELECTRIC_FURNACE, &FURNACE_MENU)
-        .block(|b| {
-            b.textures("machine_top", "electric_furnace", "machine_top")
-                .hardness(3.0)
-                .mineable("pickaxe")
-                .needs_tool_level(0)
+    r.block(&ELECTRIC_FURNACE)
+        .textures("machine_top", "electric_furnace", "machine_top")
+        .hardness(3.0)
+        .mined_by("pickaxe", 0)
+        .entity(|e| {
+            e.attach(&WORK)
+                .attach_with(&ENERGY, Energy { stored: 0, capacity: 40_000, max_in: 400, max_out: 0 })
+                .inventory(2)
         })
+        .opens(&FURNACE_MENU);
+    r.menu(&FURNACE_MENU)
         // At most 16 to smelt at a time.
-        .group("input", Slots::single().limit(16))
-        .group("output", Slots::single().output())
+        .group("input", Slots::single().limit(16).holder())
+        .group("output", Slots::single().output().holder())
         .recipes(&SMELTING_RECIPES)
-        .attach(&WORK)
-        .attach_with(&ENERGY, Energy { stored: 0, capacity: 40_000, max_in: 400, max_out: 0 })
+        .player_inventory()
         .screen(|ui| {
             machine_screen(ui, |ui| {
                 ui.group("input");
@@ -252,14 +271,14 @@ fn init(r: &mut Registry) {
 
     // No tick of its own: only the grid fills and drains it, so its bar shows that components
     // reach open menus whoever changed them.
-    r.machine(&BATTERY, &BATTERY_MENU)
-        .block(|b| {
-            b.textures("machine_top", "battery", "machine_top")
-                .hardness(3.0)
-                .mineable("pickaxe")
-                .needs_tool_level(0)
-        })
-        .attach_with(&ENERGY, Energy { stored: 0, capacity: 100_000, max_in: 400, max_out: 400 })
+    r.block(&BATTERY)
+        .textures("machine_top", "battery", "machine_top")
+        .hardness(3.0)
+        .mined_by("pickaxe", 0)
+        .entity(|e| e.attach_with(&ENERGY, Energy { stored: 0, capacity: 100_000, max_in: 400, max_out: 400 }))
+        .opens(&BATTERY_MENU);
+    r.menu(&BATTERY_MENU)
+        .player_inventory()
         .screen(|ui| machine_screen(ui, |_| {}));
 
     // The base game's kinds, by name: no code dependency on it.
@@ -269,27 +288,27 @@ fn init(r: &mut Registry) {
     r.shaped(&CRAFTING, "electric_furnace", 1, &["iii", "iFi", "ici"], &[('i', "#ingots/iron"), ('F', "#furnaces"), ('c', "#cables")]);
     r.shaped(&CRAFTING, "cable", 8, &["iii"], &[('i', "#ingots/iron")]);
 
-    r.block(&REGOLITH).hardness(0.5).mineable("shovel");
+    r.block(&REGOLITH)
+        .hardness(0.5)
+        .mined_by("shovel", tool_tier::HAND);
     // Only the common `sand` tag: cactus and sugar cane accept it without knowing it.
     r.block(&RED_SAND)
         .hardness(0.5)
-        .mineable("shovel")
+        .mined_by("shovel", tool_tier::HAND)
         .tag("sand");
     r.block(&BASALT)
         .hardness(1.5)
-        .mineable("pickaxe")
+        .mined_by("pickaxe", tool_tier::HAND)
         .tag("stone_ore_replaceables");
     // Only tags: the base game's `#ores/*` smelting recipe and tools pick these up.
     r.block(&TIN_ORE)
         .hardness(3.0)
-        .mineable("pickaxe")
-        .needs_tool_level(0)
+        .mined_by("pickaxe", 0)
         .tag("ores/tin");
     r.block(&BASALT_TIN_ORE)
         .texture("tin_ore")
         .hardness(3.5)
-        .mineable("pickaxe")
-        .needs_tool_level(0)
+        .mined_by("pickaxe", 0)
         .tag("ores/tin");
     r.item(&TIN_INGOT).tag("ingots/tin");
 
@@ -310,7 +329,7 @@ fn init(r: &mut Registry) {
             true
         });
     r.menu(&POUCH_MENU)
-        .group("items", Slots::row(9).machine())
+        .group("items", Slots::row(9).holder())
         .player_inventory()
         .screen(|ui| {
             ui.panel("panel", S::column().pad(7.0).gap(4.0), |ui| {
@@ -323,8 +342,7 @@ fn init(r: &mut Registry) {
     // A tier between vanilla's iron (200) and diamond (300): mines everything iron does plus
     // reinforced stone, which iron cannot.
     r.item(&STEEL_PICKAXE)
-        .tool("pickaxe")
-        .tool_level(250)
+        .tool("pickaxe", 250)
         .mining_speed(7.0)
         .durability(800)
         .attack_damage(4.0)
@@ -333,16 +351,15 @@ fn init(r: &mut Registry) {
     // May face up, north or east only: three states, not six.
     r.block(&VENT)
         .facing(Facings::only(&[Dir::Up, Dir::North, Dir::East]), Toward::Player)
-        .states(|p, s| s.front_faces(p.facing(), "vent_side", "vent_side", "vent_front"))
+        .states(|_, s| s.front_faces("vent_side", "vent_side", "vent_front"))
         .hardness(2.0)
-        .mineable("pickaxe")
+        .mined_by("pickaxe", tool_tier::HAND)
         .tab(&BASE_BUILDING);
     r.block(&REINFORCED_STONE)
         .tag("has_shapes")
-        .shader("stripes")
+        .shader(&Shader::named("stripes"))
         .hardness(4.0)
-        .mineable("pickaxe")
-        .needs_tool_level(250)
+        .mined_by("pickaxe", 250)
         .tab(&BASE_BUILDING);
     r.biome(&DUST)
         .surface("regolith", "regolith", 3)
@@ -374,8 +391,8 @@ fn init(r: &mut Registry) {
         .y(-64, 90)
         .veins(5)
         .vein_size(8)
-        .replace("#stone_ore_replaceables")
-        .replace_with("basalt", &BASALT_TIN_ORE)
+        .replaces("#stone_ore_replaceables")
+        .replaces_with("basalt", &BASALT_TIN_ORE)
         .exposed(0.5);
     r.terrain(&MARS)
         .stone("basalt")
@@ -387,17 +404,17 @@ fn init(r: &mut Registry) {
         .feature(preset::dunes(3.0, 22.0).mask(Expr::noise(500.0).ramp(0.15, 0.45)))
         // Base's forest in the cold parts of Mars (any humidity, unlike at home): it brings its
         // grass, and the engine grows its trees here like in base's overworld.
-        .biome(
+        .rule(
             BiomeRule::new("base:forest")
                 .temperature(..-0.3)
                 .humidity(..),
         )
-        .biome(BiomeRule::new("dust"))
+        .rule(BiomeRule::new("dust"))
         .cave_biome("crystal_caves", 24, 96.0, 0.0);
     // Mars edited as from outside: a biome tried before its dust, a rock needle from a feature
     // of this mod's own, and boulders on the new biome.
-    r.terrain(&MARS)
-        .biome_before("testmod:dust", BiomeRule::new("scorched"))
+    r.edit(MARS.terrain())
+        .rule_before("testmod:dust", BiomeRule::new("scorched"))
         .feature(
             // 90 blocks up within 3 of the spot: a step where the distance passes 3.
             Feature::new(
@@ -438,17 +455,15 @@ fn init(r: &mut Registry) {
 
     // A liquid of its own, flowing by the engine's rules; its bucket fills from the base game's.
     r.liquid(&OIL)
-        .light_opacity(4)
-        .drag(0.4)
+        .block(|b| b.light_opacity(4).drag(0.4).tag("oil"))
         .flow_delay(15)
         .drop_off(2)
         .slope_find(3)
-        .tag("oil")
         .bucket(&OIL_BUCKET, &BUCKET, &BASE_TOOLS);
 
     // Healing food without touching the base game's eating code: any used item that heals (its
     // apple).
-    r.on(&actions::USE_ITEM, |b| {
+    r.on_event(&actions::USE_ITEM, |b| {
         let w = b.world();
         for e in b.iter() {
             if let Some(heal) = FOOD_HEAL.on_stack(&e.stack) {
@@ -456,8 +471,8 @@ fn init(r: &mut Registry) {
             }
         }
     });
-    r.loot_edit(&crate::riding::STEED)
-        .add_pool(Pool::new().when(Cond::Chance(0.05)).item("tin_ingot"));
+    r.edit(crate::riding::STEED.loot())
+        .pool(Pool::new().when(Cond::chance(0.05)).item("tin_ingot"));
 
     r.command("tagbench", "[millions:int]", tag_bench);
     // The engine's /gizmo suggests this mod's group too.
@@ -501,7 +516,7 @@ fn morph(r: &mut Registry) {
     });
 }
 
-static ABOUT: Screen = Screen::named("about");
+static ABOUT: Menu = Menu::named("about");
 static DEBUG_PANEL: HudElement = HudElement::named("debug");
 
 /// A screen of the mod's own (`/about` here, `--screen testmod:about`).
@@ -510,43 +525,44 @@ fn about_screen(r: &mut Registry) {
     // a tooltip with arguments, and pausing like the engine's pause menu.
     static NAME: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
     static VOLUME: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    r.screen(&ABOUT, |ui| {
-        ui.panel("testmod_panel", S::column().pad(8.0).gap(4.0).min_w(220.0), |ui| {
-            ui.text_styled(S::column().class("title").scale(2.0).no_wrap(), "testmod.about.title", &[]);
-            ui.text("testmod.about.text");
-            ui.panel(
-                "well",
-                S::column()
-                    .pad(4.0)
-                    .tooltip_args("testmod.about.tip", &[Arg::Int(3)]),
-                |ui| ui.text("testmod.about.hover"),
-            );
-            ui.input("", 16, S::column().class("about_name").w(200.0), |_, text| *NAME.lock().unwrap() = text.to_string());
-            ui.text_bind(|_, out| out.set("testmod.about.name", &[Arg::Text(&NAME.lock().unwrap())]));
-            ui.slider(
-                S::column().w(200.0).h(20.0),
-                |_| VOLUME.load(std::sync::atomic::Ordering::Relaxed) as f32 / 100.0,
-                |_, v| VOLUME.store((v * 100.0).round() as u32, std::sync::atomic::Ordering::Relaxed),
-            );
-            ui.text_bind(|_, out| out.set("testmod.about.fov", &[Arg::Float(weft_sdk::settings::FOV.get() as f64, 0)]));
-            ui.text_bind_styled(S::column().mono(), |_, out| {
-                out.set("testmod.about.volume", &[Arg::Int(VOLUME.load(std::sync::atomic::Ordering::Relaxed) as i64)])
+    r.menu(&ABOUT)
+        .screen(|ui| {
+            ui.panel("testmod_panel", S::column().pad(8.0).gap(4.0).min_w(220.0), |ui| {
+                ui.text_styled(S::column().class("title").scale(2.0).no_wrap(), "testmod.about.title", &[]);
+                ui.text("testmod.about.text");
+                ui.panel(
+                    "well",
+                    S::column()
+                        .pad(4.0)
+                        .tooltip_args("testmod.about.tip", &[Arg::Int(3)]),
+                    |ui| ui.text("testmod.about.hover"),
+                );
+                ui.input("", 16, S::column().class("about_name").w(200.0), |_, text| *NAME.lock().unwrap() = text.to_string());
+                ui.text_bind(|_, out| out.set("testmod.about.name", &[Arg::Text(&NAME.lock().unwrap())]));
+                ui.slider(
+                    S::column().w(200.0).h(20.0),
+                    |_| VOLUME.load(std::sync::atomic::Ordering::Relaxed) as f32 / 100.0,
+                    |_, v| VOLUME.store((v * 100.0).round() as u32, std::sync::atomic::Ordering::Relaxed),
+                );
+                ui.text_bind(|_, out| out.set("testmod.about.fov", &[Arg::Float(weft_sdk::settings::FOV.get() as f64, 0)]));
+                ui.text_bind_styled(S::column().mono(), |_, out| {
+                    out.set("testmod.about.volume", &[Arg::Int(VOLUME.load(std::sync::atomic::Ordering::Relaxed) as i64)])
+                });
+                ui.row(S::row().gap(4.0), |ui| {
+                    ui.item(Item::lookup("base:coal").unwrap_or(0), 3, S::default());
+                    ui.button("testmod.about.closed", S::column().disabled(true), |_| {});
+                });
             });
-            ui.row(S::row().gap(4.0), |ui| {
-                ui.item(Item::lookup("base:coal").unwrap_or(0), 3, S::default());
-                ui.button("testmod.about.closed", S::column().disabled(true), |_| {});
-            });
-        });
-    })
-    .pauses();
+        })
+        .pauses();
     // A button of its own in the main menu, next to the engine's and other mods'.
     r.screen_part(&screens::TITLE, "buttons", 0, |ui| {
         ui.button("testmod.about.button", S::default(), |c| {
-            c.client().screen_open(&ABOUT);
+            c.client().menu_open(&ABOUT);
         });
     });
     r.client_command("about", "", |c| {
-        c.client().screen_open(&ABOUT);
+        c.client().menu_open(&ABOUT);
     });
 }
 
@@ -636,7 +652,7 @@ fn dynamite(r: &mut Registry) {
             } else {
                 w.play_sound(&BOOM, center, 4.0);
                 w.fill(Shape::ball(center, DYNAMITE_RADIUS.get() as f64), 0)
-                    .keep_unbreakable();
+                    .keep("#unbreakable");
             }
         });
 }
@@ -774,7 +790,7 @@ fn recipe_showcase(r: &mut Registry) {
     r.shapeless(&ALLOYING, "tin_ingot", 2, &["#ingots/iron", "#gems/coal"], 100)
         .input_amounts(&[3, 1])
         .output_chance("base:diamond", 1, 0.05)
-        .value(&ENERGY_PER_TICK, 32);
+        .set(&ENERGY_PER_TICK, 32);
     r.recipe_kind(&INFUSING).layout(|ui, recipe| {
         ui.column(S::column().gap(2.0), |ui| {
             ui.row(S::row().gap(4.0).center(), |ui| {

@@ -300,6 +300,9 @@ pub unsafe extern "C" fn client_input(c: *mut abi::ClientCtx, op: u32, text: Str
                             r.hold(Key::Code(k), x);
                         }
                     }
+                    if let Some(w) = c.with {
+                        r.hold(w, x);
+                    }
                     r.hold(c.key, x)
                 }
                 None => return 0,
@@ -313,7 +316,7 @@ pub unsafe extern "C" fn client_input(c: *mut abi::ClientCtx, op: u32, text: Str
                 let (w, h) = r.gpu.surface_size();
                 r.input.cursor = Vec2::new(x * w as f32, y * h as f32);
             }
-            ci::SCROLL => r.input.scroll += x,
+            ci::SCROLL => r.input.wheel(x),
             ci::TYPE => r.input.typed.push_str(text),
             ci::RELEASE_ALL => {
                 r.input.release_all();
@@ -325,15 +328,16 @@ pub unsafe extern "C" fn client_input(c: *mut abi::ClientCtx, op: u32, text: Str
     }
 }
 
-pub unsafe extern "C" fn client_pressed(c: *mut abi::ClientCtx, action: Str) -> u32 {
+pub unsafe extern "C" fn client_pressed(c: *mut abi::ClientCtx, action: Str, out: *mut abi::KeyState) {
     unsafe {
-        let Some(r) = run(c) else { return 0 };
+        let Some(r) = run(c) else { return };
         // Mod keys belong to the world: while a screen (chat, inventory) has the input they stay up.
-        if !r.input.captured || !r.screens.is_empty() {
-            return 0;
-        }
-        let a = action.as_str();
-        r.input.pressed(a) as u32 | (r.input.held(a) as u32) << 1
+        *out = match &r.game {
+            Some(g) if r.screens.is_empty() => {
+                crate::input::Keys { input: &r.input, ticks: &g.client.key_ticks, raw: false }.state(action.as_str())
+            }
+            _ => abi::KeyState::default(),
+        };
     }
 }
 
@@ -682,15 +686,6 @@ pub unsafe extern "C" fn client_screen_text(
         let text = crate::ui::text::Msg::new(key.as_str(), crate::client::modui::args(args));
         r.mod_screen_text
             .push((x, y, text, color, if size > 0.0 { size } else { 1.0 }));
-    }
-}
-
-pub unsafe extern "C" fn client_entity_defaults(a: *mut abi::ClientEntityArgs) {
-    unsafe {
-        let Some(a) = a.as_ref() else { return };
-        if let Some(g) = run(a.client).and_then(|r| r.game.as_mut()) {
-            g.client.entity_effects(a);
-        }
     }
 }
 

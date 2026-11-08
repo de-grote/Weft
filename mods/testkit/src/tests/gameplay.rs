@@ -19,7 +19,7 @@ pub async fn sprint_and_sneak_modes(t: T) -> R {
     t.flat().await?;
     // Switching a binding between held and toggled.
     let toggle = async |action: &str| -> R {
-        t.c().screen_open(&screens::CONTROLS);
+        t.c().menu_open(&screens::CONTROLS);
         t.screen("core:controls").await?;
         t.frames(3).await?;
         t.c().input_key("ShiftLeft", 0.2);
@@ -27,7 +27,7 @@ pub async fn sprint_and_sneak_modes(t: T) -> R {
         t.click_ui(&format!("id:bind:{action}:0"), 1);
         // Shift let go again, or the walks after start sneaking.
         t.secs(0.3).await?;
-        t.c().screen_close();
+        t.c().menu_close();
         t.no_screen().await?;
         // Toggles and double taps switch only once the game has the mouse again.
         t.frames(3).await?;
@@ -35,11 +35,11 @@ pub async fn sprint_and_sneak_modes(t: T) -> R {
     };
     toggle("core:sneak").await?;
     t.check_eq(SNEAK.get(), "toggle ShiftLeft".to_string(), "Shift + right click makes sneak a toggle");
-    t.c().screen_open(&screens::CONTROLS);
+    t.c().menu_open(&screens::CONTROLS);
     t.screen("core:controls").await?;
     t.frames(3).await?;
     t.shot("controls").await?;
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await?;
     t.c().set_look(0.0, 0.0);
 
@@ -160,7 +160,7 @@ pub async fn armor(t: T) -> R {
     t.check_eq(t.op("group me base:head").await?, "1 1".to_string(), "the head slot");
     t.check_eq(t.op("group me hotbar").await?, "9 0".to_string(), "hotbar group");
     t.shot("worn").await?;
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await?;
     let f = t.feet();
     t.op(&format!("spawn zombie {}", at(add(f, [1, 0, 1]))))
@@ -175,6 +175,24 @@ pub async fn armor(t: T) -> R {
     t.check(worn > 0, "armor took no damage from a zombie hit");
     let hp = t.state().health;
     t.check(hp > 17.0, format!("armor did not reduce the hit: health {hp}"));
+    // A zombie wears the same slots: a helmet goes on its head.
+    let z = t
+        .op(&format!("spawn zombie {}", at(add(f, [3, 0, -2]))))
+        .await?;
+    t.check_eq(t.op(&format!("group {z} core:equipment")).await?, "4 0".to_string(), "a zombie's equipment");
+    t.op(&format!("put {z} 0 diamond_helmet 1")).await?;
+    t.check_eq(t.op(&format!("group {z} base:head")).await?, "1 1".to_string(), "the zombie's head slot");
+    t.c().set_look((-3f32).atan2(2.0).to_degrees(), -10.0);
+    t.secs(0.5).await?;
+    t.shot("zombie_helmet").await?;
+    // A menu's equipment groups are those of the entity it is open on.
+    t.op(&format!("emenu testkit:gear {z}")).await?;
+    t.until("the zombie's helmet in the menu", Duration::from_secs(5), |t| {
+        t.c().menu_slot(0).item == Item::named("base:diamond_helmet").id()
+    })
+    .await?;
+    t.check(t.c().menu_slot(1).is_empty(), "nothing on its chest");
+    t.shot("zombie_gear").await?;
     Ok(())
 }
 
@@ -197,7 +215,7 @@ pub async fn slot_limit(t: T) -> R {
     t.frames(4).await?;
     t.check_eq(t.c().menu_slot(0).count, 16, "the input slot holds 16");
     t.check_eq(t.c().menu_slot(29).count, 16, "the rest stays in the hotbar");
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await
 }
 
@@ -235,7 +253,7 @@ pub async fn slot_accepts(t: T) -> R {
     t.click_ui("slot:0", 0);
     t.frames(4).await?;
     t.check(t.c().menu_slot(0).count + 1 >= before, "a shift-click doesn't take it out either");
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await
 }
 
@@ -281,7 +299,7 @@ pub async fn liquid_slot(t: T) -> R {
     click(0)?;
     t.secs(0.4).await?;
     t.check(t.slot(&at, 0).await?.1 == 0, "dirt stays out");
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await
 }
 
@@ -349,19 +367,19 @@ pub async fn advancements(t: T) -> R {
         t.frames(5).await?;
         t.shot("tooltip").await?;
     }
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await?;
     // The pause menu's button, as wide as the engine's own, opens the list too.
-    t.c().screen_open(&screens::PAUSE);
+    t.c().menu_open(&screens::PAUSE);
     t.screen("core:pause").await?;
     t.frames(3).await?;
     t.shot("pause").await?;
     t.check(t.click_ui("text:Advancements", 0), "the pause menu's advancements button");
     t.screen("base:advancements").await?;
     // It opened on top of the pause menu, which is back once it closes.
-    t.c().screen_close();
+    t.c().menu_close();
     t.screen("core:pause").await?;
-    t.c().screen_close();
+    t.c().menu_close();
     t.no_screen().await?;
     // Dying takes none of them.
     t.cmd("/clear @s").await?;
@@ -900,6 +918,51 @@ pub async fn movement_attributes(t: T) -> R {
 
 /// Mobs move by the player's rules: a pig pushed across ice slides further than on grass, walks
 /// slower through oil, and climbs a ladder it walks into.
+/// A ladder (`on_sides`, walls only) goes against the wall clicked, a second wall of its cell
+/// adds a side, and a side whose wall goes falls off, then the rest.
+pub async fn ladder_sides(t: T) -> R {
+    t.flat().await?;
+    let f = t.feet();
+    let c = add(f, [0, 1, -3]);
+    let (north, west) = (add(c, [0, 0, -1]), add(c, [-1, 0, 0]));
+    for w in [north, west] {
+        t.set(w, "cobblestone").await?;
+    }
+    t.op("mode creative").await?;
+    t.op("put me 0 ladder 8").await?;
+    let at = |p: [i32; 3]| format!("/tp {} {} {}", p[0] as f64 + 0.5, p[1] - 1, p[2] as f64 + 0.5);
+    let side = |d: &str| format!("prop {} {} {} {d}", c[0], c[1], c[2]);
+    t.cmd(&at(add(c, [0, 0, 2]))).await?;
+    t.secs(0.3).await?;
+    t.look_at(north);
+    t.frames(3).await?;
+    t.press("core:use");
+    t.secs(0.4).await?;
+    t.check_eq(t.op(&side("north")).await?, "true".to_string(), "on the wall clicked");
+    t.check_eq(t.op(&side("west")).await?, "false".to_string(), "and only there");
+    t.cmd(&at(add(c, [2, 0, 0]))).await?;
+    t.secs(0.3).await?;
+    t.look_at(west);
+    t.frames(3).await?;
+    t.press("core:use");
+    t.secs(0.4).await?;
+    t.check_eq(t.op(&side("west")).await?, "true".to_string(), "a second wall of the cell adds a side");
+    t.check_eq(t.op(&side("north")).await?, "true".to_string(), "keeping the first");
+    t.cmd(&at(add(c, [1, 0, 1]))).await?;
+    t.secs(0.3).await?;
+    t.look_at(c);
+    t.frames(3).await?;
+    t.shot("two_sides").await?;
+    t.set(north, "air").await?;
+    t.secs(0.3).await?;
+    t.check_eq(t.op(&side("north")).await?, "false".to_string(), "a side without its wall falls off");
+    t.check_eq(t.op(&side("west")).await?, "true".to_string(), "the other stays");
+    t.set(west, "air").await?;
+    t.secs(0.3).await?;
+    t.check_eq(t.op(&format!("get {} {} {}", c[0], c[1], c[2])).await?, "core:air".to_string(), "with no side left it goes");
+    Ok(())
+}
+
 pub async fn mob_physics(t: T) -> R {
     t.flat().await?;
     t.cmd("/rule core:mob_spawning 0").await?;
@@ -976,7 +1039,7 @@ pub async fn mob_physics(t: T) -> R {
     let wall = add(f, [6, 0, -6]);
     t.fill(add(wall, [0, 0, -1]), add(wall, [0, 5, 1]), "stone")
         .await?;
-    t.fill(add(wall, [-1, 0, -1]), add(wall, [-1, 5, 1]), "base:ladder[facing=west]")
+    t.fill(add(wall, [-1, 0, -1]), add(wall, [-1, 5, 1]), "base:ladder[north=false,south=false,west=false,east=true]")
         .await?;
     let id = t
         .op(&format!("spawn base:pig {} {} {}", wall[0] - 2, wall[1], wall[2]))
@@ -1116,8 +1179,8 @@ pub async fn block_shapes(t: T) -> R {
         "base:oak_planks_stairs[facing=east]",
         "base:oak_planks_slab",
         "base:oak_planks_slab[type=top]",
-        "base:bricks_vertical_slab[side=north]",
-        "base:bricks_vertical_slab[side=west]",
+        "base:bricks_vertical_slab[facing=south]",
+        "base:bricks_vertical_slab[facing=east]",
         "base:sandstone_slab[type=double]",
         "base:spruce_planks_stairs[facing=south,half=top]",
         "base:mossy_cobblestone_stairs[facing=north]",
@@ -1262,12 +1325,12 @@ pub async fn block_shapes(t: T) -> R {
     t.frames(3).await?;
     t.press("core:use");
     t.secs(0.3).await?;
-    t.check(t.block(cell).await?.contains("side=north"), format!("against the wall it is on: {}", t.block(cell).await?));
+    t.check(t.block(cell).await?.contains("facing=south"), format!("against the wall it is on: {}", t.block(cell).await?));
     aim(&t, centre(cell, 0.5, 0.5, 0.5));
     t.frames(3).await?;
     t.press("core:use");
     t.secs(0.3).await?;
-    t.check(t.block(cell).await?.contains("side=double"), format!("and a second one joins it: {}", t.block(cell).await?));
+    t.check(t.block(cell).await?.contains("double=true"), format!("and a second one joins it: {}", t.block(cell).await?));
     t.set(cell, "air").await?;
 
     // Corners, by vanilla's rules: what is behind a stair crossways makes it an outer corner, what
@@ -1306,9 +1369,9 @@ pub async fn block_shapes(t: T) -> R {
     let up = t.state().pos;
     t.check(up.y >= f[1] as f64 + 0.99, format!("up the stairs, one block: {up:?}"));
     let v = add(f, [-16, 0, 2]);
-    t.set(v, "base:oak_planks_vertical_slab[side=north]")
+    t.set(v, "base:oak_planks_vertical_slab[facing=south]")
         .await?;
-    t.set(add(v, [0, 1, 0]), "base:oak_planks_vertical_slab[side=north]")
+    t.set(add(v, [0, 1, 0]), "base:oak_planks_vertical_slab[facing=south]")
         .await?;
     t.c().teleport(centre(v, 0.5, 0.0, 2.5));
     t.c().set_look(0.0, 0.0);
@@ -1326,7 +1389,7 @@ pub async fn block_shapes(t: T) -> R {
         "a slab's recipe",
     );
     t.check_eq(
-        t.op("craft 3 3 base:bricks air air base:bricks base:bricks air base:bricks base:bricks base:bricks")
+        t.op("craft 2 2 base:bricks air base:bricks base:bricks")
             .await?,
         "base:bricks_stairs 4".to_string(),
         "a stair's",
@@ -1425,6 +1488,12 @@ pub async fn cell_parts(t: T) -> R {
     t.secs(0.3).await?;
     let full = t.op(&parts(pool)).await?;
     t.check(full.contains("type=double") && !full.contains("water"), format!("whole, it has no room for it: {full}"));
+    aim(&t, centre(pool, 0.5, 0.8, 1.0));
+    t.frames(3).await?;
+    t.press("core:attack");
+    t.secs(0.3).await?;
+    let half = t.op(&parts(pool)).await?;
+    t.check(half.contains("type=bottom"), format!("a hit takes the half aimed at: {half}"));
 
     // Stairs hold it too, from a bucket.
     let steps = add(pool, [3, 0, 0]);
@@ -1483,8 +1552,20 @@ pub async fn cell_parts(t: T) -> R {
     t.frames(4).await?;
     let stair = t.op(&parts(a)).await?;
     t.check(stair.contains("torch") && stair.contains("shape=outer_right"), format!("a part keeps up with its neighbors: {stair}"));
-    t.check(t.op(&format!("addpart {} base:glowstone", at(a))).await? == "0", "only one in a cell gives light");
     t.fill(a, add(a, [1, 0, 0]), "air").await?;
+    // Any part shines, not only what the cell stands for.
+    let lamp = add(f, [12, 0, 12]);
+    t.set(lamp, "base:stone_slab[type=top]").await?;
+    t.op(&format!("addpart {} base:torch[facing=up]", at(lamp)))
+        .await?;
+    t.frames(3).await?;
+    let lit: u32 = t
+        .op(&format!("light {}", at(lamp)))
+        .await?
+        .parse()
+        .unwrap_or(0);
+    t.check(lit >> 8 != 0, format!("a torch in with a slab lights the cell: {lit:x}"));
+    t.set(lamp, "air").await?;
 
     // A piston moves all of a cell.
     let row = add(f, [-6, 0, 6]);
@@ -1509,7 +1590,7 @@ pub async fn cell_parts(t: T) -> R {
     let name = format!("test-{}", t.name());
     t.c().world_leave();
     t.screen("core:title").await?;
-    t.c().screen_open(&screens::WORLDS);
+    t.c().menu_open(&screens::WORLDS);
     t.screen("core:worlds").await?;
     t.frames(2).await?;
     t.click_ui(&format!("text:{name} |"), 0);
@@ -1871,7 +1952,7 @@ pub async fn names_translated(t: T) -> R {
                 .strip_prefix("base:")
                 // Named after what hatches from them, or what they are made of.
                 .filter(|n| {
-                    !["_spawn_egg", "_stairs", "_slab"]
+                    !["_spawn_egg", "_stairs", "_slab", "_beam", "_eighth"]
                         .iter()
                         .any(|end| n.ends_with(end))
                 })
@@ -2003,6 +2084,6 @@ pub async fn dedicated_server(t: T) -> R {
     t.c().world_join(&format!("127.0.0.1:{port}"));
     t.screen("core:message").await?;
     t.check(!t.flag(client::client_flags::IN_WORLD), "not on the whitelist, not in");
-    t.c().screen_close();
+    t.c().menu_close();
     Ok(())
 }

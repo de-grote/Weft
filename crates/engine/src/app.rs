@@ -33,11 +33,16 @@ use crate::ui::{Kind, Ui};
 
 pub type BackendFactory = fn(&BackendDesc) -> Result<Box<dyn Backend>, weft_render::Error>;
 
+/// The renderers the game was built with, by the name `core:renderer` chooses them by.
+pub type Renderers = &'static [(&'static str, BackendFactory)];
+
 #[derive(Clone, Debug)]
 pub struct Options {
     pub run_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub mod_dirs: Vec<PathBuf>,
+    /// Mods off for this run only (`--off a,b`, from a launcher).
+    pub mods_off: Vec<String>,
     pub gpu_debug: bool,
     /// Automation: skip the menu and play this world (created if missing).
     pub world: Option<String>,
@@ -51,6 +56,8 @@ pub struct Options {
     /// Benchmarks: force vsync off / a view distance without touching saved settings.
     pub no_vsync: bool,
     pub view: Option<i32>,
+    /// `core:renderer` for this run only.
+    pub renderer: Option<String>,
 }
 
 pub enum Request {
@@ -177,6 +184,8 @@ pub(crate) const CLIENT_COMMANDS: &[(&str, &str, fn(&mut Running, &crate::comman
 
 pub(crate) struct Running {
     gpu: Box<dyn Backend>,
+    /// Which of the game's renderers `gpu` is.
+    renderer: &'static str,
     window: Arc<Window>,
     depth: (TextureId, u32, u32),
     list: CommandList,
@@ -212,8 +221,6 @@ pub(crate) struct Running {
     /// Texture generation the UI quads were built with (icons drawn blank until loaded).
     ui_textures: u64,
     pub(crate) stats: Stats,
-    /// F3 held and used for a combination since it went down (then releasing it does not toggle).
-    f3_combo: Option<bool>,
     /// F1: the world alone, until a screen opens or F1 again.
     hud_off: bool,
     reload_requested: bool,
@@ -255,16 +262,16 @@ pub(crate) struct Running {
 }
 
 struct App {
-    factory: BackendFactory,
+    renderers: Renderers,
     opts: Options,
     run: Option<Running>,
     error: Option<String>,
 }
 
-pub fn run(factory: BackendFactory, opts: Options) -> Result<(), String> {
+pub fn run(renderers: Renderers, opts: Options) -> Result<(), String> {
     let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let mut app = App { factory, opts, run: None, error: None };
+    let mut app = App { renderers, opts, run: None, error: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     match app.error {
         Some(e) => Err(e),
@@ -318,7 +325,7 @@ impl App {
     fn start(&mut self, el: &ActiveEventLoop) -> Result<Running, String> {
         // Mods first: the engine's settings are `core:` configs like theirs.
         let off = modloader::off_file(&self.opts.run_dir, self.opts.automated);
-        let mods = modloader::load(&self.opts.mod_dirs, &self.opts.cache_dir, &off)?;
+        let mods = modloader::load(&self.opts.mod_dirs, &self.opts.cache_dir, &off, &self.opts.mods_off)?;
         crate::config::set_automated(self.opts.automated);
         crate::settings::migrate(&self.opts.run_dir);
         crate::config::load(&self.opts.run_dir);
@@ -327,6 +334,9 @@ impl App {
         }
         if let Some(v) = self.opts.view {
             crate::config::override_for_run("core:view_distance", &v.to_string());
+        }
+        if let Some(r) = &self.opts.renderer {
+            crate::config::override_for_run("core:renderer", r);
         }
         let mut settings = Settings::new(&self.opts.run_dir);
         let icon = crate::assets::decode_png_file(&engine_assets(self.opts.dev).join("icon.png"))
@@ -352,24 +362,33 @@ impl App {
         }
         let window = Arc::new(el.create_window(attrs).map_err(|e| e.to_string())?);
         let size = window.inner_size();
-        let mut gpu = (self.factory)(&BackendDesc {
-            window: &*window,
-            width: size.width,
-            height: size.height,
-            vsync: settings.vsync(),
-            debug: self.opts.gpu_debug,
-        })
-        .map_err(|e| e.to_string())?;
+        let desc =
+            BackendDesc { window: &*window, width: size.width, height: size.height, vsync: settings.vsync(), debug: self.opts.gpu_debug };
+        // The chosen renderer, and the others if it can't start on this machine.
+        let chosen = settings.renderer();
+        let mut order: Vec<_> = self.renderers.iter().collect();
+        order.sort_by_key(|r| r.0 != chosen);
+        let mut failed = Vec::new();
+        let mut gpu = None;
+        for &(name, factory) in order {
+            match factory(&desc) {
+                Ok(g) => {
+                    gpu = Some((g, name));
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("renderer {name}: {e}");
+                    failed.push(format!("{name}: {e}"));
+                }
+            }
+        }
+        let (mut gpu, renderer) = gpu.ok_or_else(|| failed.join("; "))?;
 
         let mut roots: Vec<(String, PathBuf)> = vec![("core".into(), engine_assets(self.opts.dev))];
         roots.extend(mods.iter().map(|m| (m.id.clone(), m.assets.clone())));
         // Not in automated runs: their pictures are compared against fixed expectations.
-        if !self.opts.automated && crate::minecraft::ensure_pack(&self.opts.run_dir, &roots) {
-            let mut packs = settings.resource_packs();
-            if !packs.iter().any(|p| p == crate::minecraft::PACK) {
-                packs.insert(0, crate::minecraft::PACK.to_string());
-                settings.set_resource_packs(&packs);
-            }
+        if !self.opts.automated {
+            crate::minecraft::ensure_pack(&self.opts.run_dir, &roots);
         }
         let packs_now = (settings.resource_packs(), settings.shader_pack());
         let packs = crate::packs::enabled(&self.opts.run_dir, &settings.resource_packs());
@@ -387,19 +406,17 @@ impl App {
         let ui = UiRenderer::new(&mut *gpu, &assets)?;
         let post = crate::post::Post::new(&mut *gpu, &assets);
         let mut input = Input::default();
-        for (action, key) in &content().game.keys {
-            match crate::input::Binding::parse_slots(key) {
-                Some(k) => input.register(action, k),
-                None => log::warn!("key binding {action}: unknown key {key}"),
-            }
+        for k in &content().game.keys {
+            input.register(&k.name, k.default, k.contexts);
         }
         settings.apply_binds(&mut input);
         settings.read_only = self.opts.automated;
         crate::shaders::pin_time(self.opts.automated && !recording());
         let depth = make_depth(&mut *gpu, size.width, size.height);
-        let gpu_name = gpu.device_name().to_string();
+        let gpu_name = format!("{} ({})", gpu.device_name(), gpu.name());
         let mut r = Running {
             gpu,
+            renderer,
             window,
             depth,
             list: CommandList::default(),
@@ -444,7 +461,6 @@ impl App {
                 threads: std::thread::available_parallelism().map_or(1, |n| n.get()),
                 ..Default::default()
             },
-            f3_combo: None,
             hud_off: false,
             reload_requested: false,
             packs_pending: false,
@@ -520,6 +536,7 @@ impl Running {
             },
             look: &self.look,
             assets: &self.assets,
+            renderer: self.renderer,
         }
     }
 
@@ -1040,7 +1057,7 @@ impl Running {
         let Some((_, ui)) = self.screens.last_mut() else { return UiCallbacks::default() };
         if self.input.pressed_button(0) {
             ui.pressed = hovered;
-            ui.focused = hovered.filter(|&h| matches!(ui.nodes[h].kind, Kind::Input { .. }));
+            ui.focused = hovered.filter(|&h| matches!(ui.nodes[h].kind, Kind::Input { .. } | Kind::Slider { .. }));
             ui.anchor = None;
             if let Some(h) = hovered {
                 if let Kind::Text(t) = &ui.nodes[h].kind {
@@ -1101,6 +1118,19 @@ impl Running {
                         text_changed = Some((cb.clone(), value.clone()));
                     }
                 }
+            } else if let Kind::Slider { value, on_change, steps, .. } = &mut ui.nodes[f].kind {
+                let by: f32 = [(KeyCode::ArrowLeft, -1.0), (KeyCode::ArrowRight, 1.0)]
+                    .into_iter()
+                    .filter(|(k, _)| self.input.pressed_or_repeated(Key::Code(*k)))
+                    .map(|(_, by)| by)
+                    .sum();
+                if by != 0.0 {
+                    let n = (*steps).max(1) as f32;
+                    let v = (((*value * n).round() + by) / n).clamp(0.0, 1.0);
+                    *value = v;
+                    slider = Some((on_change.clone(), v));
+                    self.quads_dirty = true;
+                }
             }
         }
         UiCallbacks { actions, slider, text_changed }
@@ -1157,31 +1187,20 @@ impl Running {
     }
 
     /// Runs the mods' client hooks of one kind with a view that may drive the client.
-    fn client_hooks(&mut self, hook: u32, screen: &str) {
-        let hooks: Vec<(abi::ModId, abi::Callback)> = content()
-            .game
-            .client_hooks
-            .iter()
-            .filter(|h| h.1 == hook)
-            .map(|h| (h.0, h.2))
-            .collect();
-        for (owner, cb) in hooks {
+    fn client_frames(&mut self) {
+        for &(owner, cb) in &content().game.client_frames {
             let mut v = self.frame_view();
-            if hook == abi::client_hook::FRAME {
-                let mut a = abi::ClientFrameArgs { client: v.raw() };
-                crate::host::invoke(owner, cb, &mut a);
-            } else {
-                let mut a = abi::ClientScreenArgs { client: v.raw(), screen: abi::Str::new(screen) };
-                crate::host::invoke(owner, cb, &mut a);
-            }
+            let mut a = abi::ClientFrameArgs { client: v.raw() };
+            crate::host::invoke(owner, cb, &mut a);
         }
     }
 
-    /// Every entity's cosmetics this frame: its kind's mod tick or the engine's; finished deaths
-    /// go after their last call.
+    /// Every entity's cosmetics this frame: the engine's (`EntityKind::effects`), and mods'
+    /// `client_entity_frame`, the local player's too; finished deaths go after their last call.
     fn entity_ticks(&mut self, dt: f32) {
         let Some(g) = &self.game else { return };
         let c = content();
+        let mine = g.client.me.args(g.client.player_id, dt);
         let all: Vec<abi::ClientEntityArgs> = g
             .client
             .entities
@@ -1189,47 +1208,16 @@ impl Running {
             .filter(|(_, e)| e.item.is_empty() && e.structure.is_none())
             .map(|(&id, e)| e.args(id, dt))
             .collect();
-        for mut a in all {
-            match c.game.client_entity_ticks.get(&a.kind) {
-                Some(&(owner, cb)) => {
-                    let mut v = self.frame_view();
-                    a.client = v.raw();
-                    crate::host::invoke(owner, cb, &mut a);
-                }
-                None => {
-                    if let Some(g) = &mut self.game {
-                        g.client.entity_effects(&a);
-                    }
+        for mut a in all.into_iter().chain([mine]) {
+            if a.entity != mine.entity {
+                if let Some(g) = &mut self.game {
+                    g.client.entity_effects(&a);
                 }
             }
-        }
-        // Who only watches, every one of them; the local player is an entity to them as well.
-        if !c.game.client_entity_watchers.is_empty() {
-            let mine = self
-                .game
-                .as_ref()
-                .map(|g| g.client.me.args(g.client.player_id, dt));
-            let others = self.game.as_ref().map_or(Vec::new(), |g| {
-                g.client
-                    .entities
-                    .iter()
-                    .filter(|(_, e)| e.item.is_empty() && e.structure.is_none())
-                    .filter(|(_, e)| c.game.client_entity_watchers.contains_key(&e.kind))
-                    .map(|(&id, e)| e.args(id, dt))
-                    .collect()
-            });
-            for mut a in others.into_iter().chain(mine) {
-                for &(owner, cb) in c
-                    .game
-                    .client_entity_watchers
-                    .get(&a.kind)
-                    .into_iter()
-                    .flatten()
-                {
-                    let mut v = self.frame_view();
-                    a.client = v.raw();
-                    crate::host::invoke(owner, cb, &mut a);
-                }
+            for &(owner, cb) in &c.game.entities[a.kind as usize].frames {
+                let mut v = self.frame_view();
+                a.client = v.raw();
+                crate::host::invoke(owner, cb, &mut a);
             }
         }
         if let Some(g) = &mut self.game {
@@ -1446,7 +1434,7 @@ impl Running {
                         relayout |= text::refresh(&mut t.spans, &test);
                     }
                     // Moving icons need drawing again, whatever the value does.
-                    Kind::Icons { bind, value, shake, effects, change, .. }
+                    Kind::Icons { bind, value, shake, effects, change, count, .. }
                         if !effects.is_empty() || shake.is_some_and(|s| (0.0..=s).contains(value)) =>
                     {
                         let v = bind(&ctx);
@@ -1454,9 +1442,11 @@ impl Running {
                             *change = Some((*value, crate::shaders::clock(), v > *value));
                         }
                         *value = v;
+                        let rows = crate::ui::icon_rows(*count, effects).1;
                         for e in effects.iter_mut() {
                             e.value = e.bind.as_ref().map_or(1.0, |b| b(&ctx));
                         }
+                        relayout |= crate::ui::icon_rows(*count, effects).1 != rows;
                         redraw = true;
                     }
                     Kind::Progress { bind, value, .. } | Kind::Icons { bind, value, .. } => {
@@ -1493,22 +1483,16 @@ impl Running {
     }
 }
 
-/// `{if:name}`: `debug` and `dev`, else a registered condition (`Host::reg_condition`, game
-/// modes by name); unknown ones are false.
-fn text_condition(name: &str, client: Option<&Client>, debug: bool, dev: bool) -> bool {
-    match name {
+/// `{if:..}`: `debug` and `dev`, else a condition (`conditions`, `creative`, `night & !surface`)
+/// about the player; a wrong one is false.
+fn text_condition(text: &str, client: Option<&Client>, debug: bool, dev: bool) -> bool {
+    match text {
         "debug" => debug,
         "dev" => dev,
-        _ => {
-            // The engine's go without their namespace: `{if:creative}`.
-            let names = &content().game.condition_names;
-            let id = names.get(name).or_else(|| {
-                (!name.contains(':'))
-                    .then(|| names.get(&format!("core:{name}")))
-                    .flatten()
-            });
-            id.is_some_and(|&id| crate::conditions::on_client(client, id))
-        }
+        _ => content().condition(text).is_some_and(|e| {
+            let pos = client.map_or(glam::DVec3::ZERO, |cl| cl.player.pos);
+            crate::conditions::client_holds(client, &e, &crate::conditions::Ask { pos, ..Default::default() })
+        }),
     }
 }
 
@@ -1588,10 +1572,10 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                r.input.scroll += match delta {
+                r.input.wheel(match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => (p.y / 40.0) as f32,
-                };
+                });
             }
             WindowEvent::CursorMoved { position, .. } => {
                 r.input.cursor = Vec2::new(position.x as f32, position.y as f32);
@@ -1641,7 +1625,7 @@ fn frame(r: &mut Running, opts: &Options) -> bool {
     if !screen_keys_first(r, &mut requests) && r.input.pressed_key(Key::Code(KeyCode::Escape)) {
         escape(r, &mut requests);
     }
-    f3_keys(r);
+    debug_keys(r);
     toggle_keys(r);
     if r.packs_pending
         && !r
@@ -1713,14 +1697,14 @@ fn start_frame(r: &mut Running, opts: &Options, dt: f64) {
     r.frame_dt = dt as f32;
     // Textures first asked for while drawing the last frame.
     r.textures.load_requested(&mut *r.gpu);
+    // The window may not have focus while a mod drives it.
+    if opts.automated && r.screens.is_empty() && r.game.is_some() {
+        r.input.captured = true;
+    }
     r.release_mod_keys();
     r.mod_gizmos.clear();
     r.mod_screen_text.clear();
-    r.client_hooks(abi::client_hook::FRAME, "");
-    if opts.automated && r.screens.is_empty() && r.game.is_some() {
-        // The window may not have focus while a mod drives it.
-        r.input.captured = true;
-    }
+    r.client_frames();
 }
 
 /// Keys the top screen wants first (chat: completion, history; controls: the key to bind).
@@ -1770,76 +1754,42 @@ fn escape(r: &mut Running, requests: &mut Vec<Request>) {
     }
 }
 
-type F3Action = fn(&mut Running);
-
-/// What F3 plus a key does. A new combination is a line here.
-const F3_COMBOS: &[(KeyCode, F3Action)] = &[
-    (KeyCode::KeyT, |r| r.reload_requested = true),
-    // Through the command, so permissions still apply.
-    (KeyCode::F4, |r| {
-        if let Some(g) = &mut r.game {
-            let all: Vec<_> = crate::world::GameMode::all().collect();
-            let next = all[(all.iter().position(|&m| m == g.client.mode).unwrap_or(0) + 1) % all.len()];
-            g.client
-                .send(net::ToServer::Chat(format!("/gamemode {}", next.name())));
-        }
-    }),
-    (KeyCode::F6, |r| {
-        if r.screens.is_empty() {
-            r.open(screens::engine("core:debug_options"));
-        }
-    }),
-    (KeyCode::KeyG, |r| toggle_gizmo(r, "cubes")),
-    (KeyCode::KeyB, |r| toggle_gizmo(r, "hitboxes")),
-];
-
 fn toggle_gizmo(r: &mut Running, group: &str) {
     if let Some(g) = &mut r.game {
         g.client.toggle_gizmo(group);
     }
 }
 
-/// F3 alone toggles the overlay on release; F3 + a key does what `F3_COMBOS` says, F3 + a digit
-/// toggles one group instead.
-fn f3_keys(r: &mut Running) {
-    let f3 = r
-        .input
-        .binding_of("core:debug")
-        .is_some_and(|b| r.input.held_key(b.chord.key));
+/// The debug overlay and what goes with it (F3 and F3 plus a key by default).
+fn debug_keys(r: &mut Running) {
     if r.input.pressed("core:debug") {
-        r.f3_combo = Some(false);
+        r.debug = !r.debug;
+        r.hud.invalidate();
     }
-    if f3 {
-        for (key, action) in F3_COMBOS {
-            if r.input.pressed_key(Key::Code(*key)) {
-                action(r);
-                r.f3_combo = Some(true);
-            }
-        }
-        let digits = [
-            KeyCode::Digit1,
-            KeyCode::Digit2,
-            KeyCode::Digit3,
-            KeyCode::Digit4,
-            KeyCode::Digit5,
-            KeyCode::Digit6,
-            KeyCode::Digit7,
-            KeyCode::Digit8,
-            KeyCode::Digit9,
-        ];
-        let groups = crate::hud::DEBUG_GROUPS.len() + crate::hud::mod_debug_groups().len();
-        for (i, k) in digits.into_iter().take(groups).enumerate() {
-            if r.input.pressed_key(Key::Code(k)) {
-                r.settings
-                    .set("debug_groups", (r.settings.debug_groups() ^ (1 << i)) as f64);
-                r.f3_combo = Some(true);
-                r.debug = true;
-                r.hud.invalidate();
-            }
-        }
-    } else if let Some(combo) = r.f3_combo.take() {
-        if !combo {
-            r.debug = !r.debug;
+    // Through the command, so permissions still apply.
+    if r.input.pressed("core:cycle_game_mode")
+        && let Some(g) = &mut r.game
+    {
+        let all: Vec<_> = crate::world::GameMode::all().collect();
+        let next = all[(all.iter().position(|&m| m == g.client.mode).unwrap_or(0) + 1) % all.len()];
+        g.client
+            .send(net::ToServer::Chat(format!("/gamemode {}", next.name())));
+    }
+    if r.input.pressed("core:debug_options") && r.screens.is_empty() {
+        r.open(screens::engine("core:debug_options"));
+    }
+    if r.input.pressed("core:show_cubes") {
+        toggle_gizmo(r, "cubes");
+    }
+    if r.input.pressed("core:show_hitboxes") {
+        toggle_gizmo(r, "hitboxes");
+    }
+    let groups = crate::hud::DEBUG_GROUPS.len() + crate::hud::mod_debug_groups().len();
+    for i in 0..groups.min(9) {
+        if r.input.pressed(&format!("core:debug_group{}", i + 1)) {
+            r.settings
+                .set("debug_groups", (r.settings.debug_groups() ^ (1 << i)) as f64);
+            r.debug = true;
             r.hud.invalidate();
         }
     }
@@ -1919,6 +1869,7 @@ fn update_game(r: &mut Running, dt: f64, frame_start: Instant) {
             s.set_paused(paused && !s.is_hosting());
         }
         g.client.fov = r.settings.fov();
+        g.client.fov_effects = r.settings.fov_effects();
         g.client.brightness = r.settings.brightness();
         g.client.first_person_model = r.settings.first_person_model();
         g.client.entity_render.show_avatars = r.settings.show_avatars();
@@ -1980,11 +1931,7 @@ fn client_events(r: &mut Running) {
 fn world_keys(r: &mut Running) {
     if r.game.is_some() && r.screens.is_empty() {
         let command = r.input.pressed("core:command");
-        let f3_held = r
-            .input
-            .binding_of("core:debug")
-            .is_some_and(|b| r.input.held_key(b.chord.key));
-        if command || (r.input.pressed("core:chat") && !f3_held) {
+        if command || r.input.pressed("core:chat") {
             r.open(Box::new(crate::game_screens::Chat::new(if command { "/" } else { "" })));
             r.input.typed.clear();
         }
@@ -2065,10 +2012,8 @@ fn end_input(r: &mut Running) {
             .unwrap_or_default(),
     );
     if top != r.screen_seen {
-        let name = top.1.clone();
         r.screen_seen = top;
         r.screen_frames = 0;
-        r.client_hooks(abi::client_hook::SCREEN, &name);
     } else {
         r.screen_frames = r.screen_frames.saturating_add(1);
     }
@@ -2145,7 +2090,7 @@ fn build_ui_quads(r: &mut Running, scale: f32) {
     let hud = r
         .game
         .as_ref()
-        .is_some_and(|g| g.client.camera_has(weft_abi::camera_flags::HUD))
+        .is_some_and(|g| g.client.camera_has(crate::tag_bits::camera::HUD))
         || !r.screens.is_empty();
     if r.game.is_some() && hud && !hud_hidden() && !(r.hud_off && r.screens.is_empty()) {
         layers.push(&r.hud.ui);

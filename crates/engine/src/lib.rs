@@ -6,6 +6,7 @@ pub mod kv;
 
 pub mod bench;
 pub mod block_model;
+pub mod blocks;
 pub mod client;
 pub mod clipboard;
 pub mod commands;
@@ -15,6 +16,7 @@ pub mod config;
 pub mod content;
 pub mod dedicated;
 pub mod diag;
+pub mod entries;
 pub mod game_screens;
 pub mod host;
 pub mod hud;
@@ -39,12 +41,13 @@ pub mod settings;
 pub mod shaders;
 pub mod shape;
 pub mod stack;
+pub mod tag_bits;
 pub mod ui;
 pub mod wire;
 pub mod world;
 
 pub use app::api::{exit_code, set_launch_options};
-pub use app::{BackendFactory, Options, run};
+pub use app::{BackendFactory, Options, Renderers, run};
 
 /// Background workers (generation, meshing, region ticks) leave two cores to the render and
 /// server threads: a full pool starved the render thread during loading and frames missed vsync.

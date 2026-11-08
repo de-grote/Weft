@@ -87,7 +87,7 @@ impl Server {
                     let now = (e.pos, e.yaw, e.pitch, e.pose, e.sprinting);
                     // Solid bodies every tick: clients show them between server positions, and a
                     // body that stops must say so (two equal positions).
-                    let solid = c.game.entities[e.kind as usize].is(abi::entity_flags::SOLID);
+                    let solid = c.game.entities[e.kind as usize].is(crate::tag_bits::entity::SOLID);
                     if solid
                         || e.sent.is_none_or(|s| {
                             (s.0 - now.0).length_squared() > 1e-6
@@ -251,7 +251,7 @@ fn send_entities(
     for reg in &dim.regions {
         // Spectators are seen only by other spectators.
         // Hidden ones are seen by the hidden alone.
-        let hidden = |m: GameMode| m.has(weft_abi::game_mode_flags::HIDDEN);
+        let hidden = |m: GameMode| m.has(crate::tag_bits::game_mode::HIDDEN);
         let shown = |e: &&Entity| !hidden(e.mode) || hidden(me_mode);
         // A dead player is gone for the others (its death animation plays) until it respawns.
         for e in reg

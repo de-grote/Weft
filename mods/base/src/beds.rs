@@ -181,7 +181,7 @@ pub fn register(r: &mut Registry) {
             // What the model file of a bed says for one facing south, turned to this one.
             let mut s = s
                 .cutout()
-                .oriented(signal::Orientation::new(Dir::Down, p.facing().opposite()))
+                .orientation(Orientation::new(Dir::Down, p.facing().opposite()))
                 .hitbox([0.0; 3], [16.0, 9.0, 16.0]);
             for b in if head { HEAD_BOXES } else { FOOT_BOXES } {
                 let mut faces = b.2;
@@ -191,7 +191,7 @@ pub fn register(r: &mut Registry) {
             s
         })
         .hardness(0.2)
-        .mineable("axe")
+        .mined_by("axe", tool_tier::HAND)
         .drops(BED_ITEM.name(), 1)
         .set(&crate::items::FUEL, 300)
         .on_use(use_bed)
@@ -201,12 +201,12 @@ pub fn register(r: &mut Registry) {
         BedSpawn { bed: [0; 3], set: 0, dim_key: 0 },
         component_flags::SAVE | component_flags::KEEP_ON_RESPAWN | component_flags::SYNC_OWNER,
     );
-    r.attach(&PLAYER, &BED_SPAWN);
+    r.edit(&PLAYER).attach(&BED_SPAWN);
     r.entity_component(&SLEEP, Sleep { bed: [0; 3], since: 0, night: 0, asleep: 0 }, 0);
-    r.attach(&PLAYER, &SLEEP);
+    r.edit(&PLAYER).attach(&SLEEP);
     r.entity_component(&ARRIVING, Arriving { from: [0.0; 3], dim: 0, on_way: 0 }, 0);
-    r.attach(&PLAYER, &ARRIVING);
-    r.on(&PLAYER_RESPAWNED, |b| {
+    r.edit(&PLAYER).attach(&ARRIVING);
+    r.on_event(&PLAYER_RESPAWNED, |b| {
         let w = b.world();
         for e in b.iter() {
             let Some(spawn) = w.component_mut(e.player, &BED_SPAWN).filter(|s| s.set != 0) else { continue };
@@ -221,7 +221,7 @@ pub fn register(r: &mut Registry) {
             w.teleport(e.player, Some(Dimension::generated(dim.to_string())), on_bed(spawn.bed));
         }
     });
-    r.on(&actions::HURT, |b| {
+    r.on_event(&actions::HURT, |b| {
         let w = b.world();
         for e in b.iter() {
             get_up(&w, e.entity);
@@ -364,9 +364,9 @@ fn watch_sleepers(w: &World) {
     w.set_day_time((w.day_time() / 24000 + 1) * 24000);
 }
 
-static SLEEP_SCREEN: Screen = Screen::named("sleeping");
+static SLEEP_SCREEN: Menu = Menu::named("sleeping");
 /// Darkens the picture while lying in bed (`shaders/post/sleep.wgsl`).
-const SLEEP_EFFECT: &str = "sleep";
+static SLEEP_EFFECT: Shader = Shader::named("sleep");
 
 /// The client's side: since when it lies in bed.
 static LYING_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
@@ -375,41 +375,43 @@ fn client(r: &mut Registry) {
     r.client_packet(&LYING, |c, lying| {
         if lying != 0 {
             *LYING_SINCE.lock().unwrap() = Some(Instant::now());
-            c.screen_open(&SLEEP_SCREEN);
+            c.menu_open(&SLEEP_SCREEN);
         } else if LYING_SINCE.lock().unwrap().take().is_some() {
-            c.post_effect(SLEEP_EFFECT, 0.0);
+            c.post_effect(&SLEEP_EFFECT, 0.0);
             if c.screen() == SLEEP_SCREEN.name() {
-                c.screen_close();
+                c.menu_close();
             }
         }
     });
     // Leaving the screen (Escape, the button) gets the player up.
-    r.client_screen(|c, screen| {
-        if screen != SLEEP_SCREEN.name() && LYING_SINCE.lock().unwrap().take().is_some() {
-            c.post_effect(SLEEP_EFFECT, 0.0);
-            c.send(&GET_UP, &());
-        }
-    });
     r.client_frame(|c| {
-        if let Some(since) = *LYING_SINCE.lock().unwrap() {
-            c.post_effect(SLEEP_EFFECT, (since.elapsed().as_secs_f32() / 2.5).clamp(0.01, 1.0));
+        let mut lying = LYING_SINCE.lock().unwrap();
+        if let Some(since) = *lying {
+            if c.screen() != SLEEP_SCREEN.name() {
+                *lying = None;
+                c.post_effect(&SLEEP_EFFECT, 0.0);
+                c.send(&GET_UP, &());
+            } else {
+                c.post_effect(&SLEEP_EFFECT, (since.elapsed().as_secs_f32() / 2.5).clamp(0.01, 1.0));
+            }
         }
     });
-    r.screen(&SLEEP_SCREEN, |ui| {
-        ui.column(S::column().gap(12.0).center(), |ui| {
-            ui.text_styled(
-                S::column()
-                    .class("title")
-                    .scale(2.0)
-                    .no_wrap()
-                    .self_align(abi::ui_align::CENTER),
-                "bed.base.sleeping",
-                &[],
-            );
-            ui.button("bed.base.leave", S::column().min_w(200.0).self_align(abi::ui_align::CENTER), |c| {
-                c.client().screen_close();
+    r.menu(&SLEEP_SCREEN)
+        .screen(|ui| {
+            ui.column(S::column().gap(12.0).center(), |ui| {
+                ui.text_styled(
+                    S::column()
+                        .class("title")
+                        .scale(2.0)
+                        .no_wrap()
+                        .self_align(abi::ui_align::CENTER),
+                    "bed.base.sleeping",
+                    &[],
+                );
+                ui.button("bed.base.leave", S::column().min_w(200.0).self_align(abi::ui_align::CENTER), |c| {
+                    c.client().menu_close();
+                });
             });
-        });
-    })
-    .closes_on_respawn();
+        })
+        .closes_on_respawn();
 }

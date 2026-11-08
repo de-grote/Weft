@@ -14,9 +14,10 @@
 
 use std::marker::PhantomData;
 
-use crate::abi::{self, Slice, Str, config_flags as cf, config_kind as ck, config_scope as scope};
+use crate::abi::{self, Str, config_kind as ck, config_scope as scope};
+use crate::comps::config as c;
 use crate::content::{Handle, kind};
-use crate::{Registry, host};
+use crate::{Registry, WithComponents, host};
 
 /// Types a setting can be read as.
 pub trait ConfigValue: Copy {
@@ -114,77 +115,54 @@ pub mod settings {
 }
 
 pub struct ConfigBuilder<'a> {
-    raw: *mut abi::Registrar,
-    name: String,
-    choices: Vec<String>,
-    text: String,
-    cell: *const std::sync::atomic::AtomicU32,
-    desc: abi::ConfigDesc,
-    _p: PhantomData<&'a mut Registry>,
+    reg: &'a mut Registry,
+    e: crate::entry::Entry,
 }
 
+crate::entry::entry_builder!(Config => ConfigBuilder, config_builder;);
+
 impl ConfigBuilder<'_> {
-    pub fn bool(mut self, default: bool) -> Self {
-        (self.desc.kind, self.desc.default) = (ck::BOOL, default as u8 as f64);
-        self
+    pub fn bool(self, default: bool) -> Self {
+        self.set(&c::KIND, ck::BOOL)
+            .set(&c::DEFAULT, default as u8 as f64)
     }
-    pub fn int(mut self, default: i64, min: i64, max: i64) -> Self {
-        (self.desc.kind, self.desc.default, self.desc.min, self.desc.max, self.desc.step) =
-            (ck::INT, default as f64, min as f64, max as f64, 1.0);
-        self
+    pub fn int(self, default: i64, min: i64, max: i64) -> Self {
+        self.set(&c::KIND, ck::INT)
+            .set(&c::DEFAULT, default as f64)
+            .set(&c::RANGE, [min as f64, max as f64])
+            .set(&c::STEP, 1.0)
     }
-    pub fn float(mut self, default: f64, min: f64, max: f64) -> Self {
-        (self.desc.kind, self.desc.default, self.desc.min, self.desc.max) = (ck::FLOAT, default, min, max);
-        self
+    pub fn float(self, default: f64, min: f64, max: f64) -> Self {
+        self.set(&c::KIND, ck::FLOAT)
+            .set(&c::DEFAULT, default)
+            .set(&c::RANGE, [min, max])
     }
-    /// Values the slider snaps to.
-    pub fn step(mut self, step: f64) -> Self {
-        self.desc.step = step;
-        self
+    /// Values the slider snaps to, and how far the arrow keys move it (`int` has 1).
+    pub fn step(self, step: f64) -> Self {
+        self.set(&c::STEP, step)
     }
     /// One of `choices`, read as its index.
-    pub fn choice(mut self, default: u32, choices: &[&str]) -> Self {
-        (self.desc.kind, self.desc.default) = (ck::CHOICE, default as f64);
-        self.choices = choices.iter().map(|c| c.to_string()).collect();
-        self
+    pub fn choice(self, default: u32, choices: &[&str]) -> Self {
+        self.set(&c::KIND, ck::CHOICE)
+            .set(&c::DEFAULT, default as f64)
+            .set(&c::CHOICES, choices.iter().map(|c| c.to_string()).collect())
     }
     /// Text, read with a `TextConfig`; the player's own.
-    pub fn text(mut self, default: &str) -> Self {
-        (self.desc.kind, self.text) = (ck::TEXT, default.to_string());
-        self
+    pub fn text(self, default: &str) -> Self {
+        self.set(&c::KIND, ck::TEXT).set_text(&c::TEXT, default)
     }
     /// The server's value counts for everyone on it, and its changes reach them.
-    pub fn server(mut self) -> Self {
-        self.desc.scope = scope::SERVER;
-        self
+    pub fn server(self) -> Self {
+        self.set(&c::SCOPE, scope::SERVER)
     }
     /// Saved with the world and changed there with `/rule` (vanilla's game rules); its players
     /// get it like the server's.
-    pub fn world(mut self) -> Self {
-        self.desc.scope = scope::WORLD;
-        self
+    pub fn world(self) -> Self {
+        self.set(&c::SCOPE, scope::WORLD)
     }
     /// Only read at start: the screen says a restart is needed.
-    pub fn restart_required(mut self) -> Self {
-        self.desc.flags |= cf::RESTART_REQUIRED;
-        self
-    }
-}
-
-impl Drop for ConfigBuilder<'_> {
-    fn drop(&mut self) {
-        if std::thread::panicking() {
-            return;
-        }
-        let choices: Vec<Str> = self.choices.iter().map(|c| Str::new(c)).collect();
-        let desc = abi::ConfigDesc {
-            name: Str::new(&self.name),
-            cell: self.cell,
-            choices: Slice::new(&choices),
-            text: Str::new(&self.text),
-            ..self.desc
-        };
-        unsafe { (host().reg_config)(self.raw, &desc) }
+    pub fn restart_required(self) -> Self {
+        self.tag(abi::comp::config::RESTART_REQUIRED)
     }
 }
 
@@ -200,14 +178,6 @@ impl Registry {
     }
 
     fn config_builder(&mut self, h: &'static Handle<kind::Config>) -> ConfigBuilder<'_> {
-        ConfigBuilder {
-            raw: self.raw,
-            name: h.name().to_string(),
-            choices: Vec::new(),
-            text: String::new(),
-            cell: h.id_cell(),
-            desc: abi::ConfigDesc::DEFAULT,
-            _p: PhantomData,
-        }
+        ConfigBuilder { reg: self, e: crate::entry::Entry::of(h) }
     }
 }

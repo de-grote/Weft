@@ -118,7 +118,7 @@ impl Screen for MenuScreen {
         ui.root_style(Style::default().stretch());
         let creative = cx
             .client
-            .is_some_and(|cl| cl.mode.has(weft_abi::game_mode_flags::CREATIVE_INVENTORY))
+            .is_some_and(|cl| cl.mode.has(crate::tag_bits::game_mode::CREATIVE_INVENTORY))
             && c.game.player_menu == Some(self.kind);
         ui.panel("overlay", Style::default().grow().center(), |ui| {
             ui.container(Style::row().gap(4.0).align(crate::ui::Align::Start), |ui| {
@@ -126,9 +126,9 @@ impl Screen for MenuScreen {
                     creative_panel(ui, cx, &self.search, &self.tab);
                 }
                 if let Some(def) = c.game.menus.get(self.kind as usize) {
-                    if let Some(cb) = def.screen {
+                    if let Some((by, cb)) = def.screen {
                         let first = ui.nodes.len();
-                        modui::build(ui, cx.lang, Some(cx.input), def.owner, cb, cx.client);
+                        modui::build(ui, cx.lang, Some(cx.input), by, cb, cx.client);
                         // The arrows of a menu that makes recipes open them.
                         if !def.recipes.is_empty() {
                             let tip = cx.t("recipes.show", &[]);
@@ -480,11 +480,17 @@ fn found_recipes(q: &RecipeQuery) -> Vec<(&'static str, Vec<usize>)> {
     let mut kinds: Vec<&String> = c.game.recipes.keys().collect();
     kinds.sort();
     let mut out = Vec::new();
+    let hidden = c.components.id(weft_abi::comp::recipe::HIDDEN);
     for kind in kinds {
         let list: Vec<usize> = c.game.recipes[kind]
             .iter()
             .enumerate()
-            .filter(|(_, r)| !r.hidden)
+            .filter(|(_, r)| {
+                hidden.is_none_or(|h| {
+                    !c.components
+                        .has(weft_abi::entry_kind::RECIPE as usize, r.entry, h)
+                })
+            })
             .filter(|(_, r)| match q {
                 RecipeQuery::MadeBy(item) => r.outputs.iter().any(|o| o.what == Ingredient::Item(*item)),
                 RecipeQuery::UsedIn(item) => r
@@ -701,7 +707,10 @@ fn info_args(def: &crate::registry::RecipeKindDef, r: &crate::registry::Recipe) 
                 .schemas
                 .get(id as usize)
                 .map_or("", String::as_str);
-            let b = r.value(id).unwrap_or(&[]);
+            let b = c
+                .components
+                .bytes(weft_abi::entry_kind::RECIPE as usize, r.entry, id)
+                .unwrap_or(&[]);
             let num = |n: usize| b.get(..n).map(|s| s.to_vec());
             match schema {
                 "u32" => num(4).map_or(text::Arg::Int(0), |v| text::Arg::Int(u32::from_le_bytes(v.try_into().unwrap()) as i64)),

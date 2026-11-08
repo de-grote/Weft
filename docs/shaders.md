@@ -18,18 +18,18 @@ The engine's own text effects are in `crates/engine/assets/shaders/fx/`.
 [snippets](#snippets) | [text effects](#text-effects) | [panels](#panels) | [entities](#entities) | [blocks](#blocks) | [particles](#particles) | [screen effects](#screen-effects) | [shader packs](#shader-packs)
 
 ## Snippets
-A snippet is a file `shaders/<kind>/<name>.wgsl` in your mod, holding one function whose name depends on the kind. The engine puts all snippets of a kind into a single shader and picks one by number for each text, panel, mob or particle, so a hundred snippets don't cost a hundred shaders.
+A snippet is a file `shaders/<kind>/<name>.wgsl` in your mod, holding one function whose name depends on the kind. The engine puts all snippets of a kind into a single shader and picks one by number for each text, panel, mob or particle, so a hundred snippets don't cost a hundred shaders. Code names a snippet by a handle like anything else, `static GHOST: Shader = Shader::named("ghost");`, and the kind's folder is found from what uses it.
 
 | kind | folder | function | used by |
 |---|---|---|---|
 | text effects | `shaders/fx/` | `fn effect(g: Glyph) -> Glyph` | `{fx:mymod:name}` in a translation |
 | panels | `shaders/gui/` | `fn fill(p: GuiPixel) -> vec4<f32>` | a class's `.gui`: `shader = mymod:name` |
-| entities | `shaders/entity/` | `fn shade(p: EntityPixel) -> vec4<f32>` | `r.entity(..).shader("name")` |
+| entities | `shaders/entity/` | `fn shade(p: EntityPixel) -> vec4<f32>` | `r.entity(..).shader(&SHADER)` |
 | entity effects | `shaders/entity_effect/` | `fn effect(p: EntityPixel, c: vec4<f32>, strength: f32) -> vec4<f32>` | `r.entity_effect(&E)`, then `w.entity_effect(id, &E, strength, ticks)` |
-| blocks | `shaders/block/` | `fn shade(p: BlockPixel) -> vec4<f32>` | `r.block(..).shader("name")` |
-| particles | `shaders/particle/` | `fn shade(p: ParticleFrag) -> vec4<f32>` | `r.particle(..).shader("name")` |
-| sky | `shaders/sky/` | `fn shade(p: SkyPixel) -> vec4<f32>` | `r.sky_body(..).shader("name")`, see the [sky guide](sky.md#shaders) |
-| screen effects | `shaders/post/` | `fn apply(p: PostPixel) -> vec4<f32>` | `client.post_effect("mymod:name", strength)` |
+| blocks | `shaders/block/` | `fn shade(p: BlockPixel) -> vec4<f32>` | `r.block(..).shader(&SHADER)` |
+| particles | `shaders/particle/` | `fn shade(p: ParticleFrag) -> vec4<f32>` | `r.particle(..).shader(&SHADER)` |
+| sky | `shaders/sky/` | `fn shade(p: SkyPixel) -> vec4<f32>` | `r.sky_body(..).shader(&SHADER)`, see the [sky guide](sky.md#shaders) |
+| screen effects | `shaders/post/` | `fn apply(p: PostPixel) -> vec4<f32>` | `client.post_effect(&SHADER, strength)` |
 
 The file name is the snippet's name, so `shaders/fx/glitch.wgsl` in `testmod` is `testmod:glitch`. Whatever a function can see is in the struct it takes, and all of them carry `time`, the seconds since the game started. A resource pack can replace a snippet the way it replaces a texture, and a mistake in one shows up in the log with the file and the error.
 
@@ -74,7 +74,7 @@ fn shade(p: EntityPixel) -> vec4<f32> {
 }
 ```
 ```rust
-r.entity(&WISP).texture("wisp").model(model.uv_size(32, 16)).shader("ghost");
+r.entity(&WISP).texture("wisp").model(model.uv_size(32, 16)).shader(&GHOST);
 ```
 `EntityPixel` has `uv`, `albedo` (the skin's texel, linear, `a` is its alpha), `light` (a vec3 with shading and the glow mask already included) and `time`. A returned alpha under 0.5 cuts the pixel out, which is how the wisp gets its holes. The `_e` glow masks of the [textures guide](textures.md#emission) are a separate and simpler way to make parts of a skin shine.
 
@@ -89,7 +89,7 @@ fn shade(p: BlockPixel) -> vec4<f32> {
 }
 ```
 ```rust
-r.block(&REINFORCED_STONE).shader("stripes");
+r.block(&REINFORCED_STONE).shader(&STRIPES);
 ```
 `BlockPixel` has `uv` (across the face), `albedo` (the texel with its overlay, linear), `light` (shading, AO, the biome tint and glow already in), `pos` (block coordinates of the pixel, handy for patterns that run across blocks) and `time`. Fog goes on top of what it returns. The shader goes with the block's textures, so two blocks sharing a texture share it.
 
@@ -103,11 +103,11 @@ fn shade(p: ParticleFrag) -> vec4<f32> {
 ```
 ```rust
 static SPARK: Particle = Particle::named("spark");
-r.particle(&SPARK).textures(&["glint_0", "glint_1"]).life(0.3, 0.6).fullbright().shader("twinkle");
+r.particle(&SPARK).textures(&["glint_0", "glint_1"]).life(0.3, 0.6).fullbright().shader(&TWINKLE);
 ```
 `ParticleFrag` has `uv` (0 to 1 across the quad), `albedo` (the texture sample), `color` (the kind's color at this age, between the two you gave to `color(start, end)`), `life` (0 at birth, 1 at the end) and `time`.
 
-The rest of the builder is `life(min, max)` in seconds, `size(min, max)` in blocks, `gravity(g)` (negative rises), `drag(d)`, `colliding()`, `fullbright()`, `translucent()` and `shrinking()`. From the server, `world.spawn_particles(&SPARK, pos).count(12).spread(0.4).speed(2.0)` makes them appear for everyone nearby. Registering a particle named `core:block` or `core:poof` changes how the engine's own block dust and smoke look.
+The rest of the builder is `life(min, max)` in seconds, `size(min, max)` in blocks, `gravity(g)` (negative rises), `drag(d)`, `colliding()`, `fullbright()`, `translucent()` and `shrinking()`. From the server, `world.spawn_particles(&SPARK, pos).count(12).spread(0.4).speed(2.0)` makes them appear for everyone nearby. `r.edit(&POOF)` with `static POOF: Particle = Particle::named("core:poof")` (or `replace`) changes how the engine's own smoke looks, `core:block` its block dust.
 
 ## Screen effects
 A screen effect works on the finished picture of the world, and fades in and out with a strength from 0 to 1:
@@ -120,9 +120,10 @@ fn apply(p: PostPixel) -> vec4<f32> {
 ```
 ```rust
 static DREAM: Key = Key::named("dream");
-r.key(&DREAM, "N").on_press_client(|c| c.post_effect("dream", 1.0));
+static DREAM_EFFECT: Shader = Shader::named("dream");
+r.key(&DREAM, "N").on_client(|c| c.post_effect(&DREAM_EFFECT, 1.0));
 ```
-`PostPixel` has `uv` (0 to 1, top left first), `color` (the picture so far at that point, linear), `strength`, `time` and `size` in pixels, and `scene_at(p, uv)` reads the picture anywhere else, for blur and waves. `post_effect(name, 0.0)` turns an effect off, and several can be on at once, applied one after another in the order they were turned on.
+`PostPixel` has `uv` (0 to 1, top left first), `color` (the picture so far at that point, linear), `strength`, `time` and `size` in pixels, and `scene_at(p, uv)` reads the picture anywhere else, for blur and waves. `post_effect(&EFFECT, 0.0)` turns an effect off, and several can be on at once, applied one after another in the order they were turned on.
 
 ## Shader packs
 Snippets add to the engine's shaders, a shader pack replaces them. It is a folder `shaderpacks/<id>/` next to the game, chosen by players in the settings, with any of these files:

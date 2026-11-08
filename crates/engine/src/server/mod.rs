@@ -104,6 +104,8 @@ pub struct Player {
     window: u32,
     /// The frame its last move was in and where in that: walking and falls are measured there.
     last_place: (Option<u64>, DVec3),
+    /// Times it died in this world, for `core:lives`.
+    pub deaths: u32,
 
     first_sync: bool,
     /// View (dim, center, radius, height) whose cubes were all present at the last check, and the
@@ -504,6 +506,7 @@ impl Server {
                 menu: None,
                 window: 0,
                 last_place: (None, DVec3::ZERO),
+                deaths: 0,
 
                 first_sync: true,
                 gen_done: None,
@@ -730,6 +733,7 @@ impl Server {
                                 r.drop_inventory(c, player);
                             }
                         }
+                        p.deaths += 1;
                         p.conn.send(ToClient::Died);
                         log::info!("{} died", p.name);
                         let line = death_message(c, cause, killer, p.name.clone());
@@ -860,7 +864,11 @@ impl Server {
     /// Every column of `dim` distant terrain shows other than the terrain says, to player `pi`.
     pub(super) fn send_lod_columns(&mut self, pi: usize, dim: u32) {
         if let Some(s) = &self.storage {
-            let cols = lod_columns(s.lock().lod[dim as usize].columns.values());
+            let cols = s.lock().lod[dim as usize]
+                .columns
+                .values()
+                .cloned()
+                .collect();
             self.players[pi]
                 .conn
                 .send(ToClient::LodColumns { dim, all: true, cols });
@@ -879,7 +887,6 @@ impl Server {
             .filter(|(_, c)| !c.is_empty())
             .collect();
         for (dim, cols) in changed {
-            let cols = lod_columns(cols.iter());
             for p in self.players.iter_mut().filter(|p| p.joined && p.dim == dim) {
                 p.conn
                     .send(ToClient::LodColumns { dim, all: false, cols: cols.clone() });
@@ -921,7 +928,7 @@ impl Server {
                             .iter()
                             .any(|e| e.saved_with_cube() && cube_of(e.pos.floor().as_ivec3()) == pos);
                         persist::append_ticks(&mut bytes, &ticks);
-                        s.save(c, r.id, pos, cube, &bytes);
+                        s.save(c, r.id, pos, cube, &r.around(pos, |_| None), &bytes);
                         if holds || !ticks.is_empty() {
                             r.on_disk.insert(pos);
                         } else {
@@ -980,7 +987,7 @@ impl Server {
             if let Some(e) = r.entities.get_mut(entity) {
                 e.mode = mode;
             }
-            mode_modifiers(content(), r, entity, mode);
+            r.keep_sources(content(), entity);
         }
         self.players[pi].conn.send(ToClient::GameMode(mode));
     }
@@ -1056,7 +1063,11 @@ impl Server {
         p.teleported = Some(pos);
         p.conn.send(ToClient::Teleport { dim: to, pos, frame });
         if let Some(s) = storage {
-            let cols = lod_columns(s.lock().lod[to as usize].columns.values());
+            let cols = s.lock().lod[to as usize]
+                .columns
+                .values()
+                .cloned()
+                .collect();
             players[pi]
                 .conn
                 .send(ToClient::LodColumns { dim: to, all: true, cols });
@@ -1335,7 +1346,7 @@ pub fn structure_near(c: &Content, dim: u32, seed: u64, name: &str, pos: IVec3, 
     let mut best: Option<IVec3> = None;
     for cz in cells(pos.z) {
         for cx in cells(pos.x) {
-            if let Some(a) = dim::structure_in(def, c, s, seed, (cx, cz)) {
+            if let Some(a) = dim::structure_in(def, s, seed, (cx, cz)) {
                 let d = |p: IVec3| (p - pos).with_y(0).as_vec3().length();
                 if d(a) <= radius as f32 && best.is_none_or(|b| d(a) < d(b)) {
                     best = Some(a);
@@ -1346,32 +1357,10 @@ pub fn structure_near(c: &Content, dim: u32, seed: u64, name: &str, pos: IVec3, 
     best
 }
 
-/// What a game mode changes through attributes: in creative mobs do not notice the player, and it
-/// reaches further.
-fn mode_modifiers(c: &Content, r: &mut Dim, id: u64, mode: GameMode) {
-    // What another mode added goes first: each attribute any mode touches.
-    for a in c
-        .game
-        .game_modes
-        .iter()
-        .flat_map(|m| &m.modifiers)
-        .map(|m| &m.0)
-    {
-        if let Some(&attr) = c.game.attr_names.get(a) {
-            r.remove_attr_modifier(c, id, attr, "core:game_mode");
-        }
-    }
-    for (a, op, amount) in &mode.def().modifiers {
-        match c.game.attr_names.get(a) {
-            Some(&attr) => r.set_attr_modifier(c, id, attr, "core:game_mode", *op, *amount, 0),
-            None => log::warn!("game mode {}: no attribute {a}", mode.def().name),
-        }
-    }
-}
-
-/// Items in a player's equipment slots that show on the model.
+/// Items in an entity's equipment slots that show on the model.
 fn worn_of(c: &Content, ents: &entity::Entities, id: u64) -> Vec<u32> {
-    let worn = &c.game.player_layout.worn;
+    let Some(e) = ents.get(id) else { return Vec::new() };
+    let worn = &c.game.entities[e.kind as usize].worn;
     let Some(inv) = ents
         .inventories
         .get(&id)
@@ -1440,8 +1429,4 @@ fn death_message(c: &Content, cause: u32, killer: Option<u32>, name: String) -> 
 
 fn void_note(c: &Content) -> Msg {
     Msg::new(if c.spawn_dim == c.void_dim { "void.no_dimension" } else { "void.here" }, Vec::new())
-}
-
-fn lod_columns<'a>(cols: impl Iterator<Item = &'a lod_tops::LodColumn>) -> Vec<(i32, i32, i32, u32, u32)> {
-    cols.map(|c| (c.x, c.z, c.y, c.top, c.under)).collect()
 }

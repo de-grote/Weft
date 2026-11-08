@@ -110,8 +110,8 @@ impl Dim {
     pub fn take_block(&mut self, c: &'static Content, p: IVec3) -> Option<(u32, Option<u64>, Moved)> {
         let state = self.get(p)?;
         let entity = self.anchored(p);
-        if entity.is_some() {
-            self.entities.anchors.remove(&(self.frame, p));
+        if let Some(id) = entity {
+            self.entities.unanchor((self.frame, p), id);
         }
         let signal = self.space.signals.carry_out(p);
         self.write_block(c, p, AIR, true);
@@ -295,7 +295,10 @@ impl Dim {
             .unwrap_or(IVec3::ZERO);
         log::debug!("floaters at {:?} set off with {} blocks", plan.floaters, plan.cells.len());
         let cells = self.with_riders(c, center, plan.cells.into_iter().collect());
-        self.lift(c, c.game.platform_kind, center.as_dvec3() + DVec3::new(0.5, 0.0, 0.5), cells, &[], Liveness::Free);
+        let (id, _) = self.lift(c, c.game.platform_kind, center.as_dvec3() + DVec3::new(0.5, 0.0, 0.5), cells, &[], Liveness::Free);
+        if let Some(b) = self.bodies.get_mut(&id) {
+            b.floated = true;
+        }
     }
 
     /// `what_is_ahead` along each axis `sign` has and across the corners between them.
@@ -382,8 +385,13 @@ impl Dim {
         }
         let Some(cell) = b.cell else { return };
         let Some(floaters) = b.signals.floaters(c) else { return };
-        // Without any it is a mod's.
+        // Without any it is a mod's, unless they were broken off it.
         if floaters.is_empty() {
+            if b.floated {
+                log::debug!("a platform at {cell} has no floaters left");
+                let (pos, vel) = (e.pos, e.vel);
+                self.bring_to_stop(id, pos, vel, None);
+            }
             return;
         }
         let v: DVec3 = floaters
@@ -520,7 +528,7 @@ impl Dim {
         let (all, was) = (b.all_blocks(), b.cell);
         let blocks: Vec<(IVec3, u32, Option<u64>)> = all
             .into_iter()
-            .map(|(local, state)| (local, state, self.entities.anchors.get(&(id, local)).copied()))
+            .map(|(local, state)| (local, state, self.entities.anchored(id, local)))
             .collect();
         self.in_frame(on.unwrap_or(0), |d| {
             let place = Transform::of(d.place.to_local(pos));
@@ -571,7 +579,7 @@ impl Dim {
                 .map_or(Vec::new(), |s| s.extras(b.local).to_vec());
             self.land_block(c, b.to, b.state, b.entity, signal);
             if self.get(b.to) == Some(b.state) {
-                self.set_extras(b.to, extras);
+                self.write_cell(c, b.to, b.state, Some(extras), true);
             }
             if let Some(was) = was.filter(|was| self.get(b.to) != Some(*was)) {
                 cells.push((b.to, was));
@@ -603,13 +611,10 @@ impl Dim {
     /// Goes where it was going, if that is free: otherwise it breaks there, what it holds with it.
     fn land_block(&mut self, c: &'static Content, at: IVec3, state: u32, entity: Option<u64>, signal: Moved) {
         match self.get(at) {
-            // Wire joins the wire there, each piece holding on by itself.
-            Some(there)
-                if c.states[there as usize].block == c.states[state as usize].block
-                    && c.states[state as usize].signal.kind == abi::signal_kind::WIRE =>
-            {
-                let first = c.block_of(state).first_state;
-                self.write_block(c, at, first + ((there - first) | (state - first)), true);
+            // Sides join the sides there, each holding on by itself.
+            Some(there) if c.states[there as usize].block == c.states[state as usize].block && c.states[state as usize].sides != 0 => {
+                let sides = c.states[there as usize].sides | c.states[state as usize].sides;
+                self.write_block(c, at, c.block_of(state).with_sides(state, sides), true);
             }
             Some(there) if there == AIR || c.states[there as usize].flags & abi::block_flags::REPLACEABLE != 0 => {
                 if c.states[state as usize].signal.kind == abi::signal_kind::OBSERVER {
@@ -712,8 +717,7 @@ impl Dim {
             }
         }
         for (at, state) in blocks {
-            if let Some(cb) = c.block_of(state).cb.on_carried {
-                let owner = c.block_of(state).owner;
+            if let Some((owner, cb)) = c.block_of(state).cb.on_carried {
                 let cell = at + now;
                 self.call(owner, cb, |w| abi::BlockEventArgs {
                     world: w,

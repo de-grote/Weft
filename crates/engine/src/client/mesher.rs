@@ -11,6 +11,7 @@ use crate::content::Content;
 
 pub const PAD: usize = 18;
 pub const PAD_VOLUME: usize = PAD * PAD * PAD;
+pub const ABSENT: u32 = u32::MAX;
 
 #[inline]
 pub const fn pidx(x: i32, y: i32, z: i32) -> usize {
@@ -83,7 +84,7 @@ pub fn build(c: &Content, n: &Neighborhood, ctm: &super::ctm::Ctm) -> Mesh {
         for (x, &s) in states[row * PAD..(row + 1) * PAD].iter().enumerate() {
             if s != 0 {
                 *f |= 1 << x;
-                if ctm.hides(c.tight[s as usize].flags, s) {
+                if n.light[row * PAD + x] != ABSENT && ctm.hides(c.tight[s as usize].flags, s) {
                     *o |= 1 << x;
                 }
             }
@@ -155,12 +156,7 @@ fn draw_block(
             for dir in 0..6 {
                 let [dx, dy, dz] = NORMALS[dir];
                 let ni = pidx(x + dx, y + dy, z + dz);
-                let ns = n.states[ni];
-                let ninfo = &c.states[ns as usize];
-                if ctm.hides(ninfo.flags, ns) {
-                    continue;
-                }
-                if ninfo.block == info.block && info.layer != RenderLayer::Opaque && info.flags & bf::CULL_SAME != 0 {
+                if face_hidden(c, ctm, s, n.states[ni]) {
                     continue;
                 }
                 let (ao, light) = corner_data(c, n, ctm, opaque, x, y, z, dir);
@@ -235,6 +231,13 @@ pub const DIR_RANK: [u8; 6] = [3, 0, 4, 1, 5, 2];
 
 /// A face of a model's box as it is drawn, in the world and as an item alike: its corners in the
 /// block, turned and tilted, and the part of its picture (16 across). `None`: it has no such face.
+/// Whether a cube's face toward `neighbor` doesn't show: it is opaque (a pack's rule doesn't open
+/// it), or the same block, which culls its own (glass).
+pub fn face_hidden(c: &Content, ctm: &super::ctm::Ctm, state: u32, neighbor: u32) -> bool {
+    let (info, n) = (&c.states[state as usize], &c.states[neighbor as usize]);
+    ctm.hides(n.flags, neighbor) || n.block == info.block && info.layer != RenderLayer::Opaque && info.flags & bf::CULL_SAME != 0
+}
+
 pub fn box_face(bx: &crate::content::ModelBox, dir: usize) -> Option<([[f32; 3]; 4], [f32; 4])> {
     if bx.uv[dir][0] <= weft_abi::UV_NO_FACE[0] {
         return None;
@@ -313,7 +316,7 @@ fn corner_data(
         let mut count = 0;
         for (idx, solid) in [(i0, false), (i1, s1 || !r1), (i2, s2 || !r2), (i3, s3 || (s1 && s2) || !r3)] {
             // A block with holes is still opaque to light, there is none in it to go by.
-            if solid || ctm.is_open(n.states[idx]) {
+            if solid || n.light[idx] == ABSENT || ctm.is_open(n.states[idx]) {
                 continue;
             }
             let l = n.light[idx];
@@ -337,6 +340,9 @@ fn brightest_around(n: &Neighborhood, x: i32, y: i32, z: i32) -> u32 {
         for dz in -1..=1 {
             for dx in -1..=1 {
                 let l = n.light[pidx(x + dx, y + dy, z + dz)];
+                if l == ABSENT {
+                    continue;
+                }
                 for (ch, m) in most.iter_mut().enumerate() {
                     *m = (*m).max((l >> (ch * 8)) & 0xFF);
                 }

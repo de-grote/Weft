@@ -4,14 +4,14 @@
 //!
 //! ```ignore
 //! static JETPACK: Key = Key::named("jetpack");
-//! r.key(&JETPACK, "J").on_press_server(|p| { let w = p.world(); /* for p.player() */ });
+//! r.key(&JETPACK, "J").on_server(|p| { let w = p.world(); /* for p.player() */ });
 //! static SCAN: Key = Key::named("scan");
-//! r.key(&SCAN, "K").on_press_client(|c| { /* on this client */ });
+//! r.key(&SCAN, "K").on_client(|c| { /* on this client */ });
 //! ```
 
 use crate::abi::{self, ItemStack, Slice, Str, gizmo_kind as gk};
 use crate::abi::{BlockPos, Vec3};
-use crate::{ClientView, Key, Registry, Screen, Value, World, callback, host};
+use crate::{ClientView, Key, Menu, Registry, Value, WithComponents, World, callback, host};
 
 pub use abi::{ClientState, client_flags};
 
@@ -145,14 +145,21 @@ impl Client {
         self.input(abi::client_input::RELEASE_ALL, "", 0.0, 0.0);
     }
 
-    /// The key (yours from `Registry::key`, or one of `keys::*`) was pressed this frame. Keys
-    /// belong to the world: while a screen has the input they are up.
+    /// What the key (yours from `Registry::key`, or one of `keys::*`) does now: pressed this
+    /// frame, held, for how many ticks. Keys belong to the world: while a screen has the input
+    /// they are up.
+    pub fn key(&self, key: &Key) -> abi::KeyState {
+        let mut out = abi::KeyState::default();
+        unsafe { (host().client_key_state)(self.raw, abi_str(key.name()), &mut out) };
+        out
+    }
+
     pub fn key_pressed(&self, key: &Key) -> bool {
-        unsafe { (host().client_key_state)(self.raw, abi_str(key.name())) & 1 != 0 }
+        self.key(key).pressed != 0
     }
 
     pub fn key_held(&self, key: &Key) -> bool {
-        unsafe { (host().client_key_state)(self.raw, abi_str(key.name())) & 2 != 0 }
+        self.key(key).held != 0
     }
 
     pub fn control(&self, c: &abi::PlayerControl) {
@@ -234,11 +241,11 @@ impl Client {
     }
 
     /// A mod's screen or one of the engine's (`screens::*`).
-    pub fn screen_open(&self, screen: &Screen) -> bool {
+    pub fn menu_open(&self, screen: &Menu) -> bool {
         self.op(abi::client_op::OPEN_SCREEN, screen.name(), 0.0) != 0
     }
 
-    pub fn screen_close(&self) {
+    pub fn menu_close(&self) {
         self.op(abi::client_op::CLOSE_SCREEN, "", 0.0);
     }
 
@@ -582,26 +589,17 @@ impl Registry {
     /// Every frame on the client, before input is handled.
     pub fn client_frame(&mut self, f: impl Fn(&Client) + Send + Sync + 'static) {
         let cb = callback(move |a: &mut abi::ClientFrameArgs| f(&Client::from_raw(a.client)));
-        unsafe { (host().reg_client_hook)(self.raw, abi::client_hook::FRAME, cb) }
+        unsafe { (host().reg_client_frame)(self.raw, cb) }
     }
 
-    /// Cosmetics of entities of `kind` on the client, every frame (wing flaps, sparks, purring),
-    /// instead of the engine's steps, idle noises and death smoke; `e.run_engine_effects()` keeps
-    /// those. One per kind: a later mod's replaces an earlier one's.
-    pub fn client_entity_cosmetics(&mut self, kind: &crate::EntityKind, f: impl Fn(&Client, &ClientEntity) + Send + Sync + 'static) {
-        unsafe { (host().reg_client_entity_cosmetics)(self.raw, abi_str(kind.name()), entity_callback(f)) }
-    }
-
-    /// Every frame on the client for each entity of `kind`, the local player too, beside whatever
-    /// else runs for them: any number of mods may watch one kind, and steps and such go on.
+    /// Every frame on the client for each entity of `kind`, the local player too: its effects
+    /// (wing flaps, sparks, purring), any number of mods on one kind. The engine's steps, idle
+    /// noises and death smoke go on unless the kind says otherwise (`.effect(..)`, `.own_effects()`).
     pub fn client_entity_frame(&mut self, kind: &crate::EntityKind, f: impl Fn(&Client, &ClientEntity) + Send + Sync + 'static) {
-        unsafe { (host().reg_client_entity_frame)(self.raw, abi_str(kind.name()), entity_callback(f)) }
-    }
-
-    /// When the top screen changes; the name is empty back in the world.
-    pub fn client_screen(&mut self, f: impl Fn(&Client, &str) + Send + Sync + 'static) {
-        let cb = callback(move |a: &mut abi::ClientScreenArgs| f(&Client::from_raw(a.client), unsafe { a.screen.as_str() }));
-        unsafe { (host().reg_client_hook)(self.raw, abi::client_hook::SCREEN, cb) }
+        drop(
+            self.edit_entity(kind.name())
+                .push(&crate::comps::entity::FRAMES, entity_callback(f)),
+        );
     }
 
     /// Server side of a channel: `f` gets every value a client sends on it, with who sent it.
@@ -627,23 +625,30 @@ impl Registry {
     }
 
     /// Key binding with a default key (`J`, `KeyJ`, `F6`, `space`, `lshift`, `mouse3`), listed
-    /// in Controls as `key.<ns>.<name>`; what it does with `.on_press_client(..)` or
-    /// `.on_press_server(..)`, or read with `Client::key_pressed`/`key_held`. Keys only act while the
+    /// in Controls as `key.<ns>.<name>`; what it does with `.on_client(..)` or
+    /// `.on_server(..)`, or read with `Client::key_pressed`/`key_held`. Keys only act while the
     /// world has the input (not while typing in the chat or with a screen open).
     pub fn key<'a>(&'a mut self, key: &'static Key, default: &str) -> KeyBuilder<'a> {
-        unsafe { (host().reg_key)(self.raw, abi_str(key.name()), abi_str(default)) }
-        KeyBuilder { reg: self, key }
+        self.key_entry(key)
+            .set_text(&crate::comps::key::DEFAULT, default)
+    }
+
+    fn key_entry(&mut self, key: &'static Key) -> KeyBuilder<'_> {
+        KeyBuilder { reg: self, e: crate::entry::Entry::of(key), key }
     }
 }
 
 pub struct KeyBuilder<'a> {
     reg: &'a mut Registry,
+    e: crate::entry::Entry,
     key: &'static Key,
 }
 
+crate::entry::entry_builder!(Key => KeyBuilder, key_entry;);
+
 impl KeyBuilder<'_> {
     /// On the client, every time the key goes down.
-    pub fn on_press_client(self, f: impl Fn(&Client) + Send + Sync + 'static) -> Self {
+    pub fn on_client(self, f: impl Fn(&Client) + Send + Sync + 'static) -> Self {
         let key = self.key;
         // By the edge of `held`, so a press is seen whichever frame hook made it.
         let was = std::sync::atomic::AtomicBool::new(false);
@@ -660,11 +665,41 @@ impl KeyBuilder<'_> {
 
     /// On the server, for the player who pressed it (`p.player()`, `p.world()`): the engine
     /// carries the press over, no channel of yours needed.
-    pub fn on_press_server(self, f: impl Fn(&Packet) + Send + Sync + 'static) -> Self {
+    pub fn on_server(self, f: impl Fn(&Packet) + Send + Sync + 'static) -> Self {
         let key = self.key;
         let channel: &'static Channel<()> = Channel::generated(format!("{}.pressed", key.name()));
         self.reg.packet(channel, move |p, ()| f(p));
-        KeyBuilder { reg: self.reg, key }.on_press_client(move |c| c.send(channel, &()))
+        self.on_client(move |c| c.send(channel, &()))
+    }
+}
+
+/// The keys as a mount's steering or a camera mode reads them, any action by its handle, and
+/// where the player looks (radians; a detached camera's own look).
+pub struct Keys {
+    raw: *const abi::KeysCtx,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl Keys {
+    pub(crate) fn of(raw: *const abi::KeysCtx, yaw: f32, pitch: f32) -> Keys {
+        Keys { raw, yaw, pitch }
+    }
+
+    /// Pressed, held and its charge: ticks held, and held before being let go this tick.
+    pub fn state(&self, key: &Key) -> abi::KeyState {
+        let mut out = abi::KeyState::default();
+        unsafe { (host().keys_state)(self.raw, abi_str(key.name()), &mut out) };
+        out
+    }
+
+    pub fn held(&self, key: &Key) -> bool {
+        self.state(key).held != 0
+    }
+
+    /// -1..1 from `minus` held to `plus` held: `axis(&keys::FORWARD, &keys::BACK)`.
+    pub fn axis(&self, plus: &Key, minus: &Key) -> f32 {
+        self.held(plus) as i32 as f32 - self.held(minus) as i32 as f32
     }
 }
 
@@ -682,6 +717,12 @@ pub mod keys {
     pub static FLY: Key = Key::named("core:fly");
     pub static INVENTORY: Key = Key::named("core:inventory");
     pub static DROP: Key = Key::named("core:drop");
+    pub static DROP_ALL: Key = Key::named("core:drop_all");
+    pub static DISMOUNT: Key = Key::named("core:dismount");
+    pub static FLY_FASTER: Key = Key::named("core:fly_faster");
+    pub static FLY_SLOWER: Key = Key::named("core:fly_slower");
+    pub static HOTBAR_NEXT: Key = Key::named("core:hotbar_next");
+    pub static HOTBAR_PREV: Key = Key::named("core:hotbar_prev");
     pub static COMMAND: Key = Key::named("core:command");
     pub static CHAT: Key = Key::named("core:chat");
     pub static DEBUG: Key = Key::named("core:debug");
@@ -700,26 +741,27 @@ pub mod keys {
 /// The engine's screens: open them, add parts to them, or register one of these handles to
 /// replace it.
 pub mod screens {
-    use crate::Screen;
-    pub static TITLE: Screen = Screen::named("core:title");
-    pub static PAUSE: Screen = Screen::named("core:pause");
-    pub static SETTINGS: Screen = Screen::named("core:settings");
-    pub static LANGUAGE: Screen = Screen::named("core:language");
-    pub static CONTROLS: Screen = Screen::named("core:controls");
-    pub static WORLDS: Screen = Screen::named("core:worlds");
-    pub static CREATE_WORLD: Screen = Screen::named("core:create_world");
-    pub static CHAT: Screen = Screen::named("core:chat");
-    pub static INVENTORY: Screen = Screen::named("core:inventory");
-    pub static MOD_SETTINGS: Screen = Screen::named("core:mod_settings");
-    pub static DEATH: Screen = Screen::named("core:death");
-    pub static MODS: Screen = Screen::named("core:mods");
-    pub static PROFILE: Screen = Screen::named("core:profile");
-    pub static MULTIPLAYER: Screen = Screen::named("core:multiplayer");
-    pub static RESOURCE_PACKS: Screen = Screen::named("core:resource_packs");
-    pub static SHADER_PACKS: Screen = Screen::named("core:shader_packs");
-    pub static SOUND: Screen = Screen::named("core:sound");
-    pub static HUD_EDITOR: Screen = Screen::named("core:hud_editor");
-    pub static DEBUG_OPTIONS: Screen = Screen::named("core:debug_options");
+    use crate::Menu;
+    pub static TITLE: Menu = Menu::named("core:title");
+    pub static PAUSE: Menu = Menu::named("core:pause");
+    pub static SETTINGS: Menu = Menu::named("core:settings");
+    pub static LANGUAGE: Menu = Menu::named("core:language");
+    pub static CONTROLS: Menu = Menu::named("core:controls");
+    pub static WORLDS: Menu = Menu::named("core:worlds");
+    pub static CREATE_WORLD: Menu = Menu::named("core:create_world");
+    pub static WORLD_RULES: Menu = Menu::named("core:world_rules");
+    pub static CHAT: Menu = Menu::named("core:chat");
+    pub static INVENTORY: Menu = Menu::named("core:inventory");
+    pub static MOD_SETTINGS: Menu = Menu::named("core:mod_settings");
+    pub static DEATH: Menu = Menu::named("core:death");
+    pub static MODS: Menu = Menu::named("core:mods");
+    pub static PROFILE: Menu = Menu::named("core:profile");
+    pub static MULTIPLAYER: Menu = Menu::named("core:multiplayer");
+    pub static RESOURCE_PACKS: Menu = Menu::named("core:resource_packs");
+    pub static SHADER_PACKS: Menu = Menu::named("core:shader_packs");
+    pub static SOUND: Menu = Menu::named("core:sound");
+    pub static HUD_EDITOR: Menu = Menu::named("core:hud_editor");
+    pub static DEBUG_OPTIONS: Menu = Menu::named("core:debug_options");
 }
 
 /// One entity in `Registry::client_entity_frame`.
@@ -754,10 +796,5 @@ impl ClientEntity {
     /// Seconds since the last call.
     pub fn dt(&self) -> f32 {
         self.0.dt
-    }
-    /// What the engine does for kinds without a tick: steps, idle noises, death smoke.
-    pub fn run_engine_effects(&self) {
-        let mut a = abi::ClientEntityArgs { ..self.0 };
-        unsafe { (host().client_engine_effects)(&mut a) }
     }
 }

@@ -947,6 +947,10 @@ pub fn display_chord(lang: &Lang, c: crate::input::Chord) -> String {
             out.push('+');
         }
     }
+    if let Some(w) = c.with {
+        out += &display_key(lang, w);
+        out.push('+');
+    }
     out + &display_key(lang, c.key)
 }
 

@@ -44,14 +44,14 @@ pub fn register(r: &mut Registry) {
         }
     });
     // The smash itself, once a hit landed.
-    r.on(&actions::HURT, |b| {
+    r.on_event(&actions::HURT, |b| {
         let w = b.world();
         for h in b.iter().filter(|h| h.cause == damage_cause::ATTACK) {
             let Some(me) = w.entity(h.source).filter(|_| holds_mace(&w, h.source)) else { continue };
             if (me.fall_distance as f64) <= SMASH_FROM {
                 continue;
             }
-            w.entity_edit(h.source)
+            w.entity_modify(h.source)
                 .fall_distance(0.0)
                 .velocity(Vec3 { y: 0.0, ..me.vel });
             let Some(target) = w.entity(h.entity) else { continue };

@@ -1350,7 +1350,13 @@ impl CubeTable {
         let draws = words[..n * 2]
             .chunks_exact(2)
             .fold(0u32, |sum, c| sum.saturating_add(c[0]));
-        (draws, words.get(self.per_bucket.len() * 2).copied().unwrap_or(0) as u64)
+        (draws, words.get(self.faces_slot() * 2).copied().unwrap_or(0) as u64)
+    }
+
+    /// Where the faces' counter is in the buckets: after the last bucket, at an offset any API
+    /// can bind a buffer from (DX12 and Metal ask for 256 bytes).
+    fn faces_slot(&self) -> usize {
+        (self.per_bucket.len() * 8).next_multiple_of(256) / 8
     }
 
     /// Makes this frame's draws. Before the world's pass.
@@ -1384,11 +1390,12 @@ impl CubeTable {
             });
         }
         let Some(o) = &self.out else { return };
+        let faces = self.faces_slot();
         let buckets = crate::gpu_layout::frame_buffer(
             gpu,
             &mut self.buckets,
             slot,
-            self.per_bucket.len() as u32 + 1,
+            faces as u32 + 1,
             8,
             usage::STORAGE | usage::INDIRECT,
             "table buckets",
@@ -1401,7 +1408,7 @@ impl CubeTable {
                 words[id * 2 + 1] = base;
                 base += n * if id & 2 == 0 { DRAWS_PER_FACES } else { 1 };
             }
-            words[self.per_bucket.len() * 2] = 0;
+            words[faces * 2] = 0;
         }
         use crate::gpu_layout::bind::occlusion as b;
         list.push(Cmd::Barrier);
@@ -1411,10 +1418,10 @@ impl CubeTable {
         list.bind(b::BUCKETS, buckets);
         list.bind(b::OUT_DRAWS, o.draws);
         list.bind(b::OUT_ORIGINS, o.origins);
-        // The faces' counter is the one after the last bucket.
-        list.bind_range(b::FACES_DRAWN, buckets, self.per_bucket.len() as u64 * 8, 8);
-        // Its use is decided in the shader, but all a shader mentions has to be bound.
-        list.bind(b::DEPTHS, depths.unwrap_or(self.buffer));
+        list.bind_range(b::FACES_DRAWN, buckets, faces as u64 * 8, 8);
+        // Its use is decided in the shader, but all a shader mentions has to be bound: by one it
+        // writes anyway, as a buffer read in one binding can't be written in another.
+        list.bind(b::DEPTHS, depths.unwrap_or(buckets));
         let count = self.entries.len() as u32;
         list.push_constants(&crate::gpu_layout::OcclusionArgs { size: [0; 2], src: 0, dst: 0, count, pad: 0 });
         list.push(Cmd::Dispatch { x: count.div_ceil(256), y: 1, z: 1 });

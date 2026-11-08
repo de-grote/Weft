@@ -210,14 +210,14 @@ impl DimSet {
         self.regions[r].get(p)
     }
 
-    pub fn insert(&mut self, c: &Content, pos: IVec3, mut cube: Cube, entities: &[u8], mut conn: u16, mut prelit: bool) {
+    pub fn insert(&mut self, c: &'static Content, pos: IVec3, mut cube: Cube, entities: &[u8], mut conn: u16, mut prelit: bool) {
         self.generating.remove(&pos);
         // Loaded meanwhile (an area edit loads what it opens up at once).
         if self.has(pos) {
             return;
         }
         // Edits made while it was being made.
-        let edited = self.catch_up_edits(c, pos, &mut cube);
+        let edited = self.catch_up_edits(pos, &mut cube);
         if edited {
             prelit = false;
             conn = super::dim::see_through(c, &cube);
@@ -267,8 +267,8 @@ impl DimSet {
 
     /// Gives a cube coming from storage or generation the area edits made while it was away
     /// (or before it was ever generated), once each. Whether that changed it.
-    pub fn catch_up_edits(&self, c: &Content, pos: IVec3, cube: &mut Cube) -> bool {
-        super::area::catch_up(c, &self.edits, pos, cube)
+    pub fn catch_up_edits(&self, pos: IVec3, cube: &mut Cube) -> bool {
+        super::area::catch_up(&self.edits, pos, cube)
     }
 
     /// Loaded cubes changed since they were generated or loaded (saved when they unload).
@@ -292,9 +292,9 @@ impl DimSet {
     pub fn spawn_point(&self, c: &Content) -> DVec3 {
         let def = &c.dims[self.id as usize];
         let mut pos = def.spawn_at;
-        if let Some(cb) = def.spawn {
+        if let Some((by, cb)) = def.spawn {
             let mut args = abi::SpawnArgs { seed: self.seed, pos: pos.into() };
-            host::invoke(def.owner, cb, &mut args);
+            host::invoke(by, cb, &mut args);
             pos = args.pos.to_array();
         } else if let Some(p) = search_spawn(c, def, self.seed) {
             pos = p;

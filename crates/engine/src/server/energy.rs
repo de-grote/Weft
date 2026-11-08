@@ -96,7 +96,7 @@ impl Grid {
                         if seen.insert(n) {
                             stack.push(n);
                         }
-                    } else if let Some(&id) = e.anchors.get(&(frame, n)) {
+                    } else if let Some(id) = e.anchored(frame, n) {
                         if e.comps.contains_key(&(id, c.game.energy)) {
                             ends.push(id);
                         }

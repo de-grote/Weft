@@ -3,7 +3,7 @@
 //! and replayed where cubes load later.
 //!
 //! ```ignore
-//! w.fill(Shape::blast(at, 4.0, w.random()), 0).keep(Filter::unbreakable());
+//! w.fill(Shape::blast(at, 4.0, w.random()), 0).keep("#unbreakable");
 //! let geode = Shape::ball(c, 4.0).subtract(Shape::ball(c, 3.0));
 //! let on_belt = w.entities_in(&Shape::cuboid(lo, hi), EntityFilter::any());
 //! ```
@@ -162,55 +162,36 @@ fn box_edges(out: &mut Vec<(Vec3, Vec3)>, lo: Vec3, hi: Vec3) {
     }
 }
 
-/// Which blocks a fill keeps (`Fill::keep`) or only changes (`Fill::only`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Filter(abi::BlockFilter);
-
-impl Filter {
-    pub fn liquids() -> Filter {
-        Filter(abi::BlockFilter { kind: abi::block_filter::LIQUIDS, id: 0 })
-    }
-    /// Blocks with negative hardness (bedrock).
-    pub fn unbreakable() -> Filter {
-        Filter(abi::BlockFilter { kind: abi::block_filter::UNBREAKABLE, id: 0 })
-    }
-    /// Blocks with a tag (`"#stone"` or `"stone"`); a tag nothing has is a mistake the fill
-    /// logs instead of happening.
-    pub fn tag(tag: &str) -> Filter {
-        let id = unsafe { (host().find_component)(abi::Str::new(tag.trim_start_matches('#')), abi::Str::EMPTY) };
-        Filter(abi::BlockFilter { kind: abi::block_filter::TAG, id })
-    }
-    pub fn block(block: &crate::Block) -> Filter {
-        Filter(abi::BlockFilter { kind: abi::block_filter::BLOCK, id: block.id() })
-    }
-}
-
 /// A fill in the making (`World::fill`); it happens as this goes.
 pub struct Fill {
     pub(crate) world: crate::World,
     pub(crate) shape: Shape,
     pub(crate) state: u32,
-    pub(crate) keep: Vec<abi::BlockFilter>,
-    pub(crate) only: Vec<abi::BlockFilter>,
+    pub(crate) keep: String,
+    pub(crate) only: String,
 }
 
 impl Fill {
-    /// Blocks this matches stay.
-    pub fn keep(mut self, what: Filter) -> Self {
-        self.keep.push(what.0);
+    /// Blocks `what` takes stay (a block matcher: `"#unbreakable #liquids"`), on top of what an
+    /// earlier `keep` said. One naming a block nobody has is a mistake the fill logs instead of
+    /// happening.
+    pub fn keep(mut self, what: &str) -> Self {
+        add_terms(&mut self.keep, what);
         self
     }
-    /// Only blocks this (or another `only`) matches change: ore veins in stone only.
-    pub fn only(mut self, what: Filter) -> Self {
-        self.only.push(what.0);
+    /// Only blocks `what` (or an earlier `only`) takes change (a block matcher): ore veins in
+    /// stone only.
+    pub fn only(mut self, what: &str) -> Self {
+        add_terms(&mut self.only, what);
         self
     }
-    pub fn keep_unbreakable(self) -> Self {
-        self.keep(Filter::unbreakable())
+}
+
+fn add_terms(to: &mut String, what: &str) {
+    if !to.is_empty() {
+        to.push(' ');
     }
-    pub fn keep_liquids(self) -> Self {
-        self.keep(Filter::liquids())
-    }
+    to.push_str(&crate::qualify_matcher(crate::mod_id(), what));
 }
 
 impl Drop for Fill {
@@ -219,8 +200,8 @@ impl Drop for Fill {
             let desc = abi::FillDesc {
                 shape: abi::Slice::new(&self.shape.steps),
                 state: self.state,
-                keep: abi::Slice::new(&self.keep),
-                only: abi::Slice::new(&self.only),
+                keep: abi::Str::new(&self.keep),
+                only: abi::Str::new(&self.only),
             };
             unsafe { (host().fill)(self.world.raw(), &desc) }
         }
@@ -259,7 +240,7 @@ impl crate::World {
     /// rest when they load. Far faster than `set_block` per block for anything big. It doesn't ask
     /// `BREAK_BLOCK` or drop anything.
     pub fn fill(&self, shape: Shape, state: u32) -> Fill {
-        Fill { world: *self, shape, state, keep: Vec::new(), only: Vec::new() }
+        Fill { world: *self, shape, state, keep: String::new(), only: String::new() }
     }
     /// Entities in `shape` that `filter` lets through.
     pub fn entities_in(&self, shape: &Shape, filter: EntityFilter) -> Vec<u64> {

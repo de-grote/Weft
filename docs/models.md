@@ -63,9 +63,9 @@ r.entity(&ORB).texture("orb").model(Model::from(vec![
 ```
 
 ## Model from Blockbench
-Make the model as a Bedrock Entity, export it as `<name>.geo.json` and drop it into `assets/models/`. A file named like the entity is picked up on its own (`idol.geo.json` for `idol`), and `r.set_model("idol", "other_name")` points at another one. Either way the file replaces any model written in code. Animations work the same way, from `animations/<name>.animation.json`.
+Make the model as a Bedrock Entity, export it as `<name>.geo.json` and drop it into `assets/models/`. A file named like the entity is picked up on its own (`idol.geo.json` for `idol`), and `r.set_model(&IDOL, "other_name")` points at another one. Either way the file replaces any model written in code. Animations work the same way, from `animations/<name>.animation.json`.
 
-The engine reads bones with their `pivot`, `parent` and resting `rotation`, boxes with `origin` (absolute, the way Blockbench writes it), `size`, `uv` (a pair or per face), `mirror` and `inflate`, and `poly_mesh` bones, triangles and quads alike, with normalized uvs if you use them. The geometry's `texture_width` and `texture_height` override the numbers you gave to `Model::uv`, so the skin can be any size.
+The engine reads bones with their `pivot`, `parent` and resting `rotation`, boxes with `origin` (absolute, the way Blockbench writes it), `size`, `uv` (a pair or per face), `mirror` and `inflate`, and `poly_mesh` bones, triangles and quads alike, with normalized uvs if you use them. The geometry's `texture_width` and `texture_height` override the numbers you gave to `Model::uv_size`, so the skin can be any size.
 
 Two things trip people up. A rotated box is drawn unrotated (the log warns about it), so put it in its own bone and rotate the bone. And list parent bones before their children, as Blockbench does. Molang expressions aren't evaluated, only plain numbers.
 
@@ -86,7 +86,7 @@ A role tells the engine what a bone is: which stock clips move it, what armor co
 | a bone under `head` | stays with the head, and is gone with it from your own eyes |
 | anything else | stays still |
 
-The player's model is `humanoid(false)` set by base (`r.set_model("core:player", ..)` sets any kind's model, the engine's included); its sneaking pose comes from `body`, `head` and the arms and legs.
+The player's model is `humanoid(false)` set by base (`r.set_model(&PLAYER, ..)` sets any kind's model, the engine's included); its sneaking pose comes from `body`, `head` and the arms and legs.
 
 ## Animations
 One file holds any number of animations, and an animation's name is whatever follows the last dot, so `animation.idol.bow` is just `bow`:
@@ -142,7 +142,7 @@ The file is found by the entity's name, or by `.animations("name")` when it is c
 ### Animations for something that already exists
 A file can also be attached to an entity that belongs to someone else, the player for example:
 ```rust
-r.set_animations("core:player", "mymod:player");
+r.set_animations(&PLAYER, "mymod:player");
 ```
 After that the player has the animations of your `animations/player.animation.json`, and `action_play(player, "wave", false)` plays one.
 
@@ -160,7 +160,7 @@ r.item(&GREATSWORD).two_handed();                     // does nothing while the 
 r.item(&MAP).one_handed_action("hold_one");               // two hands, or one with this action
 r.item(&BOW).use_priority(10);                        // goes before the other hand on a right click
 ```
-A right click goes to the block first (not while sneaking), then to the hands by `use_priority`, the main hand if they are equal. The next hand gets its turn when the item does nothing, which `on_use` says by returning `false`: a bow with no arrows lets the torches in the other hand go down. Hits are for the main hand. The second hand itself is an equipment slot, `r.equipment_slot(&OFF_HAND, 0, "slot_offhand")`, and base registers it. A menu with `.equipment()` has it; its screen places it with `ui.group(OFF_HAND.name())`, as `ui.equipment()` draws only what is worn.
+A right click goes to the block first (not while sneaking), then to the hands by `use_priority`, the main hand if they are equal. The next hand gets its turn when the item does nothing, which `on_use` says by returning `false`: a bow with no arrows lets the torches in the other hand go down. Hits are for the main hand. The second hand itself is an equipment slot, `r.equipment_slot(&OFF_HAND, &[], "slot_offhand")`, and base registers it. A menu with `.equipment()` has it; its screen places it with `ui.group(OFF_HAND.name())`, as `ui.equipment()` draws only what is worn.
 
 Where the item sits in the hand comes from `display.thirdperson_righthand` of `models/item/<name>.json`, which is Blockbench's Display tab, the same from the eyes and from outside; the other hand mirrors it. And `models/item/<name>.geo.json` makes the item out of bones (its texture is `textures/item/<name>.png`). Its origin is the palm with -Z along the arm, and its bones go in the same clips as the arms, so a gun's slide is one more bone in `swing`. On the ground and in the inventory it still shows its sprite.
 
@@ -178,11 +178,11 @@ Two more clips say how it lies when it isn't in a hand, both moving a bone calle
 - `ground`: on the ground. It turns and bobs by itself at half size, and for a sword to lie flat this is `root` turned 90 degrees on x.
 - `gui`: in a slot, turned like a block is, then made to fit. The picture is drawn once, so nothing moves in it and it may not be scaled.
 
-A model that depends on the stack, a sword that broke say:
+A look that depends on the stack, a sword that broke say, is the item's `condition`:
 ```rust
-r.item_model_for_stack(&SWORD, |s| (s.wear() > 100).then_some("mymod:sword_broken"));
+r.item(&SWORD).condition(|s, v| if s.wear() > 100 { v.model("sword_broken"); });
 ```
-It is asked once per kind of stack. The stacks in other players' hands aren't sent, so there they show the usual model.
+`v.texture(..)` swaps the flat picture the same way, in slots, hands and on the ground. It is asked once per kind of stack. The stacks in other players' hands aren't sent, so there they show the usual model.
 
 ## Models on models
 A second model can sit on a bone of the first, with its own texture and clips, like a tail:
@@ -210,7 +210,7 @@ c.action_current(e.id());                                                 // wha
 c.clip_length(e.id(), "bow");                                             // seconds
 c.held_item(e.id(), Hand::Main);                                    // the item id in a hand
 ```
-The bones are looked for in the entity's model and in what it holds and has on. An entity out of the view isn't posed, so `bone_position` has nothing for it, and far away a pose lasts a few frames. This runs on each client by itself, so nobody else's swing is exactly yours. `r.client_entity_frame` is the other hook: one per kind, for a mob's own cosmetics, and it replaces the engine's steps and such unless you call `e.run_engine_effects()`.
+The bones are looked for in the entity's model and in what it holds and has on. An entity out of the view isn't posed, so `bone_position` has nothing for it, and far away a pose lasts a few frames. This runs on each client by itself, so nobody else's swing is exactly yours. A kind with `.own_effects()` gets no steps and such from the engine, its `client_entity_frame` does them.
 
 `World::action_stop(id)` ends what `action_play` started. `action::WALK`, `action::HOLD` and so on are the engine's action names, if you'd rather a typo didn't compile.
 
