@@ -5,8 +5,8 @@ use weft_sdk::*;
 
 declare_mod!(deps: ["base"], init: init);
 
-static TINKER_TAB: CreativeTab = CreativeTab::named("Tinkers");
-static TINKER_MATS_TAB: CreativeTab = CreativeTab::named("Tinkers Materials");
+static TINKER_TAB: CreativeTab = CreativeTab::named("tinkers");
+static TINKER_MATS_TAB: CreativeTab = CreativeTab::named("tinkers_materials");
 
 static IRON_PICKAXE: Item = Item::named("base:iron_pickaxe");
 static PICKAXE: Item = Item::named("pickaxe");
