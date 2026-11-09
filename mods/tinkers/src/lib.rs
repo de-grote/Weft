@@ -83,6 +83,7 @@ fn init(r: &mut Registry) {
                 .item(item)
                 .tab(&TINKER_MATS_TAB)
                 .texture(component)
+                .color(material.color)
                 .tag(&component)
                 .tag(&format!("tinkers/{}", material.name));
             if component.ends_with("head") {
