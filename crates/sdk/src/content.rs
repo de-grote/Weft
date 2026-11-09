@@ -2484,6 +2484,25 @@ impl ItemBuilder<'_> {
         let t = crate::asset("item", t);
         self.set_text(&crate::comps::item::TEXTURE, &t)
     }
+    /// Tints its texture (`0xRRGGBB`) through the layered-texture renderer. 
+    /// call after `texture` to tint a custom texture.
+    pub fn color(self, color: u32) -> Self {
+        let texture = self
+            .e
+            .ops
+            .iter()
+            .rev()
+            .find(|p| p.name == abi::comp::item::TEXTURE)
+            .and_then(|p| p.text.as_deref())
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                let (ns, path) = self.e.name.split_once(':').unwrap_or((self.reg.ns, self.e.name.as_str()));
+                format!("{ns}:item/{path}")
+            });
+        let layer = format!("{texture}#{:06X}", color & 0xFF_FFFF);
+        self.set(&crate::comps::item::CONDITION, callback(move |a: &mut abi::ItemModelArgs| a.texture = Str::new(&layer)))
+    }
     /// Stack size (`max_stack`).
     pub fn max_stack(self, n: u32) -> Self {
         self.set(&c::MAX_STACK, n)
