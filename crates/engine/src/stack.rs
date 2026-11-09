@@ -131,11 +131,6 @@ pub fn name(stack: &ItemStack) -> Option<String> {
     value(stack.data, c.ids.name?).map(|b| String::from_utf8_lossy(b).into_owned())
 }
 
-pub fn with_name(stack: ItemStack, name: Option<&str>) -> ItemStack {
-    let Some(comp) = crate::content::try_content().and_then(|c| c.ids.name) else { return stack };
-    ItemStack { data: with(stack.data, comp, name.filter(|n| !n.is_empty()).map(str::as_bytes)), ..stack }
-}
-
 /// `stack` with the components of `data` on top of its own.
 pub fn merged_data(stack: ItemStack, data: u32) -> ItemStack {
     let mut comps: Vec<(u32, Box<[u8]>)> = get(stack.data).to_vec();

@@ -45,8 +45,6 @@ pub fn look_dir(yaw: f32, pitch: f32) -> DVec3 {
 
 /// A walker's jump, blocks per tick.
 pub const JUMP: f64 = 0.42;
-/// Blocks a walker goes up without jumping.
-pub const STEP_UP: f64 = 0.6;
 
 /// A dimension's gravity, in blocks per second squared, per tick squared.
 pub fn gravity_per_tick(gravity: f64) -> f64 {
@@ -54,11 +52,15 @@ pub fn gravity_per_tick(gravity: f64) -> f64 {
 }
 
 /// Vanilla's knockback, in blocks per tick: half the speed, 0.4 away (`away` is flat and of length
-/// 1) and on the ground up, never more than that up.
-pub fn knock(vel: DVec3, away: DVec3, on_ground: bool) -> DVec3 {
-    const STRENGTH: f64 = 0.4;
-    let y = if on_ground { (vel.y / 2.0 + STRENGTH).min(STRENGTH) } else { vel.y };
-    DVec3::new(vel.x / 2.0 + away.x * STRENGTH, y, vel.z / 2.0 + away.z * STRENGTH)
+/// 1) and on the ground up, never more than that up; `resist` (`KNOCKBACK_RESISTANCE`) takes its
+/// share off, all of it leaving the speed alone.
+pub fn knock(vel: DVec3, away: DVec3, on_ground: bool, resist: f64) -> DVec3 {
+    let strength = 0.4 * (1.0 - resist.clamp(0.0, 1.0));
+    if strength <= 0.0 {
+        return vel;
+    }
+    let y = if on_ground { (vel.y / 2.0 + strength).min(strength) } else { vel.y };
+    DVec3::new(vel.x / 2.0 + away.x * strength, y, vel.z / 2.0 + away.z * strength)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -173,6 +175,16 @@ impl Cells for BodyCells<'_> {
     }
 }
 
+/// The block a cell is part of, its cell and what else is there: a big block's own cell and
+/// block for its others (`Content::block_at`), whose boxes reach this one.
+fn block_of_cell<'a>(c: &Content, block: &'a impl Cells, p: IVec3, main: u32, extras: &'a [u32]) -> Option<(IVec3, u32, &'a [u32])> {
+    if c.covered_step(main).is_none() {
+        return Some((p, main, extras));
+    }
+    let (at, s) = c.block_at(|q| block.main(q), p)?;
+    Some((at, s, if at == p { &[] } else { block.extras(at) }))
+}
+
 /// Collision boxes of a state in block-local coordinates.
 pub fn boxes(c: &Content, state: u32, out: &mut Vec<[f64; 6]>) {
     out.extend(
@@ -184,15 +196,15 @@ pub fn boxes(c: &Content, state: u32, out: &mut Vec<[f64; 6]>) {
 }
 
 /// A solid body this step: its box after its move (around all its blocks for a structure), how
-/// far it moved, how high above it riders still move with it, whether it crushes what it
-/// squeezes, and the blocks it is built of with where they are.
+/// far it moved, how high above it riders still move with it, what it does to what it squeezes
+/// (`hazard_at::CRUSHED`, none: only pushes), and the blocks it is built of with where they are.
 #[derive(Clone, Copy)]
 pub struct Body<'a> {
     pub id: u64,
     pub aabb: Aabb,
     pub delta: DVec3,
     pub carry: f64,
-    pub crushes: bool,
+    pub crushes: &'a [crate::content::Hazard],
     pub blocks: Option<(&'a dyn Blocks, Transform)>,
 }
 
@@ -201,7 +213,7 @@ impl<'a> Body<'a> {
     /// blocks, an empty one not at all.
     pub fn of(
         id: u64,
-        kind: &crate::registry::EntityKind,
+        kind: &'a crate::registry::EntityKind,
         pos: DVec3,
         size: (f64, f64),
         delta: DVec3,
@@ -216,7 +228,7 @@ impl<'a> Body<'a> {
             None => Aabb::around(pos, size.0, size.1),
         };
         let blocks = built.map(|s| (s, place));
-        Some(Body { id, aabb, delta, carry: kind.carry_height as f64, crushes: kind.is(crate::tag_bits::entity::CRUSHES), blocks })
+        Some(Body { id, aabb, delta, carry: kind.carry_height as f64, crushes: &kind.hazards, blocks })
     }
 
     /// Its solid boxes touching `area`, in world space (until `f` returns true).
@@ -340,10 +352,10 @@ pub fn body_below(c: &Content, pos: DVec3, half_width: f64, bodies: &[Body<'_>],
 }
 
 /// What bodies did to a box before its own move: the last move of one it let go of (for keeping
-/// its momentum), and whether a crushing one squeezed it into blocks.
+/// its momentum), and the hazards of one that squeezed it into blocks (`hazard_at::CRUSHED`).
 pub struct Carried {
     pub released: Option<DVec3>,
-    pub crushed: bool,
+    pub crushed: Vec<crate::content::Hazard>,
 }
 
 /// The body a box rides moves it first (blocks still stop it), then bodies that ran into it push.
@@ -365,11 +377,17 @@ pub fn carried(
         *pos = move_box(c, block, *pos, half_width, height, rode.carry, 0.0).pos;
     }
     let (shift, crushes) = push(c, *pos, half_width, height, bodies, skip, *support);
-    let mut crushed = false;
+    let mut crushed = Vec::new();
     if shift != DVec3::ZERO {
         let to = move_box(c, block, *pos, half_width, height, shift, 0.0).pos;
         // It hurts what it cannot push away.
-        crushed = crushes && (to - *pos - shift).length_squared() > 1e-6;
+        if (to - *pos - shift).length_squared() > 1e-6 {
+            crushed = crushes
+                .iter()
+                .filter(|h| h.at == weft_abi::hazard_at::CRUSHED)
+                .copied()
+                .collect();
+        }
         *pos = to;
     }
     Carried { released: rode.released, crushed }
@@ -381,13 +399,21 @@ pub fn standing_on(c: &Content, pos: DVec3, half_width: f64, bodies: &[Body<'_>]
 }
 
 /// How far bodies that moved this step and overlap a box push it out of them, along each body's
-/// main direction of travel, and whether a crushing one did. A box already inside goes out too
+/// main direction of travel, and the hazards of those that did. A box already inside goes out too
 /// (like vanilla's shulker boxes): a body that showed up around a rider, or a rider put on a
 /// deck the client draws ahead of the server, must not stay stuck in it. The body it rides and
 /// `skip` (itself) do not push.
-pub fn push(c: &Content, pos: DVec3, half_width: f64, height: f64, bodies: &[Body<'_>], skip: u64, support: Option<u64>) -> (DVec3, bool) {
+pub fn push<'a>(
+    c: &Content,
+    pos: DVec3,
+    half_width: f64,
+    height: f64,
+    bodies: &[Body<'a>],
+    skip: u64,
+    support: Option<u64>,
+) -> (DVec3, &'a [crate::content::Hazard]) {
     let me = Aabb::around(pos, half_width, height);
-    let (mut shift, mut crushes) = (DVec3::ZERO, false);
+    let (mut shift, mut crushes): (DVec3, &[crate::content::Hazard]) = (DVec3::ZERO, &[]);
     for b in bodies
         .iter()
         .filter(|b| b.id != skip && Some(b.id) != support && b.delta != DVec3::ZERO)
@@ -407,7 +433,12 @@ pub fn push(c: &Content, pos: DVec3, half_width: f64, height: f64, bodies: &[Bod
                 if need.abs() > shift[axis].abs() {
                     shift[axis] = need;
                 }
-                crushes |= b.crushes;
+                if b.crushes
+                    .iter()
+                    .any(|h| h.at == weft_abi::hazard_at::CRUSHED)
+                {
+                    crushes = b.crushes;
+                }
             }
             false
         });
@@ -435,6 +466,8 @@ fn each_solid(c: &Content, block: &impl Cells, area: Aabb, mut f: impl FnMut(Aab
                     }
                     continue;
                 };
+                let Some((at, s, extras)) = block_of_cell(c, block, p, s, extras) else { continue };
+                let b = at.as_dvec3();
                 for s in std::iter::once(s).chain(extras.iter().copied()) {
                     for bx in &c.states[s as usize].collision {
                         let bx = bx.map(|v| v as f64);
@@ -586,6 +619,8 @@ pub struct Hit {
     /// In the coordinates of `frame`: the moving structure (entity) the block is part of, 0 for
     /// the world.
     pub block: IVec3,
+    /// The cell of the block hit: `block` itself, or a big block's own cell (`Content::block_at`).
+    pub origin: IVec3,
     pub frame: u64,
     /// Face index (-X, +X, -Y, +Y, -Z, +Z) that was entered.
     pub face: u8,
@@ -653,8 +688,11 @@ pub fn raycast(c: &Content, block: &impl Cells, origin: DVec3, dir: DVec3, max: 
     }
     let mut t = 0.0;
     while t <= max {
-        if let Some((main, extras)) = block.cell(p) {
-            let local = origin - p.as_dvec3();
+        if let Some((at, main, extras)) = block
+            .cell(p)
+            .and_then(|(main, extras)| block_of_cell(c, block, p, main, extras))
+        {
+            let local = origin - at.as_dvec3();
             // The nearest of what is in the cell; when asking for liquids, one in it comes first.
             let mut best: Option<Hit> = None;
             for state in std::iter::once(main).chain(extras.iter().copied()) {
@@ -681,10 +719,10 @@ pub fn raycast(c: &Content, block: &impl Cells, origin: DVec3, dir: DVec3, max: 
                 };
                 if let Some((dist, face)) = near {
                     if wanted {
-                        return Some(Hit { frame: 0, block: p, face, state, dist });
+                        return Some(Hit { frame: 0, block: p, origin: at, face, state, dist });
                     }
                     if best.is_none_or(|b| dist < b.dist) {
-                        best = Some(Hit { frame: 0, block: p, face, state, dist });
+                        best = Some(Hit { frame: 0, block: p, origin: at, face, state, dist });
                     }
                 }
             }
@@ -948,6 +986,59 @@ pub fn walk(
     Walked { hit: r.hit, on_ground: r.on_ground, jumped, started_in }
 }
 
+/// What flying is told: horizontal `wish` (length up to 1), going up or down, and how fast.
+pub struct Flight {
+    pub wish: DVec3,
+    pub up: bool,
+    pub down: bool,
+    /// The flight speed (1: vanilla's creative), doubled while sprinting.
+    pub speed: f64,
+}
+
+/// One tick of flight, the same for players and anything else that may fly: vanilla's creative
+/// numbers. `vel` is blocks per tick; `noclip` goes through everything. True when it came down
+/// onto the ground, which ends a player's flight.
+#[allow(clippy::too_many_arguments)]
+pub fn fly(
+    c: &Content,
+    block: &impl Cells,
+    bodies: &[Body<'_>],
+    skip: u64,
+    pos: &mut DVec3,
+    vel: &mut DVec3,
+    on_ground: &mut bool,
+    half_width: f64,
+    height: f64,
+    f: &Flight,
+    noclip: bool,
+) -> bool {
+    let push = 0.05 * f.speed;
+    vel.y += push * 3.0 * (f.up as i32 - f.down as i32) as f64;
+    let len2 = f.wish.length_squared();
+    if len2 > 1e-7 {
+        *vel += f.wish * (push / len2.sqrt().max(1.0));
+    }
+    let mut landed = false;
+    if noclip {
+        *pos += *vel;
+        *on_ground = false;
+    } else {
+        let r = move_box_with(c, block, bodies, skip, *pos, half_width, height, *vel, 0.0);
+        *pos = r.pos;
+        for i in 0..3 {
+            if r.hit[i] {
+                vel[i] = 0.0;
+            }
+        }
+        *on_ground = r.on_ground;
+        landed = r.on_ground && r.hit[1];
+    }
+    vel.y *= 0.6;
+    vel.x *= 0.91;
+    vel.z *= 0.91;
+    landed
+}
+
 /// The push two overlapping soft bodies give each other per tick (vanilla's
 /// applyEntityCollision), for an offset `d` from the other one: along the larger axis, 0.05.
 pub fn nudge(d: DVec3) -> DVec3 {
@@ -973,10 +1064,10 @@ mod knock_tests {
     fn knock_is_vanillas() {
         let away = DVec3::X;
         // On the ground: half the speed, away and up, never more than that up.
-        assert_eq!(knock(DVec3::new(0.2, 0.0, 0.1), away, true), DVec3::new(0.5, 0.4, 0.05));
-        assert_eq!(knock(DVec3::new(0.0, 0.3, 0.0), away, true).y, 0.4);
+        assert_eq!(knock(DVec3::new(0.2, 0.0, 0.1), away, true, 0.0), DVec3::new(0.5, 0.4, 0.05));
+        assert_eq!(knock(DVec3::new(0.0, 0.3, 0.0), away, true, 0.0).y, 0.4);
         // In the air it goes on up or down as it was.
-        assert_eq!(knock(DVec3::new(0.0, -0.5, 0.0), away, false).y, -0.5);
+        assert_eq!(knock(DVec3::new(0.0, -0.5, 0.0), away, false, 0.0).y, -0.5);
     }
 
     #[test]

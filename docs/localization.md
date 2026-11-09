@@ -107,6 +107,12 @@ block.base.furnace.tooltip = Smelts ores and cooks food.
     {on_key:!core:sneak}{lang:tooltip.more}{/on_key}{on_key:core:sneak}Burns {item:base:coal} coal, {item:base:oak_planks} planks or other {#ffe070}fuel{/} in the bottom slot.{/on_key}
 ```
 
+## Attribute modifiers
+What an item gives worn or in hand (`Modifier::add(&ARMOR, 3.0).worn()`) gets a line by itself, `tooltip.modifier.worn` or `tooltip.modifier` with the amount and the attribute's name, `attribute.<name>`:
+```
+attribute.base.armor = Armor
+```
+
 ## Lines by tag
 A line for every item with a tag or component, in one place, is `tagged.<name>`. It goes under the item's own tooltip, and a new item gets it just by having the tag:
 ```

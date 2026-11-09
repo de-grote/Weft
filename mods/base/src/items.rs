@@ -11,7 +11,7 @@ pub static BUCKET: Item = Item::named("bucket");
 pub static FLINT: Item = Item::named("flint");
 pub static CLAY_BALL: Item = Item::named("clay_ball");
 
-pub use base_api::{ARMOR, Armor, FLAMMABLE, FOOD, FUEL, Food};
+pub use base_api::{ARMOR, ARMOR_PIECE, ARMOR_TOUGHNESS, FLAMMABLE, FOOD, FUEL, Food};
 /// Tags of armor pieces, head to feet; `<tag>/<material>` picks the recipe (see recipes.rs).
 pub const ARMOR_SLOTS: [&str; 4] = ["armor_head", "armor_chest", "armor_legs", "armor_feet"];
 
@@ -155,9 +155,15 @@ pub fn register(r: &mut Registry) {
             // Leggings are the inner layer, drawn closer to the body.
             let (inflate, layer) =
                 if mat == "leather" { if slot == 2 { (0.2, 2) } else { (0.4, 1) } } else { if slot == 2 { (0.5, 2) } else { (0.75, 1) } };
-            r.item(Item::generated(format!("{mat}_{piece}")))
+            let item = r.item(Item::generated(format!("{mat}_{piece}")));
+            let item = if mat == "gold" { item.light_rgb(5, 5, 0) } else { item };
+            let mut b = item
                 .durability(durability * dur)
-                .set(&ARMOR, Armor { points, toughness })
+                .modifier(Modifier::add(&ARMOR, points as f64).worn());
+            if toughness > 0.0 {
+                b = b.modifier(Modifier::add(&ARMOR_TOUGHNESS, toughness as f64).worn());
+            }
+            b.tag(ARMOR_PIECE.name())
                 .tag(tag)
                 .tag(&format!("{tag}/{mat}"))
                 .wearable(crate::player::EQUIPMENT[slot as usize], inflate, &format!("armor/{mat}_{layer}"))

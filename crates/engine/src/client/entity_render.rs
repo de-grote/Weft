@@ -180,10 +180,6 @@ pub struct EntityRenderer {
     instances: Vec<(u64, GpuBox)>,
 }
 
-fn shader(assets: &Assets) -> Result<Shader, ShaderError> {
-    crate::packs::shader(assets, "entity.wgsl")
-}
-
 pub const HOOK: crate::shaders::Hook = crate::shaders::Hook {
     kind: "entity",
     entry: "shade",
@@ -282,7 +278,7 @@ impl EntityRenderer {
 
     /// Item models instanced in the world and in the hand.
     fn item_pipelines(gpu: &mut dyn Backend, assets: &Assets) -> Result<(PipelineId, PipelineId), String> {
-        let s = shader(assets).map_err(|e| e.0)?;
+        let s = crate::packs::shader(assets, "entity.wgsl").map_err(|e| e.0)?;
         let mut pipe = |label, vertex| {
             gpu.create_pipeline(&PipelineDesc {
                 label,
@@ -301,7 +297,7 @@ impl EntityRenderer {
     }
 
     fn pipelines(gpu: &mut dyn Backend, assets: &Assets) -> Result<(PipelineId, PipelineId), String> {
-        let s = shader(assets).map_err(|e| e.0)?;
+        let s = crate::packs::shader(assets, "entity.wgsl").map_err(|e| e.0)?;
         let main = gpu
             .create_pipeline(&PipelineDesc {
                 label: "entities",
@@ -347,7 +343,7 @@ impl EntityRenderer {
             .iter()
             .map(|d| {
                 let slot = effect_slots.slot(&d.shader);
-                if slot == 0 {
+                if slot == 0 && d.shader_given && !d.shader.is_empty() {
                     log::warn!("entity effect {}: no shader entity_effect/{}", d.name, d.shader);
                 }
                 slot
@@ -1113,6 +1109,7 @@ impl EntityRenderer {
         list: &mut CommandList,
         frame: &FrameInfo,
         cam: &Camera,
+        now: u64,
         entities: &FxHashMap<u64, ClientEntity>,
         me: Option<&ClientEntity>,
         hand: Option<Hand>,
@@ -1171,6 +1168,17 @@ impl EntityRenderer {
             if far2 > 160.0 * 160.0 {
                 continue;
             }
+            // Invisible to everyone else.
+            let hidden = e.effects.iter().any(|f| {
+                f.until > now
+                    && c.game
+                        .entity_effects
+                        .get(f.id as usize)
+                        .is_some_and(|d| d.hides)
+            });
+            if hidden && id != self.local {
+                continue;
+            }
             // Out of the view it has nothing to show. What it may have on goes by its model's reach.
             if id != self.local && !e.item.is_empty() {
                 if !planes.iter().all(|p| p.dot(base.extend(1.0)) > -1.5) {
@@ -1189,8 +1197,9 @@ impl EntityRenderer {
             let lit = shade(e.pos + DVec3::Y * 0.5);
             // The effect a mod put on it, else the red of a recent hit; boxes only show the red.
             let hurt = (e.hurt / 0.5).clamp(0.0, 1.0);
-            let effect = match e.effect {
-                Some((id, s, _)) => (self.effect_slots.get(id as usize).copied().unwrap_or(0), s),
+            let shader_effect = e.shader_effect(now, |id| self.effect_slots.get(id as usize).is_some_and(|&s| s != 0));
+            let effect = match shader_effect {
+                Some((id, s)) => (self.effect_slots.get(id as usize).copied().unwrap_or(0), s),
                 None if hurt > 0.0 => (self.effect_slots[weft_abi::entity_effect::HURT as usize], hurt),
                 None => (0, 0.0),
             };
@@ -1247,7 +1256,7 @@ impl EntityRenderer {
             };
             // Far away a pose lasts a few frames, each entity at its own turn. Who is dying or was
             // just hit still shows it.
-            let every = if id == self.local || e.dying.is_some() || e.effect.is_some() || e.hurt > 0.0 {
+            let every = if id == self.local || e.dying.is_some() || shader_effect.is_some() || e.hurt > 0.0 {
                 1
             } else if far2 < 32.0 * 32.0 {
                 1
@@ -1346,7 +1355,7 @@ impl EntityRenderer {
             .draw(gpu, list, frame, super::models::Batch::World, self.model_pipe, vb);
 
         if let Some((hit, at)) = target {
-            outline_boxes(&mut boxes, c.states[hit.state as usize].outlined(), rel(hit.block.as_dvec3() + at));
+            outline_boxes(&mut boxes, c.states[hit.state as usize].outlined(), rel(hit.origin.as_dvec3() + at));
         }
         gizmo_line_boxes(&mut boxes, gizmo_lines, cam.pos);
         let overlay_start = boxes.len();
@@ -1911,17 +1920,25 @@ fn crack_boxes(out: &mut Vec<GpuBox>, breaking: &[Crack], textures: &GameTexture
     }
 }
 
-/// Two layers of flames facing the camera, the inner one smaller, like vanilla's burning mobs.
+/// Flames facing the camera up the whole body, like vanilla's burning mobs: a stack of quads,
+/// each higher, narrower and a little further back, in front of the body so it doesn't hide them.
 fn fire_boxes(out: &mut Vec<GpuBox>, textures: &GameTextures, base: Vec3, width: f32, height: f32, cam_yaw: f32, age: f32) {
     let c = content();
-    let frame = |offset: f32| textures.frame_now(c.fire_texture, age * crate::world::TPS as f32 + offset);
-    for (i, (scale, back)) in [(1.4, 0.0), (1.0, 0.2)].into_iter().enumerate() {
-        let l = frame(i as f32 * 11.0);
-        let w = width * scale;
+    // Vanilla's units: the body's width times 1.4.
+    let unit = width * 1.4;
+    let (mut left, mut half) = (height / unit, 0.5f32);
+    for i in 0..16 {
+        if left <= 0.0 {
+            break;
+        }
+        // Every other one at another point of the animation, as vanilla's two pictures.
+        let l = textures.frame_now(c.fire_texture, age * crate::world::TPS as f32 + i as f32 * 11.0);
+        let w = 2.0 * half * unit;
+        // Toward the camera is +Z here.
         let m = Mat4::from_translation(base)
             * Mat4::from_rotation_y(cam_yaw)
-            * Mat4::from_translation(Vec3::new(-w / 2.0, 0.0, back * width))
-            * Mat4::from_scale(Vec3::new(w, height * scale * 0.95, 0.0));
+            * Mat4::from_translation(Vec3::new(-w / 2.0, 0.45 * i as f32 * unit, (0.3 - 0.03 * i as f32) * unit))
+            * Mat4::from_scale(Vec3::new(w, 1.4 * unit, 0.0));
         out.push(GpuBox {
             rows: rows(m),
             color: [1.0, 1.0, 1.0, 0.0],
@@ -1929,6 +1946,7 @@ fn fire_boxes(out: &mut Vec<GpuBox>, textures: &GameTextures, base: Vec3, width:
             ids2: [l | l << 16, 0, 0, 0],
             ..Default::default()
         });
+        (left, half) = (left - 0.45, half * 0.9);
     }
 }
 

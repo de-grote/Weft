@@ -186,7 +186,7 @@ fn vs_quad(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
     var uvs = array<vec2<f32>, 4>(vec2(uv.x, uv.w), vec2(uv.z, uv.w), vec2(uv.z, uv.y), vec2(uv.x, uv.y));
     let n = normalize(cross(p1 - p0, p2 - p1));
     // Face shading blended by normal; plants opt out like vanilla's crossed squares.
-    var shade = n.x * n.x * 0.6 + n.z * n.z * 0.8 + n.y * n.y * select(0.5, 1.0, n.y > 0.0);
+    var shade = normal_shade(n);
     if ((uvw >> QUAD_TINT_SHIFT) & QUAD_FLAT) != 0u {
         shade = 1.0;
     }
@@ -224,7 +224,7 @@ fn vs_quad(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 }
 
 fn shade(in: VOut, albedo: vec4<f32>) -> vec4<f32> {
-    var light = in.color * lightmap(in.light, scene.params.z, scene.light.x, scene.light.y);
+    var light = in.color * lightmap(in.light, scene.params.z, scene.light.x, scene.light.y, scene.light.w);
     // Glowing texels are lifted towards full brightness by their mask: lit = albedo * max(light,
     // emission), so they stay their own (tinted, unshaded) color in the dark.
     if in.glow != 0xffffffffu {

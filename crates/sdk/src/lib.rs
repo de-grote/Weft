@@ -3,7 +3,6 @@
 pub use weft_abi as abi;
 
 pub mod ai;
-mod cache;
 pub mod camera;
 pub mod client;
 mod component;
@@ -21,6 +20,7 @@ mod entry;
 mod extend;
 pub mod facing;
 mod game;
+mod out;
 mod show;
 pub mod terrain;
 mod ui;
@@ -28,7 +28,6 @@ mod view;
 mod world;
 
 pub use abi::{BlockPos, EntitySize, Holder, ItemStack, OpenMenu, Rect, UV_FROM_BOX, UV_NO_FACE, Vec3, Who, hud_anchor, tool_tier};
-pub use cache::ColumnCache;
 pub use camera::{Shot, cameras, easing, shot};
 pub use client::{Channel, Client, Hand, Packet, Payload, keys, launch_option, screens};
 pub use command::{ClientCommand, Command, CommandOptions, ServerCommand};
@@ -39,11 +38,13 @@ pub use effects::*;
 pub use extend::*;
 pub use facing::{Dir, Facings, Orientation, Toward};
 pub use game::*;
+pub use out::{Drawing, Output};
 pub use riding::{Exit, RiderRules, Seat, Steering, steer};
 pub use shape::{EntityFilter, Fill, Shape};
 pub use show::{ChatFormat, Show, TextPlaceBuilder, text_places};
 pub use ui::*;
 pub use view::View;
+pub use weft_noise::cache::ColumnCache;
 pub use world::*;
 
 use std::ffi::c_void;

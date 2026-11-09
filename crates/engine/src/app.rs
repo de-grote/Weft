@@ -191,6 +191,8 @@ pub(crate) struct Running {
     list: CommandList,
     /// What goes in the world's pass this frame, while it is being made.
     world_list: CommandList,
+    /// What is drawn over the world after its depth was taken (`Client::render`).
+    after_list: CommandList,
     input: Input,
     pub(crate) settings: Settings,
     lang: Lang,
@@ -200,6 +202,8 @@ pub(crate) struct Running {
     textures: GameTextures,
     ui: UiRenderer,
     post: crate::post::Post,
+    /// The screen shaders the local player's effects turned on (`EntityEffectDef::screen`).
+    effect_screens: Vec<String>,
     audio: Option<crate::audio::Audio>,
     screens: Vec<(Box<dyn Screen>, Ui)>,
     hud: Hud,
@@ -362,10 +366,15 @@ impl App {
         }
         let window = Arc::new(el.create_window(attrs).map_err(|e| e.to_string())?);
         let size = window.inner_size();
-        let desc =
-            BackendDesc { window: &*window, width: size.width, height: size.height, vsync: settings.vsync(), debug: self.opts.gpu_debug };
+        let desc = BackendDesc {
+            window: &*window,
+            width: size.width,
+            height: size.height,
+            vsync: crate::settings::vsync(),
+            debug: self.opts.gpu_debug,
+        };
         // The chosen renderer, and the others if it can't start on this machine.
-        let chosen = settings.renderer();
+        let chosen = crate::settings::renderer();
         let mut order: Vec<_> = self.renderers.iter().collect();
         order.sort_by_key(|r| r.0 != chosen);
         let mut failed = Vec::new();
@@ -390,17 +399,16 @@ impl App {
         if !self.opts.automated {
             crate::minecraft::ensure_pack(&self.opts.run_dir, &roots);
         }
-        let packs_now = (settings.resource_packs(), settings.shader_pack());
-        let packs = crate::packs::enabled(&self.opts.run_dir, &settings.resource_packs());
+        let packs_now = (crate::settings::resource_packs(), crate::settings::shader_pack());
+        let packs = crate::packs::enabled(&self.opts.run_dir, &crate::settings::resource_packs());
         crate::packs::set_shader_pack(
-            settings
-                .shader_pack()
+            crate::settings::shader_pack()
                 .as_ref()
                 .map(|p| crate::packs::shader_dir(&self.opts.run_dir).join(p)),
         );
         let assets = Assets::new(roots, packs);
         crate::assets::set_current(&assets);
-        let lang = Lang::load(&assets, &settings.language(), self.opts.dev);
+        let lang = Lang::load(&assets, &crate::settings::language(), self.opts.dev);
         let look = Look::new(&assets, &mod_ids(), &lang);
         let textures = GameTextures::new(&mut *gpu, content(), &assets);
         let ui = UiRenderer::new(&mut *gpu, &assets)?;
@@ -409,7 +417,7 @@ impl App {
         for k in &content().game.keys {
             input.register(&k.name, k.default, k.contexts);
         }
-        settings.apply_binds(&mut input);
+        crate::settings::apply_binds(&mut input);
         settings.read_only = self.opts.automated;
         crate::shaders::pin_time(self.opts.automated && !recording());
         let depth = make_depth(&mut *gpu, size.width, size.height);
@@ -421,6 +429,7 @@ impl App {
             depth,
             list: CommandList::default(),
             world_list: CommandList::default(),
+            after_list: CommandList::default(),
             input,
             settings,
             lang,
@@ -430,6 +439,7 @@ impl App {
             textures,
             ui,
             post,
+            effect_screens: Vec::new(),
             audio: crate::audio::Audio::new().map(|mut a| {
                 a.muted = self.opts.automated;
                 a
@@ -516,7 +526,7 @@ fn make_depth(gpu: &mut dyn Backend, w: u32, h: u32) -> (TextureId, u32, u32) {
 impl Running {
     fn gui_scale(&self) -> f32 {
         let max = crate::settings::max_gui_scale(self.gpu.surface_size());
-        let s = if self.settings.gui_scale() == 0 { max } else { self.settings.gui_scale().min(max) };
+        let s = if crate::settings::gui_scale() == 0 { max } else { crate::settings::gui_scale().min(max) };
         s as f32
     }
 
@@ -639,7 +649,7 @@ impl Running {
         }
         let storage = saves::Storage::open(meta.clone(), content());
         let server = server::spawn(
-            ServerConfig { seed: meta.seed, view_radius: self.settings.view_distance(), dedicated: false, whitelist: None },
+            ServerConfig { seed: meta.seed, view_radius: crate::settings::view_distance(), dedicated: false, whitelist: None },
             Some(storage),
         );
         let (client_conn, server_conn) = net::local_pair();
@@ -650,9 +660,9 @@ impl Running {
             &self.assets,
             &self.textures,
             client_conn,
-            &self.settings.name(),
+            &crate::settings::name(),
             &key,
-            self.settings.view_distance(),
+            crate::settings::view_distance(),
             std::fs::read(self.settings.run_dir.join("skins").join("skin.png")).ok(),
             read_avatar(&self.settings.run_dir),
         ) {
@@ -763,7 +773,7 @@ impl Running {
                 },
                 Request::Rebind(action, keys) => {
                     self.input.rebind(&action, keys);
-                    self.settings.set_bind(&action, &keys);
+                    crate::settings::set_bind(&action, &keys);
                 }
                 Request::ResetBinds => {
                     let defaults: Vec<(String, crate::input::Slots)> = self
@@ -774,7 +784,7 @@ impl Running {
                         .collect();
                     for (a, k) in defaults {
                         self.input.rebind(&a, k);
-                        self.settings.set_bind(&a, &k);
+                        crate::settings::set_bind(&a, &k);
                     }
                     self.rebuild_all();
                 }
@@ -807,7 +817,7 @@ impl Running {
                         }
                     }
                 }
-                Request::Join(ticket) => match net::join(&ticket, &self.settings) {
+                Request::Join(ticket) => match net::p2p::join(&ticket, &self.settings) {
                     Ok(conn) => {
                         self.leave_world_silent();
                         let key = net::p2p::player_key(&self.settings.run_dir);
@@ -816,9 +826,9 @@ impl Running {
                             &self.assets,
                             &self.textures,
                             conn,
-                            &self.settings.name(),
+                            &crate::settings::name(),
                             &key,
-                            self.settings.view_distance(),
+                            crate::settings::view_distance(),
                             std::fs::read(self.settings.run_dir.join("skins").join("skin.png")).ok(),
                             read_avatar(&self.settings.run_dir),
                         ) {
@@ -1009,9 +1019,11 @@ impl Running {
                         .send(net::ToServer::CreativeTake { item, button: 0 });
                 }
             }
-            // Tooltip with the hovered item's name.
+            // Tooltip with the hovered item's name; other custom nodes (an effect's icon) have their own.
             if let Some(h) = hovered {
-                if let Kind::Custom { tag, data } = ui.nodes[h].kind {
+                if let Kind::Custom { tag: tag @ (crate::client::modui::TAG_SLOT | crate::client::modui::TAG_CREATIVE), data } =
+                    ui.nodes[h].kind
+                {
                     let stack = if tag == crate::client::modui::TAG_CREATIVE {
                         weft_abi::ItemStack::new(data as u32, 1)
                     } else {
@@ -1209,10 +1221,8 @@ impl Running {
             .map(|(&id, e)| e.args(id, dt))
             .collect();
         for mut a in all.into_iter().chain([mine]) {
-            if a.entity != mine.entity {
-                if let Some(g) = &mut self.game {
-                    g.client.entity_effects(&a);
-                }
+            if let Some(g) = &mut self.game {
+                g.client.entity_effects(&a);
             }
             for &(owner, cb) in &c.game.entities[a.kind as usize].frames {
                 let mut v = self.frame_view();
@@ -1230,13 +1240,13 @@ impl Running {
     /// Puts what changed in the settings into effect, whoever changed them: a screen, a mod, a
     /// command or a test.
     fn apply_settings(&mut self) {
-        let s = self.settings.clone();
+        use crate::settings as s;
         let mut now = Applied {
-            vsync: s.vsync(),
-            view: s.view_distance(),
-            language: s.language(),
-            gui_scale: s.gui_scale(),
-            packs: (s.resource_packs(), s.shader_pack()),
+            vsync: s::vsync(),
+            view: s::view_distance(),
+            language: s::language(),
+            gui_scale: s::gui_scale(),
+            packs: (s::resource_packs(), s::shader_pack()),
         };
         if now.vsync != self.applied.vsync {
             self.gpu.set_vsync(now.vsync);
@@ -1251,7 +1261,7 @@ impl Running {
             self.lang = Lang::load(&self.assets, &now.language, self.lang.dev);
             self.look = Look::new(&self.assets, &mod_ids(), &self.lang);
         }
-        s.apply_binds(&mut self.input);
+        s::apply_binds(&mut self.input);
         if relang || now.gui_scale != self.applied.gui_scale {
             self.rebuild_all();
         }
@@ -1754,12 +1764,6 @@ fn escape(r: &mut Running, requests: &mut Vec<Request>) {
     }
 }
 
-fn toggle_gizmo(r: &mut Running, group: &str) {
-    if let Some(g) = &mut r.game {
-        g.client.toggle_gizmo(group);
-    }
-}
-
 /// The debug overlay and what goes with it (F3 and F3 plus a key by default).
 fn debug_keys(r: &mut Running) {
     if r.input.pressed("core:debug") {
@@ -1778,17 +1782,15 @@ fn debug_keys(r: &mut Running) {
     if r.input.pressed("core:debug_options") && r.screens.is_empty() {
         r.open(screens::engine("core:debug_options"));
     }
-    if r.input.pressed("core:show_cubes") {
-        toggle_gizmo(r, "cubes");
-    }
-    if r.input.pressed("core:show_hitboxes") {
-        toggle_gizmo(r, "hitboxes");
+    for (key, group) in [("core:show_cubes", "cubes"), ("core:show_hitboxes", "hitboxes")] {
+        if let Some(g) = r.game.as_mut().filter(|_| r.input.pressed(key)) {
+            g.client.toggle_gizmo(group);
+        }
     }
     let groups = crate::hud::DEBUG_GROUPS.len() + crate::hud::mod_debug_groups().len();
     for i in 0..groups.min(9) {
         if r.input.pressed(&format!("core:debug_group{}", i + 1)) {
-            r.settings
-                .set("debug_groups", (r.settings.debug_groups() ^ (1 << i)) as f64);
+            crate::settings::set("debug_groups", (crate::settings::debug_groups() ^ (1 << i)) as f64);
             r.debug = true;
             r.hud.invalidate();
         }
@@ -1807,10 +1809,9 @@ fn toggle_keys(r: &mut Running) {
 
 fn reload_assets(r: &mut Running, opts: &Options) {
     r.assets
-        .set_packs(crate::packs::enabled(&opts.run_dir, &r.settings.resource_packs()));
+        .set_packs(crate::packs::enabled(&opts.run_dir, &crate::settings::resource_packs()));
     crate::packs::set_shader_pack(
-        r.settings
-            .shader_pack()
+        crate::settings::shader_pack()
             .as_ref()
             .map(|p| crate::packs::shader_dir(&opts.run_dir).join(p)),
     );
@@ -1819,7 +1820,7 @@ fn reload_assets(r: &mut Running, opts: &Options) {
     r.hud.load_layout(&opts.run_dir);
     r.ui.reload(&mut *r.gpu, &r.assets);
     r.post.reload(&mut *r.gpu, &r.assets);
-    r.lang = Lang::load(&r.assets, &r.settings.language(), r.lang.dev);
+    r.lang = Lang::load(&r.assets, &crate::settings::language(), r.lang.dev);
     r.look = Look::new(&r.assets, &mod_ids(), &r.lang);
     r.textures.reload(&mut *r.gpu, content(), &r.assets);
     if let Some(a) = &mut r.audio {
@@ -1853,7 +1854,7 @@ fn window_keys(r: &mut Running) {
         let on = r.window.fullscreen().is_none();
         r.window
             .set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None)));
-        r.settings.set("fullscreen", on as u32 as f64);
+        crate::settings::set("fullscreen", on as u32 as f64);
     }
     if r.input.pressed("core:screenshot") {
         r.gpu.request_capture();
@@ -1868,12 +1869,12 @@ fn update_game(r: &mut Running, dt: f64, frame_start: Instant) {
         if let Some(s) = &g.server {
             s.set_paused(paused && !s.is_hosting());
         }
-        g.client.fov = r.settings.fov();
-        g.client.fov_effects = r.settings.fov_effects();
-        g.client.brightness = r.settings.brightness();
-        g.client.first_person_model = r.settings.first_person_model();
-        g.client.entity_render.show_avatars = r.settings.show_avatars();
-        g.client.render.occlusion.on = r.settings.occlusion_culling();
+        g.client.fov = crate::settings::fov();
+        g.client.fov_effects = crate::settings::fov_effects();
+        g.client.brightness = crate::settings::brightness();
+        g.client.first_person_model = crate::settings::first_person_model();
+        g.client.entity_render.show_avatars = crate::settings::show_avatars();
+        g.client.render.occlusion.on = crate::settings::occlusion_culling();
         let t = Instant::now();
         if world_input {
             g.client.update(&mut *r.gpu, &r.textures, &mut r.input, dt);
@@ -2001,8 +2002,8 @@ fn handle_disconnect(r: &mut Running) {
 }
 
 fn end_input(r: &mut Running) {
-    r.input.sensitivity = r.settings.sensitivity();
-    r.input.invert_y = r.settings.invert_y();
+    r.input.sensitivity = crate::settings::sensitivity();
+    r.input.invert_y = crate::settings::invert_y();
     r.input.end_frame();
     let top = (
         r.screens.len(),
@@ -2031,7 +2032,7 @@ fn refresh_hud(r: &mut Running) {
             r.hud.set_edit(None);
         }
         if r.hud
-            .update(&g.client, r.debug, r.settings.debug_groups(), chat_open, &r.lang, &r.input)
+            .update(&g.client, r.debug, crate::settings::debug_groups(), chat_open, &r.lang, &r.input)
         {
             r.quads_dirty = true;
         }
@@ -2249,6 +2250,7 @@ fn record_passes(r: &mut Running, info: &weft_render::FrameInfo, scale: f32) {
         .as_ref()
         .map_or([0.02, 0.02, 0.03, 1.0], |g| g.client.fog_color());
     // Screen effects need the world in an image they can read.
+    effect_screens(r);
     let post = r.post.on() && r.game.is_some();
     let world_target = if post { Target::Texture(r.post.scene_target(&mut *r.gpu, info.width, info.height)) } else { Target::Surface };
     if let Some(g) = &mut r.game {
@@ -2262,23 +2264,31 @@ fn record_passes(r: &mut Running, info: &weft_render::FrameInfo, scale: f32) {
         g.client.update_wires(&mut *r.gpu, &r.textures);
     }
     // What the world's draws go by has to be done before its pass, and is known only making them.
-    let mut world = std::mem::take(&mut r.world_list);
+    let (mut world, mut after) = (std::mem::take(&mut r.world_list), std::mem::take(&mut r.after_list));
     world.clear();
+    after.clear();
     if let Some(g) = &mut r.game {
         g.client
-            .render(&mut *r.gpu, &mut world, &mut r.list, info, &r.textures);
+            .render(&mut *r.gpu, &mut world, &mut after, &mut r.list, info, &r.textures);
     }
     r.list
         .push(Cmd::BeginPass { color: Some((world_target, Some(clear))), depth: Some((r.depth.0, Some(0.0))) });
     r.list.append(&mut world);
-    r.world_list = world;
     r.list.push(Cmd::EndPass);
+    // The solid world's depth: clouds and the hand would hide chunks behind them in the next frame.
     if let Some(g) = &mut r.game {
         g.client
             .render
             .occlusion
             .take_depth(&mut *r.gpu, &mut r.list, r.depth.0, [r.depth.1, r.depth.2]);
     }
+    if !after.cmds.is_empty() {
+        r.list
+            .push(Cmd::BeginPass { color: Some((world_target, None)), depth: Some((r.depth.0, None)) });
+        r.list.append(&mut after);
+        r.list.push(Cmd::EndPass);
+    }
+    (r.world_list, r.after_list) = (world, after);
     if post {
         r.post.apply(&mut *r.gpu, &mut r.list, info);
     } else {
@@ -2395,4 +2405,36 @@ fn load_chat_history(run_dir: &std::path::Path) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The screen shaders of the local player's effects on, fading out their last second; those of
+/// effects it no longer has off.
+fn effect_screens(r: &mut Running) {
+    let c = content();
+    let wanted: Vec<(String, f32)> = r
+        .game
+        .as_ref()
+        .filter(|g| g.client.camera_has(crate::tag_bits::camera::EFFECTS))
+        .map_or(Vec::new(), |g| {
+            let now = g.client.ticks();
+            g.client
+                .me
+                .effects
+                .iter()
+                .filter(|f| f.until > now)
+                .filter_map(|f| {
+                    let d = c.game.entity_effects.get(f.id as usize)?;
+                    (!d.screen.is_empty()).then(|| (d.screen.clone(), ((f.until - now) as f32 / crate::world::TPS as f32).min(1.0)))
+                })
+                .collect()
+        });
+    for name in std::mem::take(&mut r.effect_screens) {
+        if !wanted.iter().any(|w| w.0 == name) {
+            r.post.set(&name, 0.0);
+        }
+    }
+    for (name, strength) in wanted {
+        r.post.set(&name, strength);
+        r.effect_screens.push(name);
+    }
 }

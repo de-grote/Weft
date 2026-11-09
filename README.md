@@ -59,7 +59,7 @@ cd Weft
 cargo run --release
 ```
 
-Run it from the repository root. Release builds pack each mod in `mods/` into `run/mods/` on start; settings, saves and logs go to `run/`. `cargo run --release -- --dist <dir>` makes a standalone build to share.
+Run it from the repository root. Release builds pack each mod in `mods/` into `run/mods/` on start; settings, saves and logs go to `run/`. `cargo run --release -- dist <dir>` makes a standalone build to share, and `help` lists the other commands and options.
 
 A game from a release writes nothing next to itself, so it can live in a read-only folder and be replaced by an update:
 
@@ -82,7 +82,7 @@ Early. The mod interface and the save format can still change between versions. 
 
 ## Running a server
 
-`weft --server --world myworld --port 27182` runs a world with no window and no GPU. Forward the port, TCP and UDP, and players join with `host:port` in the Multiplayer screen, or with the ticket it logs. It keeps what a game keeps in the same folders as above, or in `--run-dir`.
+`weft server --world myworld --port 27182` runs a world with no window and no GPU. Forward the port, TCP and UDP, and players join with `host:port` in the Multiplayer screen, or with the ticket it logs. It keeps what a game keeps in the same folders as above, or in `--run-dir`.
 
 Type `stop` to save and leave, `list`, `say <text>`, `op <player> [level]` or `deop <player>`. Nobody can use commands until you `op` them. To limit who may join, list their keys one a line in `config/whitelist.txt`: anyone refused is logged with the line to add.
 

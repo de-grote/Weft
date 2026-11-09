@@ -11,10 +11,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::content::{AIR, Content};
 use crate::world::{Cube, cube_of, local_index};
 
+/// A timer on a block (`Host::timer`): when, where, the event and its value.
+pub type BlockTimer = (u64, [i32; 3], u32, Box<[u8]>);
+
 #[derive(Default)]
 pub struct Space {
     pub cubes: FxHashMap<IVec3, Arc<Cube>>,
-    pub(super) scheduled: BinaryHeap<Reverse<(u64, i32, i32, i32)>>,
+    pub(super) scheduled: BinaryHeap<Reverse<BlockTimer>>,
     /// Next growth step of every growing block (the source of truth) and the queue ordering
     /// them (entries that no longer match the map are stale).
     pub(super) growth: FxHashMap<IVec3, u64>,

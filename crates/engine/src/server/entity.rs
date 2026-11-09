@@ -26,12 +26,15 @@ pub struct Entity {
     pub health: f32,
     pub age: u64,
     pub hurt_cooldown: u32,
-    /// Ticks until it may attack again (mobs).
-    pub attack_cooldown: u32,
-    /// AI steering requested this tick: direction, speed factor, jump.
-    pub walk: Option<([f32; 2], f32, bool)>,
+    /// AI steering requested this tick.
+    pub walk: Option<Walk>,
     /// Jump strength attribute when its walk was set (1 = vanilla's).
     pub jump_mul: f32,
+    /// Its `STEP_HEIGHT` and `GRAVITY` attributes this tick, which physics goes by.
+    pub step_height: f64,
+    pub gravity_mul: f64,
+    /// Its `SAFE_FALL` this tick: how far its paths go down at once.
+    pub safe_fall: f32,
     pub removed: bool,
     pub item: ItemStack,
     pub pickup_delay: u32,
@@ -43,6 +46,10 @@ pub struct Entity {
     pub selected: u32,
     /// Using what it holds: the ticks that takes, and whether in the other hand. Others see it.
     pub using: (u32, bool),
+    /// The item it is using, the ticks left until it takes effect, and the slot it is in.
+    pub use_done: Option<(u32, u32, u32)>,
+    /// The block it is breaking.
+    pub mining: Option<Mining>,
     pub anchor: Option<IVec3>,
     pub sent: Option<(DVec3, f32, f32, crate::world::Pose, bool)>,
     /// Worn items as last sent to clients.
@@ -83,6 +90,40 @@ pub struct Entity {
     pub driver: Option<u64>,
 }
 
+/// What an entity is breaking, and how far along by what it held and where it was each tick.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mining {
+    pub frame: u64,
+    pub pos: IVec3,
+    pub part: u32,
+    pub progress: f32,
+}
+
+/// One tick of walking an entity was told (`World::walk`, its path, its rider).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Walk {
+    /// Horizontal, length up to 1.
+    pub dir: [f32; 2],
+    /// Times its kind's speed.
+    pub speed: f32,
+    /// `abi::walk`: the keys a player would hold.
+    pub keys: u32,
+}
+
+impl Walk {
+    pub fn has(&self, key: u32) -> bool {
+        self.keys & key != 0
+    }
+
+    /// Whether it holds the action a pose is held by (`PoseDef::key`), as a player's keys would.
+    pub fn holds(&self, action: &str) -> bool {
+        use weft_abi::walk as w;
+        [("core:jump", w::JUMP), ("core:sneak", w::SNEAK), ("core:sprint", w::SPRINT)]
+            .iter()
+            .any(|&(a, k)| a == action && self.has(k))
+    }
+}
+
 /// How a body goes, besides its speed, which is what `Free` goes by.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Motion {
@@ -118,9 +159,11 @@ impl Entity {
             health,
             age: 0,
             hurt_cooldown: 0,
-            attack_cooldown: 0,
             walk: None,
             jump_mul: 1.0,
+            step_height: 0.6,
+            gravity_mul: 1.0,
+            safe_fall: 3.0,
             removed: false,
             item: ItemStack::EMPTY,
             pickup_delay: 0,
@@ -129,6 +172,8 @@ impl Entity {
             fire: 0,
             selected: 0,
             using: (0, false),
+            use_done: None,
+            mining: None,
             anchor: None,
             sent: None,
             worn: Vec::new(),
@@ -205,6 +250,12 @@ impl Entity {
         !self.removed && self.anchor.is_none()
     }
 
+    /// What clients hear of: what is in the world, and block entities that show items
+    /// (`EntityKind::shown_slots`), only for the light those give.
+    pub fn seen(&self, c: &Content) -> bool {
+        self.in_world() || !self.removed && !c.game.entities[self.kind as usize].shown_slots.is_empty()
+    }
+
     /// Something that stands in the world and can be hit: not a dropped item or a spectator either.
     pub fn is_body(&self) -> bool {
         self.in_world() && self.item.is_empty() && !self.mode.has(crate::tag_bits::game_mode::HIDDEN)
@@ -275,9 +326,6 @@ pub enum Told {
     Selected(u32),
 }
 
-/// Falls up to this many blocks do no damage.
-pub const SAFE_FALL: f32 = 3.0;
-
 /// What a component of an entity of `kind` starts as: the kind's own value, or the component's.
 fn starting_value(c: &Content, kind: &crate::registry::EntityKind, comp: u32) -> Box<[u8]> {
     match kind.values.iter().find(|v| v.0 == comp) {
@@ -301,7 +349,7 @@ impl Entities {
         let c = crate::content::content();
         self.get(id)
             .zip(self.inventories.get(&id))
-            .map_or_else(Default::default, |(e, i)| crate::content::in_main_hand(c, i, e.selected))
+            .map_or_else(Default::default, |(e, i)| crate::content::in_main_hand(c, e.kind, i, e.selected))
     }
 
     pub fn get(&self, id: u64) -> Option<&Entity> {
@@ -333,11 +381,6 @@ impl Entities {
                 .entry(id)
                 .or_insert_with(|| vec![ItemStack::EMPTY; kind.slots as usize]);
         }
-        if e.player {
-            self.inventories
-                .entry(id)
-                .or_insert_with(|| vec![ItemStack::EMPTY; c.game.player_layout.slots as usize]);
-        }
         if let Some(a) = e.anchor {
             self.anchors
                 .entry((e.block_frame(), a))
@@ -366,12 +409,16 @@ impl Entities {
 
     /// `insert` with the inventory and components it had (loaded, or moved from another region).
     pub fn insert_with(&mut self, c: &Content, e: Entity, inv: Option<Vec<ItemStack>>, comps: Vec<(u32, Box<[u8]>)>) {
-        let id = e.id;
+        let (id, slots) = (e.id, c.game.entities[e.kind as usize].slots as usize);
         self.insert(c, e);
-        if let Some(inv) = inv {
+        if let Some(mut inv) = inv {
+            // Saved before its kind had as many slots as now.
+            if inv.len() < slots {
+                inv.resize(slots, ItemStack::EMPTY);
+            }
             self.inventories.insert(id, inv);
         }
-        let riding = c.game.field_comps[11];
+        let riding = c.game.fields.riding;
         for (k, v) in comps {
             // A loaded rider sits where it sat.
             if k == riding && v.len() >= 12 {
@@ -554,8 +601,8 @@ impl Entities {
         let max = c.max_stack(stack.item);
         // Pickups never go into equipment.
         let Some(e) = self.get(owner) else { return stack };
-        let off = c.game.player_layout.off.filter(|_| e.player);
-        let worn = c.game.entities[e.kind as usize].worn.clone();
+        let k = &c.game.entities[e.kind as usize];
+        let (off, worn) = (k.off, k.worn.clone());
         let Some(inv) = self.inventories.get_mut(&owner) else { return stack };
         for (_, s) in inv
             .iter_mut()
@@ -620,16 +667,12 @@ pub fn splashes(was_in_liquid: bool, in_liquid: bool, falling: f64) -> bool {
     !was_in_liquid && in_liquid && falling > 0.1
 }
 
-/// What a fall from that high does to a kind, the same for players and mobs.
-pub fn fall_damage(kind: &crate::registry::EntityKind, fell: f32) -> Option<f32> {
-    (kind.is(ef::FALL_DAMAGE) && fell > SAFE_FALL).then(|| fell - SAFE_FALL)
-}
-
 /// What a step did besides moving: the fall it landed from, and whether a crushing body
 /// squeezed it into blocks.
 pub struct Stepped {
     pub land: Option<f32>,
-    pub crushed: bool,
+    /// The hazards of a body that squeezed it into blocks.
+    pub crushed: Vec<crate::content::Hazard>,
 }
 
 /// One physics step (1/20 s) for a non-player entity. `block` gives states, `None` = unloaded;
@@ -656,7 +699,7 @@ pub fn step(c: &Content, e: &mut Entity, gravity: f64, block: &impl physics::Cel
     }
     const DT: f64 = crate::world::TICK;
     let k = &c.game.entities[e.kind as usize];
-    let mut out = Stepped { land: None, crushed: false };
+    let mut out = Stepped { land: None, crushed: Vec::new() };
     // A rider goes where its seat is, a mount a player steers where that player's client says.
     if e.anchor.is_some() || e.vehicle.is_some() || e.driver.is_some() {
         return out;
@@ -695,25 +738,63 @@ pub fn step(c: &Content, e: &mut Entity, gravity: f64, block: &impl physics::Cel
     out.crushed = moved_by.crushed;
     // After riding: falls and walking are measured relative to the body.
     let start = e.pos;
+    let walk = e.walk.take();
+    let has = |key: u32| walk.is_some_and(|w| w.has(key));
+    let (sprint, sneak, up) = (has(weft_abi::walk::SPRINT), has(weft_abi::walk::SNEAK), has(weft_abi::walk::JUMP));
+    let dir = walk.map_or(DVec3::ZERO, |w| DVec3::new(w.dir[0] as f64, 0.0, w.dir[1] as f64));
+    let using = e.use_done.is_some();
+    // As a player's: no sprint while using something, nor wading where it doesn't swim lying.
+    let swimming = e.in_liquid && e.pose.def().tilt != weft_abi::pose_tilt::UPRIGHT;
+    e.sprinting = sprint && !sneak && !using && dir != DVec3::ZERO && (e.flying || swimming || !e.in_liquid);
+    e.jumped = false;
+    if e.flying {
+        let speed = walk.map_or(1.0, |w| w.speed as f64) * if e.sprinting { 2.0 } else { 1.0 };
+        let f = physics::Flight { wish: dir, up, down: sneak, speed };
+        let mut v = e.vel * DT;
+        // Down on the ground it stops flying, as a player does, unless it goes up again.
+        if physics::fly(c, block, bodies, e.id, &mut e.pos, &mut v, &mut e.on_ground, hw, h, &f, false) && !up {
+            e.flying = false;
+        }
+        e.vel = v / DT;
+        e.moved = (e.pos - start).with_y(0.0).length() as f32;
+        e.blocked = false;
+        e.in_liquid = physics::around(c, block, e.pos, h).in_liquid;
+        e.fall = 0.0;
+        return out;
+    }
     // The step players take, in blocks per tick: a mob walks at its target speed on plain
-    // ground, faster on ice, slower in lava, and climbs ladders it walks into.
+    // ground, faster on ice, slower in lava, and climbs ladders it walks into. Its keys do what a
+    // player's do.
     let mut ctl = physics::Control { swim: k.is(ef::SWIMS), ..Default::default() };
-    if let Some((dir, speed, jump)) = e.walk.take() {
-        let target = k.speed as f64 * speed as f64 * DT;
-        ctl.wish = DVec3::new(dir[0] as f64, 0.0, dir[1] as f64);
+    if let Some(w) = walk {
+        // Using something (eating), at a fifth of the speed, as a player.
+        let slow = if using {
+            0.2
+        } else if e.sprinting {
+            1.3
+        } else {
+            1.0
+        };
+        let target = k.speed as f64 * w.speed as f64 * DT * e.pose.def().speed as f64 * slow;
+        ctl.wish = dir;
         // Vanilla's ground friction keeps 0.546 of the speed a tick; this much a tick holds it.
         ctl.ground = target * (1.0 - 0.6 * 0.91);
-        ctl.air = 0.02;
-        if jump {
+        ctl.air = if e.sprinting { 0.026 } else { 0.02 };
+        ctl.careful = sneak;
+        if w.has(weft_abi::walk::JUMP) {
             ctl.jump = physics::JUMP * e.jump_mul as f64;
             ctl.swim = true;
+        }
+        if e.sprinting {
+            ctl.jump_boost = dir.normalize_or_zero() * 0.2;
+            ctl.sprint = swimming;
         }
     }
     let frame = physics::Frame {
         half_width: hw,
         height: h,
-        step: if e.item.is_empty() { physics::STEP_UP } else { 0.0 },
-        gravity: if k.is(ef::NO_GRAVITY) && !e.falls { 0.0 } else { physics::gravity_per_tick(gravity) },
+        step: if e.item.is_empty() { e.step_height } else { 0.0 },
+        gravity: if k.is(ef::NO_GRAVITY) && !e.falls { 0.0 } else { physics::gravity_per_tick(gravity) * e.gravity_mul },
     };
     let mut v = e.vel * DT;
     let r = physics::walk(c, block, bodies, e.id, &mut e.pos, &mut v, e.on_ground, &ctl, &frame);

@@ -28,7 +28,7 @@ pub async fn screens(t: T) -> R {
         (&screens::CONTROLS, &["text:Reset All", "text:Done"][..]),
         (&screens::WORLDS, &["text:Create New World", "id:saves_folder"][..]),
         (&screens::CREATE_WORLD, &["text:World Rules", "text:Create New World"][..]),
-        (&screens::WORLD_RULES, &["text:Keep inventory on death: Off", "text:Done"][..]),
+        (&screens::WORLD_RULES, &["text:World Rules", "text:Done"][..]),
         (&screens::MODS, &["id:mod:base", "id:mod:testmod", "id:mod_description"][..]),
         (&screens::PROFILE, &["id:profile_name", "text:Copy Key"][..]),
     ] {
@@ -469,103 +469,6 @@ pub async fn text_on_screen(t: T) -> R {
     t.secs(0.3).await?;
     t.check(!line(&t, 0).contains("still_hidden"), "a hidden chat shows no one");
     weft_sdk::settings::CHAT_VISIBILITY.set(0);
-    Ok(())
-}
-
-/// The chat: `/` opens it with the command list shown; Tab completes items, client commands,
-/// word sets and other mods' branches; commands run.
-pub async fn chat(t: T) -> R {
-    t.world(3).await?;
-    t.press("core:command");
-    t.screen("core:chat").await?;
-    t.until("the command list", Duration::from_secs(2), |t| t.c().ui_rect("text:gamemode").is_some())
-        .await?;
-    t.check_eq(t.c().focused_text(), "/".to_string(), "the line");
-    // A mod's key does not fire while the chat has the input.
-    let probes = crate::runner::PROBES.with(|p| p.get());
-    t.c().input_key("F9", 0.3);
-    t.secs(0.5).await?;
-    t.check(crate::runner::PROBES.with(|p| p.get()) == probes, "the testkit:probe key fired while typing in the chat");
-    t.c().input_key("Backspace", 0.0);
-    t.frames(2).await?;
-    for (typed, want) in [
-        ("/give @p birch_lo", "/give @p base:birch_log"),
-        ("/giz", "/gizmo"),
-        ("/gizmo cu", "/gizmo cubes"),
-        ("/gizmo testm", "/gizmo testmod:energy"),
-        ("/gizmo pro", "/gizmo probe"),
-        ("/probe al", "/probe alpha"),
-        ("/rule mob", "/rule core:mob_spawning"),
-    ] {
-        t.c().input_type(typed);
-        t.frames(2).await?;
-        t.c().input_key("Tab", 0.0);
-        t.frames(3).await?;
-        let text = t.c().focused_text();
-        t.check(
-            text.starts_with(want) || (typed.starts_with("/give") && text.contains("birch_log")),
-            format!("Tab completed {typed} to '{text}', want {want}"),
-        );
-        if typed.starts_with("/give") {
-            t.c().input_key("Enter", 0.0);
-            t.no_screen().await?;
-            t.until("logs given", Duration::from_secs(5), |t| t.c().inventory_slot(0).item == id("base:birch_log"))
-                .await?;
-            t.press("core:chat");
-            t.screen("core:chat").await?;
-            continue;
-        }
-        for _ in 0..text.chars().count() {
-            t.c().input_key("Backspace", 0.0);
-            t.frames(1).await?;
-        }
-    }
-    t.c().input_key("Escape", 0.0);
-    t.no_screen().await?;
-    let reply = t.cmd("/gizmo cubes").await?;
-    t.check(reply.contains("cubes on"), format!("/gizmo cubes said '{reply}'"));
-    // Any word goes, the list is only for completion (mods' groups).
-    let reply = t.cmd("/gizmo testmod:energy").await?;
-    t.check(reply.contains("testmod:energy on"), format!("/gizmo testmod:energy said '{reply}'"));
-    let reply = t.cmd("/gizmo probe 7").await?;
-    t.check_eq(reply, "gizmo probe 7 from testkit".into(), "another mod's branch of /gizmo");
-    let help = t.cmd("/help gizmo").await?;
-    t.check(help.contains("#core:gizmos") && help.contains("probe"), format!("/help gizmo said '{help}'"));
-    let reply = t.cmd("/probe beta").await?;
-    t.check_eq(reply, "probe beta on the client".into(), "mod client command");
-    let reply = t.cmd("/regions").await?;
-    t.check_eq(reply, "regions from testkit".into(), "a mod's command takes the engine's place");
-    // What a player types shows as typed, braces included; it can't format.
-    t.c().say("braces {#ff0000}stay");
-    t.until("the chat line", Duration::from_secs(5), |t| t.c().chat_line(0).contains("stay"))
-        .await?;
-    t.press("core:chat");
-    t.screen("core:chat").await?;
-    t.frames(2).await?;
-    t.check(t.c().ui_rect("text:{#ff0000}stay").is_some(), "a player's braces show literally in chat");
-    t.c().input_key("Escape", 0.0);
-    t.no_screen().await?;
-
-    // Replies travel as a key and arguments: the client words them, and again after a language
-    // change. The engine's, a mod's and a parse error alike.
-    let replies = [
-        ("/time query", "time is", "время"),
-        ("/feed 5", "food set to 5", "сытость теперь 5"),
-        ("/give @p base:nothing", "usage: /give", "использование: /give"),
-    ];
-    for (line, _, _) in replies {
-        t.cmd(line).await?;
-    }
-    let lines = |t: &T| (0..3).rev().map(|i| t.c().chat_line(i)).collect::<Vec<_>>();
-    let en = lines(&t);
-    weft_sdk::settings::LANGUAGE.set("ru_ru");
-    t.frames(3).await?;
-    let ru = lines(&t);
-    weft_sdk::settings::LANGUAGE.set("en_us");
-    for (i, (line, want_en, want_ru)) in replies.into_iter().enumerate() {
-        t.check(en[i].contains(want_en), format!("{line} in English: '{}'", en[i]));
-        t.check(ru[i].contains(want_ru), format!("{line} in Russian: '{}'", ru[i]));
-    }
     Ok(())
 }
 

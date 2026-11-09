@@ -350,22 +350,20 @@ impl Input {
 
     /// `held` even while muted: the camera's own reading of the keys.
     pub fn held_raw(&self, action: &str) -> bool {
-        self.lookup.get(action).is_some_and(|&i| {
-            let b = &self.binds[i];
-            (0..SLOTS).any(|s| match b.keys[s] {
-                Some(Binding { chord, trigger: Trigger::Hold }) => self.active(chord, &self.held),
-                Some(_) => b.on[s],
-                None => false,
-            })
-        })
+        self.raw(action, &self.held, |b| &b.on)
     }
 
     pub fn pressed_raw(&self, action: &str) -> bool {
+        self.raw(action, &self.pressed, |b| &b.fired)
+    }
+
+    /// A held key's chord read in `keys`, another trigger's slot from `latched`.
+    fn raw(&self, action: &str, keys: &FxHashSet<Key>, latched: fn(&Bind) -> &[bool; SLOTS]) -> bool {
         self.lookup.get(action).is_some_and(|&i| {
             let b = &self.binds[i];
             (0..SLOTS).any(|s| match b.keys[s] {
-                Some(Binding { chord, trigger: Trigger::Hold }) => self.active(chord, &self.pressed),
-                Some(_) => b.fired[s],
+                Some(Binding { chord, trigger: Trigger::Hold }) => self.active(chord, keys),
+                Some(_) => latched(b)[s],
                 None => false,
             })
         })

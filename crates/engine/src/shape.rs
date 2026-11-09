@@ -152,10 +152,6 @@ impl Prim {
 }
 
 impl Shape {
-    pub fn ball(c: DVec3, r: f64) -> Shape {
-        Shape { steps: vec![Step::Prim(Prim::Ball { c, r })] }
-    }
-
     pub fn from_abi(steps: &[abi::ShapeStep]) -> Option<Shape> {
         let mut out = Vec::with_capacity(steps.len());
         let mut depth = 0i32;
@@ -184,47 +180,6 @@ impl Shape {
             out.push(step);
         }
         (depth == 1).then_some(Shape { steps: out })
-    }
-
-    pub fn to_abi(&self) -> Vec<abi::ShapeStep> {
-        self.steps
-            .iter()
-            .map(|s| {
-                let mut o = abi::ShapeStep::DEFAULT;
-                let put = |o: &mut abi::ShapeStep, i: usize, p: DVec3| o.v[i..i + 3].copy_from_slice(&p.to_array());
-                match *s {
-                    Step::Prim(Prim::Ball { c, r }) => {
-                        o.kind = k::BALL;
-                        put(&mut o, 0, c);
-                        o.v[3] = r;
-                    }
-                    Step::Prim(Prim::Box { min, max }) => {
-                        o.kind = k::BOX;
-                        put(&mut o, 0, min);
-                        put(&mut o, 3, max);
-                    }
-                    Step::Prim(Prim::Cylinder { base, r, h, axis }) => {
-                        o.kind = k::CYLINDER;
-                        put(&mut o, 0, base);
-                        (o.v[3], o.v[4], o.axis) = (r, h, axis as u32);
-                    }
-                    Step::Prim(Prim::Ellipsoid { c, radii }) => {
-                        o.kind = k::ELLIPSOID;
-                        put(&mut o, 0, c);
-                        put(&mut o, 3, radii);
-                    }
-                    Step::Prim(Prim::Noisy { c, r, amount, scale, seed }) => {
-                        o.kind = k::NOISY;
-                        put(&mut o, 0, c);
-                        (o.v[3], o.v[4], o.v[5], o.seed) = (r, amount, scale, seed);
-                    }
-                    Step::Union => o.kind = k::UNION,
-                    Step::Intersect => o.kind = k::INTERSECT,
-                    Step::Subtract => o.kind = k::SUBTRACT,
-                }
-                o
-            })
-            .collect()
     }
 
     /// Runs the steps with `prim` answering for each primitive and `op` combining two answers.

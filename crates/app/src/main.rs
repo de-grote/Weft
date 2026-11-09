@@ -36,6 +36,37 @@ fn game_root() -> PathBuf {
         .unwrap_or(cwd)
 }
 
+const HELP: &str = "usage: weft [command] [options]
+
+commands:
+  client               play (what runs with no command)
+  server               a world with no window or GPU (--world, --port)
+  pack-mod <dir>...    zip each mod folder into the run folder's mods
+  dist <dir>           a folder to hand to someone: the game and every mod packed
+  submit-mod <dir>     send a mod's pushed commit to the mod index (--owner <login>)
+  test-all             every test, several processes at once (--jobs N)
+
+options:
+  --run-dir <dir>      saves, settings, logs and mods go here
+  --mods <dir>         load mods from this folder too
+  --off <a,b>          start with these mods off
+  --world <name>       skip the menu and play this world (created if missing)
+  --seed <n>           seed of a world made by --world
+  --view <chunks>      view distance
+  --size <WxH>         window size
+  --screen <name>      open this screen at start
+  --renderer <name>    vulkan or wgpu
+  --no-vsync           frames as fast as they come
+  --gpu-debug          the graphics API's validation
+  --dev                engine assets from the source tree
+  --verbose            more in the log
+  --log <spec>         log levels, `target=level,level`
+  --mod-abi            print what mods have to be built against
+  --version            print the version
+
+Other `--name [value]` go to mods: `--test <name>`, `--script <file>`, `--port <n>`.
+";
+
 fn main() {
     let root = game_root();
     let mut opts = Options {
@@ -58,16 +89,25 @@ fn main() {
     let mut chosen_run: Option<PathBuf> = None;
     let mut verbose = false;
     let mut log_spec = String::new();
-    let mut server = false;
-    let mut pack: Option<PathBuf> = None;
-    let mut dist: Option<PathBuf> = None;
-    let (mut submit, mut owner): (Option<PathBuf>, Option<String>) = (None, None);
+    let mut owner: Option<String> = None;
     // Options the engine does not know go to mods (`--test furnace`, `--script x.txt`).
     let mut extra: Vec<(String, String)> = Vec::new();
     let mut args = std::env::args().skip(1).peekable();
+    let command = args
+        .next_if(|a| !a.starts_with('-'))
+        .unwrap_or_else(|| "client".into());
+    let mut places: Vec<PathBuf> = Vec::new();
     while let Some(a) = args.next() {
         let mut value = || args.next().unwrap_or_default();
         match a.as_str() {
+            "help" | "h" | "--help" => {
+                print!("{HELP}");
+                return;
+            }
+            "--version" => {
+                println!("weft {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
             "--run-dir" => chosen_run = Some(PathBuf::from(value())),
             "--mods" => opts.mod_dirs.push(PathBuf::from(value())),
             "--off" => opts.mods_off.extend(
@@ -88,15 +128,10 @@ fn main() {
             "--seed" => opts.seed = value().parse().ok(),
             "--screen" => opts.screen = Some(value()),
             "--no-vsync" => opts.no_vsync = true,
-            "--server" => server = true,
             // Engine shaders and assets live from the source tree in a release build too.
             "--dev" => opts.dev = true,
             "--view" => opts.view = value().parse().ok(),
             "--renderer" => opts.renderer = Some(value()),
-            "--pack-mod" => pack = Some(PathBuf::from(value())),
-            "--dist" => dist = Some(PathBuf::from(value())),
-            // Sends a mod's pushed commit to the mod index, see `submit.rs`.
-            "--submit-mod" => submit = Some(PathBuf::from(value())),
             "--owner" => owner = Some(value()),
             "--size" => {
                 let v: Vec<u32> = value().split('x').filter_map(|s| s.parse().ok()).collect();
@@ -109,8 +144,22 @@ fn main() {
                     let v = if args.peek().is_some_and(|n| !n.starts_with("--")) { args.next().unwrap_or_default() } else { "1".into() };
                     extra.push((name.to_string(), v));
                 }
-                None => eprintln!("unknown argument {other}"),
+                None => places.push(PathBuf::from(other)),
             },
+        }
+    }
+    let (mut server, mut pack, mut dist, mut submit) = (false, Vec::new(), None, None);
+    match (command.as_str(), places.len()) {
+        ("client", 0) => {}
+        ("server", 0) => server = true,
+        ("test-all", 0) => extra.push(("test".into(), "all".into())),
+        ("pack-mod", 1..) => pack = places,
+        ("dist", 1) => dist = places.pop(),
+        // Sends a mod's pushed commit to the mod index, see `submit.rs`.
+        ("submit-mod", 1) => submit = places.pop(),
+        _ => {
+            eprint!("{HELP}");
+            std::process::exit(2);
         }
     }
     if let Some(dir) = submit {
@@ -132,10 +181,12 @@ fn main() {
     }
     weft_engine::set_launch_options(extra);
     let player_mods = opts.run_dir.join("mods");
-    if let Some(dir) = pack {
-        match weft_engine::modloader::pack(&dir, &player_mods) {
-            Ok(path) => println!("packed {}", path.display()),
-            Err(e) => eprintln!("cannot pack {}: {e}", dir.display()),
+    if !pack.is_empty() {
+        for dir in pack {
+            match weft_engine::modloader::pack(&dir, &player_mods) {
+                Ok(path) => println!("packed {}", path.display()),
+                Err(e) => eprintln!("cannot pack {}: {e}", dir.display()),
+            }
         }
         return;
     }

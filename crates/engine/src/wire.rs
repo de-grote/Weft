@@ -22,19 +22,14 @@ pub fn mask(c: &Content, state: u32) -> u8 {
 /// Whether wire can't pass through a block on its way past an edge.
 pub fn in_the_way(c: &Content, state: u32) -> bool {
     let s = &c.states[state as usize];
-    s.flags & bf::SOLID != 0 || !matches!(s.signal.kind, sk::NONE | sk::WIRE)
-}
-
-/// Whether wire can lie on a block.
-pub fn holds_wire(c: &Content, state: u32) -> bool {
-    c.states[state as usize].flags & bf::SOLID != 0
+    s.solid() || !matches!(s.signal.kind, sk::NONE | sk::WIRE)
 }
 
 /// Whether a block carries power from what feeds it to what touches it. A sink (a lamp) does
 /// while it takes that power itself.
 pub fn conducts(c: &Content, state: u32) -> bool {
     let s = &c.states[state as usize];
-    s.flags & bf::SOLID != 0 && s.flags & bf::SIGNAL_BLOCKER == 0 && matches!(s.signal.kind, sk::NONE | sk::SINK)
+    s.solid() && s.flags & bf::SIGNAL_BLOCKER == 0 && matches!(s.signal.kind, sk::NONE | sk::SINK)
 }
 
 /// Whether a kind of signal block is a device, something other than wire with a circuit.

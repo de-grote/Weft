@@ -14,6 +14,9 @@ const EVENT_NAMES: [&str; 8] =
 
 use base_api::SMELTED;
 static GOLD: Block = Block::named("base:gold_block");
+static GOLD_HELMET: Item = Item::named("base:gold_helmet");
+static RED_LAMP: Item = Item::named("base:red_lamp");
+static BLUE_LAMP: Item = Item::named("base:blue_lamp");
 /// Shared with everyone who sees the entity, for the sync test.
 pub static MARK: Component<u32> = Component::named("testkit:mark");
 /// Server-side stack data that is not saved either.
@@ -21,6 +24,10 @@ pub static SECRET: Component<u32> = Component::named("testkit:secret");
 /// A stash every player carries, for menus on an inventory that is no block's or entity's own.
 static STASH: Storage = Storage::named("testkit:stash");
 static PIG: EntityKind = EntityKind::named("base:pig");
+/// Green light and nothing drawn, for the dynamic light test.
+static LIT: EntityEffect = EntityEffect::named("lit");
+/// Shows what is in its one slot.
+static PEDESTAL: Block = Block::named("pedestal");
 pub static COUNT_MARKS: Config<bool> = Config::named("count_marks");
 pub static PROTECT_GOLD: Config<bool> = Config::named("protect_gold");
 pub static HALF_DAMAGE: Config<bool> = Config::named("half_damage");
@@ -28,7 +35,8 @@ pub static HALF_DAMAGE: Config<bool> = Config::named("half_damage");
 pub static PEACE: Config<bool> = Config::named("peace");
 static DRILL: Block = Block::named("drill");
 /// Registered, then changed by `r.edit` (the `edits` test).
-static EDITED: Item = Item::named("edited");
+/// Testmod's, edited here: an edit wins whichever mod loads first.
+static EDITED: Item = Item::named("testmod:edited");
 static EDITED_BIOME: Biome = Biome::named("edited");
 static EDITED_LOOT: LootTable = LootTable::named("edited");
 static EDITED_KIND: EntityKind = EntityKind::named("edited");
@@ -103,22 +111,6 @@ fn count(i: usize, n: usize) {
 }
 
 pub fn register(r: &mut Registry) {
-    // Neutral as long as you keep your distance.
-    static SENTRY: EntityKind = EntityKind::named("sentry");
-    r.entity(&SENTRY)
-        .size(0.6, 1.95)
-        .max_health(20.0)
-        .walk_speed(2.6)
-        .hostile()
-        .texture("base:zombie")
-        .model(humanoid(true))
-        .attack_damage(1.0)
-        .goals(
-            ai::Goals::new()
-                .aggressive(5.0)
-                .then(ai::melee_within(1.3))
-                .then(ai::chase_target(20.0, 1.0)),
-        );
     // A random `.ctm` with tiles of two colors, on what isn't a cube.
     static VARIED_PLANT: Block = Block::named("varied_plant");
     static VARIED_BOX: Block = Block::named("varied_box");
@@ -139,11 +131,19 @@ pub fn register(r: &mut Registry) {
     // A suit to swim in lava with (`swimming`).
     r.edit(Item::generated("base:diamond_chestplate".into()))
         .set_text(&SWIMS_IN, "#lava");
-    r.edit(&PIG).attach(&MARK);
+    r.edit(&PIG)
+        .attach(&MARK)
+        .attach(&LIGHT)
+        .light_at(0.0, 0.5, 1.0);
+    r.edit(&PLAYER).attach(&LIGHT);
+    r.entity_effect(&LIT).unseen().light_rgb(0, 15, 0);
+    r.block(&PEDESTAL)
+        .texture("varied")
+        .entity(|e| e.inventory(1).shown_slots(&[0]))
+        .no_item();
     r.storage(&STASH, 54);
     // What an edit sets wins, the rest stays; the testmod ones load after or before this mod
     // depending on order, which edits don't care about.
-    r.item(&EDITED).max_stack(16).attack_damage(3.0);
     r.edit(&EDITED).max_stack(8);
     r.biome(&EDITED_BIOME).set(&WARMTH, 1.0).tag("edited_a");
     r.edit(&EDITED_BIOME).set(&WARMTH, 2.0);
@@ -172,7 +172,7 @@ pub fn register(r: &mut Registry) {
     r.edit(&OAK_STAIRS).light(7);
     r.set("#testkit:lamp*", &WARMTH, 1.5);
     r.tag("testkit:lit", &["lamp[lit=true]"]);
-    r.shapeless(&base_api::SMELTING, "base:stick", 1, &["edited"], 200)
+    r.shapeless(&base_api::SMELTING, "base:stick", 1, &["testmod:edited"], 200)
         .named("smelt_edited");
     r.remove(&Recipe::named("smelt_edited"));
     r.loot(&EDITED_LOOT)
@@ -180,7 +180,7 @@ pub fn register(r: &mut Registry) {
         .pool(Pool::new().item("base:dirt"));
     r.edit(&EDITED_LOOT)
         .remove_item(&comps::loot::POOLS, "#1")
-        .replace_drop("base:stick", "edited")
+        .replace_drop("base:stick", "testmod:edited")
         .pool(Pool::new().items("base:cobblestone", 2, 2));
     r.edit(OIL.liquid())
         .flow_delay(12)
@@ -273,7 +273,7 @@ pub fn register(r: &mut Registry) {
         let mut driven = DRIVEN.lock().unwrap();
         for (id, dir, left) in driven.iter_mut() {
             if w.entity(*id).is_some() && *left > 0 {
-                w.walk(*id, *dir, 1.0, false);
+                w.walk(*id, weft_sdk::Walk::toward(*dir, 1.0));
                 *left -= 1;
             }
         }
@@ -426,11 +426,11 @@ const OPS: &[(&str, &str, Run)] = &[
         };
         let text = word(cmd, "text")?;
         match word(cmd, "place")? {
-            "chat" => drop(w.chat(who, text, &[])),
-            "hint" => drop(w.hint(who, text, &[])),
-            "title" => drop(w.title(who, text, &[])),
-            "subtitle" => drop(w.subtitle(who, text, &[])),
-            "corner" => drop(w.show(who, text, &[]).at(1.0, 0.0).scale(2.0)),
+            "chat" => drop(w.chat(text, &[]).to(who)),
+            "hint" => drop(w.hint(text, &[]).to(who)),
+            "title" => drop(w.title(text, &[]).to(who)),
+            "subtitle" => drop(w.subtitle(text, &[]).to(who)),
+            "corner" => drop(w.show(text, &[]).to(who).at(1.0, 0.0).scale(2.0)),
             p => return Err(format!("no place {p}")),
         }
         Ok(String::new())
@@ -647,6 +647,19 @@ const OPS: &[(&str, &str, Run)] = &[
         Ok(w.spawn(id(cmd, "kind")?, [p[0] as f64 + 0.5, p[1] as f64, p[2] as f64 + 0.5])
             .to_string())
     }),
+    ("spawnlit", "<kind:entity> <pos:pos>", |w, cmd, _, _| {
+        let p = pos(cmd, "pos")?;
+        let e = w.spawn(id(cmd, "kind")?, [p[0] as f64 + 0.5, p[1] as f64, p[2] as f64 + 0.5]);
+        let inv = w.inventory(e);
+        inv.set(w.selected_slot(e), RED_LAMP.stack(1));
+        if let Some(offhand) = inv.find_group(OFF_HAND.name()) {
+            offhand.set(0, BLUE_LAMP.stack(1));
+        }
+        if let Some(worn) = w.inventory(e).find_group(EQUIPMENT_GROUP) {
+            worn.set(0, GOLD_HELMET.stack(1));
+        }
+        Ok(e.to_string())
+    }),
     ("entity", "@entity", |w, cmd, _, _| {
         let e = w.entity(owner(w, cmd)?).ok_or("no such entity")?;
         Ok(format!("{} {:.2} {:.2} {:.2} {}", name_of(ek::ENTITY, e.kind), e.pos.x, e.pos.y, e.pos.z, e.health))
@@ -815,9 +828,15 @@ const OPS: &[(&str, &str, Run)] = &[
         Ok(w.structure_near(word(cmd, "name")?, me, int(cmd, "r")?)
             .map_or("none".into(), |a| format!("{} {} {}", a.x, a.y, a.z)))
     }),
-    // A timer on the player: `after 60`, then `rings` counts the ones that fired.
-    ("after", "<ticks:int>", |w, cmd, player, _| {
-        w.emit_after(player, int(cmd, "ticks")?, &RANG, player);
+    // A timer on the player, `dim` or `block` under them: `after 60`, then `rings` counts the
+    // ones that fired.
+    ("after", "<ticks:int> [on:word]", |w, cmd, player, me| {
+        let on = match cmd.text("on") {
+            Some("dim") => Holder::NONE,
+            Some("block") => Holder::from([me[0], me[1] - 1, me[2]]),
+            _ => Holder::entity(player),
+        };
+        w.timer(on, int(cmd, "ticks")?, &RANG, player);
         Ok(String::new())
     }),
     ("rings", "", |_, _, _, _| Ok(RINGS.load(Ordering::Relaxed).to_string())),
@@ -1010,6 +1029,14 @@ const OPS: &[(&str, &str, Run)] = &[
         w.despawn(int(cmd, "id")?);
         Ok(String::new())
     }),
+    ("glow", "@entity <r:int> <g:int> <b:int>", |w, cmd, _, _| {
+        let rgb = [int(cmd, "r")?, int(cmd, "g")?, int(cmd, "b")?];
+        Ok(w.set_component(owner(w, cmd)?, &LIGHT, rgb).to_string())
+    }),
+    ("lit", "@entity <ticks:int>", |w, cmd, _, _| {
+        w.entity_effect(owner(w, cmd)?, &LIT, 1, int(cmd, "ticks")?);
+        Ok(String::new())
+    }),
     ("mark", "<id:int> <value:int>", |w, cmd, _, _| {
         *w.component_mut(int(cmd, "id")?, &MARK)
             .ok_or("no mark component")? = int(cmd, "value")?;
@@ -1136,10 +1163,10 @@ const OPS: &[(&str, &str, Run)] = &[
         Ok((w.in_liquid(p) as u32).to_string())
     }),
     // A hit from the player who runs it.
-    ("effect", "<id:int> <which:word> <strength:float> <ticks:int>", |w, cmd, _, _| {
+    ("effect", "<id:int> <which:word> <level:int> <ticks:int>", |w, cmd, _, _| {
         let name = word(cmd, "which")?;
         let id = EntityEffect::lookup(name).ok_or_else(|| format!("no entity effect {name}"))?;
-        w.entity_effect(int(cmd, "id")?, id, cmd.float("strength").unwrap_or(1.0) as f32, int(cmd, "ticks")?);
+        w.entity_effect(int(cmd, "id")?, id, int(cmd, "level")?, int(cmd, "ticks")?);
         Ok(String::new())
     }),
     ("hurt", "<id:int> <amount:float>", |w, cmd, player, _| {

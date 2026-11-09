@@ -209,7 +209,10 @@ fn draw_block(
                 for dir in 0..6 {
                     let [dx, dy, dz] = NORMALS[dir];
                     let axis = dir / 2;
-                    let at_edge = bx.tilt.degrees == 0.0 && if dir % 2 == 0 { bx.min[axis] <= 0.0 } else { bx.max[axis] >= 1.0 };
+                    // Against one neighbor only if it stays in the cell along the other axes: a
+                    // big block's box runs past several.
+                    let within = (0..3).all(|a| a == axis || (bx.min[a] >= 0.0 && bx.max[a] <= 1.0));
+                    let at_edge = bx.tilt.degrees == 0.0 && within && if dir % 2 == 0 { bx.min[axis] <= 0.0 } else { bx.max[axis] >= 1.0 };
                     let (ns, nl) = (n.states[pidx(x + dx, y + dy, z + dz)], n.light[pidx(x + dx, y + dy, z + dz)]);
                     if at_edge && ctm.hides(c.states[ns as usize].flags, ns) {
                         continue;

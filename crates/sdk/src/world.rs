@@ -42,7 +42,7 @@ impl World {
 
     /// The same world for the blocks of moving body `body`, in its own coordinates (block
     /// (0, 0, 0) centered on its entity): everything about blocks through it (`block`, `set_block`,
-    /// `prop_set`, parts, `schedule_tick`, light, signals) reaches the body's, as in its own blocks'
+    /// `prop_set`, parts, timers, light, signals) reaches the body's, as in its own blocks'
     /// callbacks. Meant for one statement, `w.on_body(ship).prop_set(pos, "lit", "true")`, or a
     /// short scope: while it lives, `w` itself is the body's too. `None` if `body` isn't one.
     pub fn on_body(&self, body: u64) -> Option<OnBody<'_>> {
@@ -90,11 +90,6 @@ impl World {
     pub fn signal_read_changed(&self, pos: impl Into<BlockPos>) {
         let pos = pos.into();
         unsafe { (host().signal_read_changed)(self.raw, &pos) }
-    }
-
-    pub fn schedule_tick(&self, pos: impl Into<BlockPos>, delay_ticks: u32) {
-        let pos = pos.into();
-        unsafe { (host().schedule_tick)(self.raw, &pos, delay_ticks) }
     }
 
     pub fn game_time(&self) -> u64 {
@@ -213,13 +208,6 @@ pub fn state_facing(state: u32) -> crate::Dir {
     state_prop(state, "facing")
         .and_then(crate::Dir::from_name)
         .unwrap_or(crate::Dir::Up)
-}
-
-/// Where the other part of a `two_part` block is, from the part `state` at `pos`.
-pub fn other_part(pos: impl Into<BlockPos>, state: u32, prop: &str, second: &str, way: impl Fn(u32) -> crate::Dir) -> BlockPos {
-    let pos = pos.into();
-    let (d, s) = (way(state).offset(), if state_prop(state, prop) == Some(second) { -1 } else { 1 });
-    [pos.x + d.x * s, pos.y + d.y * s, pos.z + d.z * s].into()
 }
 
 /// The middle of a block.

@@ -91,7 +91,8 @@ pub fn register(r: &mut Registry) {
         .spacing(128)
         .chance(0.5)
         .biome("#dry")
-        .buried(1);
+        .buried(1)
+        .turns();
     // Glow crystals grow only in Mars' crystal caves (an underground biome).
     r.ore(&GLOW_CRYSTAL)
         .dimension(&crate::MARS)
@@ -244,8 +245,8 @@ pub fn register(r: &mut Registry) {
     r.item(&BLASTER).max_stack(1).handheld();
     r.item(&RUNE).max_stack(1).on_use(|u| {
         let w = u.world();
-        w.action_play(u.player(), "wave", false);
-        if let Some(st) = w.entity(u.player()) {
+        w.action_play(u.entity(), "wave", false);
+        if let Some(st) = w.entity(u.entity()) {
             w.spawn_particles(&SPARK, [st.pos.x, st.pos.y + 1.2, st.pos.z])
                 .count(40)
                 .spread(0.2)
@@ -294,7 +295,7 @@ fn wisps(t: &EntityTick) {
         }
         st.vel.y = ((time as f64 + phase as f64) * 0.1).sin() * 0.8;
         w.entity_modify(id).yaw(st.yaw).velocity(st.vel);
-        w.walk(id, yaw_dir(st.yaw), 1.0, false);
+        w.walk(id, weft_sdk::Walk::toward(yaw_dir(st.yaw), 1.0));
         if (time + phase) % 20 == 0 {
             w.spawn_particles(&SPARK, [st.pos.x, st.pos.y + 0.2, st.pos.z])
                 .count(WISP_SPARKS.get().max(0) as u32)

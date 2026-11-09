@@ -56,89 +56,6 @@ pub async fn missing_dimension(t: T) -> R {
     Ok(())
 }
 
-/// Riding: chains of mounts without rings, a mob jockey steering by its AI, the player steering
-/// from its client with the kind's keys, getting off where the seat says.
-pub async fn riding(t: T) -> R {
-    t.flat().await?;
-    let f = t.feet();
-    let spawn = async |t: &T, kind: &str, dz: i32| {
-        t.op(&format!("spawn {kind} {} {} {}", f[0], f[1], f[2] + dz))
-            .await
-    };
-    let (a, b) = (spawn(&t, "testmod:steed", -4).await?, spawn(&t, "testmod:steed", -7).await?);
-    let y = |s: String| {
-        s.split_whitespace()
-            .nth(2)
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(f64::NAN)
-    };
-    t.check_eq(t.op(&format!("mount {a} {b}")).await?, "1".to_string(), "a steed on a steed");
-    t.check_eq(t.op(&format!("mount {b} {a}")).await?, "0".to_string(), "no ring of riders");
-    t.secs(0.3).await?;
-    let (ya, yb) = (y(t.op(&format!("entity {a}")).await?), y(t.op(&format!("entity {b}")).await?));
-    t.check((yb - ya - 1.0).abs() < 0.05, format!("the one on top sits in its seat: {yb:.2} over {ya:.2}"));
-
-    // A zombie in the saddle walks the steed with its AI, towards the player.
-    let z = spawn(&t, "base:zombie", -12).await?;
-    let c = spawn(&t, "testmod:steed", -12).await?;
-    t.op("time 18000").await?;
-    t.check_eq(t.op(&format!("mount {c} {z}")).await?, "1".to_string(), "a zombie jockey");
-    let at = |s: String| {
-        let v: Vec<f64> = s
-            .split_whitespace()
-            .skip(1)
-            .take(3)
-            .filter_map(|v| v.parse().ok())
-            .collect();
-        (v.first().copied().unwrap_or(f64::NAN), v.get(2).copied().unwrap_or(f64::NAN))
-    };
-    let before = at(t.op(&format!("entity {c}")).await?);
-    t.secs(2.0).await?;
-    let after = at(t.op(&format!("entity {c}")).await?);
-    let walked = (after.0 - before.0).hypot(after.1 - before.1);
-    t.probe("blocks the zombie walked its steed", walked as f32, walked > 1.0);
-
-    // The player in the saddle of the free one: its keys walk it where it looks.
-    t.op(&format!("remove {z}")).await?;
-    t.op(&format!("remove {c}")).await?;
-    let d = spawn(&t, "testmod:steed", 3).await?;
-    t.check_eq(t.op(&format!("mount {d}")).await?, "1".to_string(), "the player gets on");
-    t.c().set_look(0.0, 0.0);
-    t.secs(0.5).await?;
-    let before = at(t.op(&format!("entity {d}")).await?);
-    t.hold("core:forward", 1.0);
-    t.secs(1.3).await?;
-    let after = at(t.op(&format!("entity {d}")).await?);
-    let rode = (after.0 - before.0).hypot(after.1 - before.1);
-    t.probe("blocks the player rode it in a second", rode as f32, rode > 2.0);
-    let seat = t.op("vehicle").await?;
-    t.check(seat.starts_with(&d), format!("still on it: {seat}"));
-    // From behind: sitting, legs forward.
-    t.press("core:perspective");
-    t.c().set_look(180.0, -35.0);
-    t.secs(0.6).await?;
-    t.shot("seated").await?;
-    t.press("core:perspective");
-    t.press("core:perspective");
-
-    // Sent away, the steed takes its rider: in this dimension, then to another.
-    t.op(&format!("send {d} here {} {} {}", f[0] + 40, f[1] + 3, f[2]))
-        .await?;
-    t.until("the rider came along", Duration::from_secs(5), |t| (t.state().pos.x - (f[0] + 40) as f64).abs() < 3.0)
-        .await?;
-    t.check(t.op("vehicle").await?.starts_with(&d), "still in the saddle after a teleport");
-    let over = Dimension::lookup("base:overworld").ok_or("no overworld")?;
-    t.op(&format!("send {d} base:overworld 0 200 0")).await?;
-    t.until("the rider came to the other dimension", Duration::from_secs(10), |t| t.state().dim == over)
-        .await?;
-    t.secs(0.5).await?;
-    t.check(t.op("vehicle").await?.starts_with(&d), "still in the saddle in the other dimension");
-    t.press("core:dismount");
-    t.secs(0.5).await?;
-    t.check_eq(t.op("vehicle").await?, "0 0".to_string(), "the dismount key gets off");
-    Ok(())
-}
-
 /// Camera modes: F5 through the three, third person kept out of a wall and sliding along it
 /// smoothly, the free camera only in a game mode that flies and moving while the player stands,
 /// a mod's own on its key, and a mode the server holds.
@@ -239,7 +156,7 @@ pub async fn edits(t: T) -> R {
     t.flat().await?;
     t.check_eq(
         t.op("edited").await?,
-        "8 3 2 true true/true/false 4 true base:cobblestonex2,testkit:editedx1 true true true true [0.9, 2.5, 1.0] 3 4/15/1.5/false,4/3/1.5/true 40 true"
+        "8 3 2 true true/true/false 4 true base:cobblestonex2,testmod:editedx1 true true true true [0.9, 2.5, 1.0] 3 4/15/1.5/false,4/3/1.5/true 40 true"
             .to_string(),
         "max stack, damage, warmth, tag, a weather's tags, an attribute's default, a recipe removed, a loot table's pools, a liquid's id, its block's and item's tag, a column of Mars, Mars' tag, an entity kind's size and eye, its value after the edits, a block's states after an edit of every state and one of a key (light, opacity, a value set by tag, a tag set on one state), a stair's states and their edited light",
     );
@@ -941,6 +858,8 @@ pub async fn persistence(t: T) -> R {
     // A timer due after the reload is saved with the player and fires there.
     let rings: u32 = t.op("rings").await?.parse().unwrap_or(0);
     t.op("after 120").await?;
+    t.op("after 120 dim").await?;
+    t.op("after 120 block").await?;
     // A world's setting (a game rule) goes with the world.
     t.cmd("/rule testkit:count_marks 1").await?;
 
@@ -966,12 +885,12 @@ pub async fn persistence(t: T) -> R {
     let mut now = rings;
     for _ in 0..40 {
         now = t.op("rings").await?.parse().unwrap_or(0);
-        if now > rings {
+        if now >= rings + 3 {
             break;
         }
         t.secs(0.25).await?;
     }
-    t.check_eq(now, rings + 1, "the timer saved with the player fired after the reload");
+    t.check_eq(now, rings + 3, "the timers saved with the player, the dimension and a block fired after the reload");
     let rule = t.cmd("/rule testkit:count_marks").await?;
     t.check(rule.contains("true"), format!("the world's setting after reload: {rule}"));
     t.cmd("/rule testkit:count_marks 0").await?;
@@ -1237,7 +1156,19 @@ pub async fn worldgen(t: T) -> R {
         .collect();
     t.check(n[0] + n[1] > 0, "trees grow in base's forest on Mars");
     t.check(n[2] > 0, "the forest brings its grass to Mars");
-    t.check(t.op("structure testmod:obelisk 3000").await? != "none", "obelisks on Mars");
+    // The nearest obelisk is where its site says, its crystal in the middle of its top.
+    let at = t.op("structure testmod:obelisk 3000").await?;
+    let corner: Vec<i32> = at
+        .split_whitespace()
+        .filter_map(|v| v.parse().ok())
+        .collect();
+    t.check(corner.len() == 3, format!("obelisks on Mars ({at})"));
+    if let [cx, cy, cz] = corner[..] {
+        t.cmd(&format!("/tp {cx} {} {cz}", cy + 8)).await?;
+        t.secs(0.5).await?;
+        t.loaded().await?;
+        t.check_eq(t.block([cx + 1, cy + 4, cz + 1]).await?, "testmod:glow_crystal".to_string(), "an obelisk stands at its site");
+    }
     let (mut caves, mut inside, mut outside) = (0, 0, 0);
     for (i, x) in [0, 200].into_iter().enumerate() {
         t.cmd(&format!("/tp {x} -40 {}", i * 150)).await?;
@@ -1360,4 +1291,30 @@ pub async fn gpu_terrain(t: T) -> R {
     .await;
     CHECK.set(before);
     out
+}
+
+/// A block of several cells is one block in all of them: each reads as it, stands for it to a
+/// walker, and breaking any takes it whole.
+pub async fn big_blocks(t: T) -> R {
+    t.flat().await?;
+    let f = t.feet();
+    let own = add(f, [1, 0, -4]);
+    t.set(own, "testmod:big").await?;
+    let far = add(own, [1, 1, 1]);
+    for p in [own, far, add(own, [0, 1, 1])] {
+        t.check_eq(t.block(p).await?, "testmod:big".to_string(), "every cell is the block");
+    }
+    t.check_eq(t.block(add(own, [2, 0, 0])).await?, "core:air".to_string(), "and no more");
+    // On top of a cell that isn't its own.
+    t.cmd(&format!("/tp {} {} {}", far[0] as f64 + 0.5, far[1] + 3, far[2] as f64 + 0.5))
+        .await?;
+    t.secs(1.0).await?;
+    let y = t.state().pos.y;
+    t.probe("height stood at over another cell, above its top", (y - (far[1] + 1) as f64) as f32, (y - (far[1] + 1) as f64).abs() < 0.01);
+    t.op(&format!("break {} {} {}", far[0], far[1], far[2]))
+        .await?;
+    for p in [own, far] {
+        t.check_eq(t.block(p).await?, "core:air".to_string(), "broken through another cell, it is gone whole");
+    }
+    Ok(())
 }

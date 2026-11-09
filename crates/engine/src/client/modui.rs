@@ -113,14 +113,6 @@ pub fn build_recipe(
     }
 }
 
-/// Keeps `b` alive with the UI being built (until its next rebuild but one).
-///
-/// # Safety
-/// `u` must be the context of a UI build (`ui_open`'s).
-pub unsafe fn keep(u: *mut abi::UiCtx, b: Box<dyn std::any::Any>) {
-    unsafe { (*(u as *mut UiBuild)).ui.owned.push(b) }
-}
-
 /// Arguments a mod passed, as the text formatter takes them.
 pub fn args(list: abi::Slice<abi::UiArg>) -> Vec<Arg> {
     let mut out = Vec::new();
@@ -146,7 +138,11 @@ pub fn args(list: abi::Slice<abi::UiArg>) -> Vec<Arg> {
     out
 }
 
+/// A mod's number binding; none reads 0.
 fn float_bind(owner: ModId, cb: Callback) -> Box<dyn Fn(&Ctx) -> f32> {
+    if !cb.is_some() {
+        return Box::new(|_: &Ctx| 0.0);
+    }
     Box::new(move |ctx: &Ctx| {
         let mut v = ClientView::bound(ctx);
         let mut sink = TextSink { tag: 2, out: None };
@@ -166,6 +162,8 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
         let n = &*node;
         let owner = b.owner;
         let class = n.class.as_str().to_string();
+        // Its class, else the kind's own.
+        let class_or = |own: &str| if class.is_empty() { own.to_string() } else { class.clone() };
         let len = |px: f32, pct: f32| {
             if !pct.is_nan() {
                 Len::Pct(pct)
@@ -224,8 +222,7 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
         let id = match n.kind {
             uk::TEXT => {
                 // Without a class the text takes the colors of the panel it sits on.
-                let node =
-                    b.ui.text(spans(n.text, n.args), if class.is_empty() { "default" } else { &class });
+                let node = b.ui.text(spans(n.text, n.args), &class_or("default"));
                 if n.bind.is_some() {
                     let cb = n.bind;
                     if let Kind::Text(t) = &mut b.ui.nodes[node].kind {
@@ -261,8 +258,7 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
                 id
             }
             uk::SLIDER => {
-                let bind =
-                    if n.bind.is_some() { float_bind(owner, n.bind) } else { Box::new(|_: &Ctx| 0.0f32) as Box<dyn Fn(&Ctx) -> f32> };
+                let bind = float_bind(owner, n.bind);
                 let on_change: Rc<dyn Fn(&mut Ctx, f32)> = Rc::new(move |ctx: &mut Ctx, v: f32| on_change(ctx, String::new(), v));
                 let steps = if n.count == 0 { 100 } else { n.count };
                 b.ui.open(Kind::Slider { value: 0.0, bind, on_change, steps }, style)
@@ -286,10 +282,7 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
                     style.pad = [6.0, 4.0, 6.0, 4.0];
                 }
                 // Labels sit in the middle, like on the engine's buttons.
-                b.ui.open(
-                    Kind::Button { class: if class.is_empty() { "button".into() } else { class }, action: Some(action), enabled, selected },
-                    style.center(),
-                )
+                b.ui.open(Kind::Button { class: class_or("button"), action: Some(action), enabled, selected }, style.center())
             }
             uk::TITLE => {
                 let c = crate::content::content();
@@ -309,7 +302,7 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
                     None => Vec::new(),
                 };
                 let id = b.ui.open(Kind::Container { class: None }, style);
-                b.ui.text(spans, if class.is_empty() { "default" } else { &class });
+                b.ui.text(spans, &class_or("default"));
                 id
             }
             uk::EQUIPMENT => {
@@ -416,33 +409,23 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
                 parts(b.ui, lang, input, b.client, &screen, &area);
                 id
             }
-            uk::RECIPE_ARROW => {
-                let bind =
-                    if n.bind.is_some() { float_bind(owner, n.bind) } else { Box::new(|_: &Ctx| 0.0f32) as Box<dyn Fn(&Ctx) -> f32> };
+            // An arrow is a progress bar of its own size and class that leads to recipes.
+            uk::RECIPE_ARROW | uk::PROGRESS => {
+                let arrow = n.kind == uk::RECIPE_ARROW;
                 let [w, h] = crate::ui::RECIPE_ARROW;
                 let style = Style {
-                    w: if n.width.is_nan() { Len::Px(w) } else { style.w },
-                    h: if n.height.is_nan() { Len::Px(h) } else { style.h },
+                    w: if arrow && n.width.is_nan() { Len::Px(w) } else { style.w },
+                    h: if arrow && n.height.is_nan() { Len::Px(h) } else { style.h },
                     ..style
                 };
-                let id = b.ui.open(
-                    Kind::Progress { class: if class.is_empty() { "arrow".into() } else { class }, bind, value: 0.0, dir: n.dir },
-                    style,
-                );
-                b.ui.nodes[id].recipes = true;
+                let class = class_or(if arrow { "arrow" } else { "progress" });
+                let id =
+                    b.ui.open(Kind::Progress { class, bind: float_bind(owner, n.bind), value: 0.0, dir: n.dir }, style);
+                b.ui.nodes[id].recipes = arrow;
                 id
             }
-            uk::PROGRESS => {
-                let bind =
-                    if n.bind.is_some() { float_bind(owner, n.bind) } else { Box::new(|_: &Ctx| 0.0f32) as Box<dyn Fn(&Ctx) -> f32> };
-                b.ui.open(
-                    Kind::Progress { class: if class.is_empty() { "progress".into() } else { class }, bind, value: 0.0, dir: n.dir },
-                    style,
-                )
-            }
             uk::ICONS => {
-                let bind =
-                    if n.bind.is_some() { float_bind(owner, n.bind) } else { Box::new(|_: &Ctx| 0.0f32) as Box<dyn Fn(&Ctx) -> f32> };
+                let bind = float_bind(owner, n.bind);
                 b.ui.open(
                     Kind::Icons {
                         class,
@@ -475,7 +458,7 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
                 b.ui.open(Kind::Container { class: None }, Style { grow: n.grow.max(1.0), ..style })
             }
             uk::PANEL => {
-                b.ui.open(Kind::Container { class: Some(if class.is_empty() { "panel".into() } else { class }) }, style)
+                b.ui.open(Kind::Container { class: Some(class_or("panel")) }, style)
             }
             _ => {
                 b.ui.open(Kind::Container { class: (!class.is_empty()).then_some(class) }, style)
@@ -543,10 +526,6 @@ pub unsafe extern "C" fn client_day_time(c: *mut abi::ClientCtx) -> u64 {
 
 pub unsafe extern "C" fn client_weather(c: *mut abi::ClientCtx) -> u32 {
     unsafe { view(c).map_or(0, |cl| cl.weather_id as u32) }
-}
-
-pub unsafe extern "C" fn client_permission(c: *mut abi::ClientCtx) -> u32 {
-    unsafe { view(c).map_or(0, |cl| cl.permission) }
 }
 
 pub unsafe extern "C" fn client_component(c: *mut abi::ClientCtx, id: u64, comp: u32) -> *const u8 {
@@ -629,7 +608,7 @@ pub unsafe extern "C" fn client_entity(c: *mut abi::ClientCtx, id: u64, out: *mu
                     health: e.health,
                     // The kind's own value: clients do not see attribute modifiers of others.
                     max_health: {
-                        let attr = &content.game.attributes[crate::server::MAX_HEALTH as usize];
+                        let attr = &content.game.attributes[crate::registry::attr::MAX_HEALTH as usize];
                         attr.comp
                             .and_then(|id| {
                                 content
@@ -647,8 +626,4 @@ pub unsafe extern "C" fn client_entity(c: *mut abi::ClientCtx, id: u64, out: *mu
             None => 0,
         }
     }
-}
-
-pub unsafe extern "C" fn client_game_mode(c: *mut abi::ClientCtx) -> u32 {
-    unsafe { view(c).map_or(0, |cl| cl.mode.0 as u32) }
 }

@@ -80,7 +80,7 @@ pub struct DimTops {
 /// Solid and opaque, or a liquid: the ground from afar. A window or a stair is not.
 pub fn shows(c: &Content, s: u32) -> bool {
     let Some(st) = c.states.get(s as usize) else { return false };
-    s != 0 && (st.liquid.is_some() || (st.flags & bf::SOLID != 0 && st.flags & bf::OPAQUE != 0))
+    s != 0 && (st.liquid.is_some() || (st.solid() && st.flags & bf::OPAQUE != 0))
 }
 
 /// A cube or a model box the distance can draw. A cross, a wire, an empty model, or a block a

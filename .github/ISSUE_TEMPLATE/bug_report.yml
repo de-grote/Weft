@@ -1,0 +1,95 @@
+name: Bug report
+description: Something is broken, crashes or behaves differently from what it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One bug per issue.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproducing
+      description: Steps from a fresh world if you can. A seed and coordinates help a lot.
+      placeholder: |
+        1. New world, seed 5
+        2. Go to 120 64 -340
+        3. Place a torch on the fence
+    validations:
+      required: true
+
+  - type: textarea
+    id: shots
+    attributes:
+      label: Screenshots or video
+      description: Drag them in here.
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        `logs/latest.log`, and for a crash the newest file in `crash-reports/`. Both are in the game's data folder (`run/` when built from source; see the README for release builds). Attach the file or paste the error.
+      render: text
+
+  - type: dropdown
+    id: build
+    attributes:
+      label: Build
+      options:
+        - A release
+        - Built from source
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: 26.11.3, or a commit hash
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: OS and GPU
+      placeholder: Windows 11, RTX 3060
+    validations:
+      required: true
+
+  - type: dropdown
+    id: renderer
+    attributes:
+      label: Renderer
+      description: The Renderer setting, or `--renderer`. If you can, check whether the other one has it too.
+      options:
+        - Vulkan
+        - wgpu
+        - Both
+        - Don't know
+
+  - type: textarea
+    id: mods
+    attributes:
+      label: Mods and packs
+      description: Anything besides the base game, and resource or shader packs that were on.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I saw this myself, it isn't something an AI tool told me is a bug
+          required: true
+        - label: I looked for an open issue about it
+          required: true

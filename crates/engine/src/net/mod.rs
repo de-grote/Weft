@@ -30,10 +30,6 @@ pub fn host(server: &crate::server::ServerHandle, settings: &crate::settings::Se
     p2p::host(server.connect.clone(), settings);
 }
 
-pub fn join(ticket: &str, settings: &crate::settings::Settings) -> Result<ClientConn, String> {
-    p2p::join(ticket, settings)
-}
-
 /// A struct that travels in messages, written field by field.
 macro_rules! wire_struct {
     ($(#[$m:meta])* pub struct $name:ident { $(pub $f:ident: $t:ty),* $(,)? }) => {
@@ -308,7 +304,10 @@ messages! {
         BodyLight { frame: u64, lights: Vec<(IVec3, u32)> },
         /// Power of pieces of wire: (cell, face, level), of the world or of body `frame`.
         Signals { dim: u32, frame: u64, changes: Vec<(IVec3, u8, u8)> },
-        Time { dim: u32, time: u64 },
+        /// The dimension's time of day, the ticks it ran (what entity effects end by, unlike the time
+        /// `/time set` moves), its weather (`registry::WeatherDef` by id) and the ticks a second the
+        /// server runs at.
+        Clock { dim: u32, time: u64, ticks: u64, weather: u32, rate: u32 },
         /// `frame`: the solid body it was put on and the position relative to that body (clients
         /// draw bodies ahead of the server, so only the relative position is right for them).
         Teleport { dim: u32, pos: DVec3, frame: Option<(u64, DVec3)> },
@@ -322,7 +321,6 @@ messages! {
         Taken(Vec<(u64, u64)>),
         /// A use (right click) did something: the arm swings, and dips if the held item was used.
         Swing { used_item: bool, off_hand: bool },
-        GameMode(crate::world::GameMode),
         /// Everyone online, sent when someone joins or leaves.
         Players(Vec<String>),
         /// Own inventory: (slot, stack) for changed slots.
@@ -341,18 +339,11 @@ messages! {
         Flying(bool),
         /// A mod put this hotbar slot in the player's hand.
         Selected(u32),
-        /// Ticks a second the server runs at.
-        TickRate(u32),
-        /// The player's walking speed and jump multipliers.
-        /// The player's attributes that changed, by id.
-        Attributes(Vec<(u32, f32)>),
         /// Mining that block is not allowed (`action::BREAK_BLOCK`).
         BreakRefused { frame: u64, pos: IVec3 },
         /// Holding the use button started on an item that takes this many ticks, or it ended.
         /// Ticks it takes, and whether in the other hand.
         Using(Option<(u32, bool)>),
-        /// The dimension's weather now (`registry::WeatherDef` by id).
-        Weather(u32),
 
 
         /// Someone else's arm swings: a hit, a use, mining.
@@ -360,8 +351,6 @@ messages! {
         EntitySwing { id: u64, off: bool },
         /// Who is mining what, besides this player.
         Cracks(Vec<Crack>),
-        /// The player's `permission` level, for what its client offers.
-        Permission(u32),
         /// A sprinting hit landed, which ends the sprint.
         StopSprint,
         /// Camera mode `mode` (`u32::MAX`: the player's own again), `locked` till told; the
@@ -387,7 +376,7 @@ messages! {
         /// The server's values of `SYNCED` settings: (config id, value).
         Configs(Vec<(u32, f64)>),
         /// Sound events: (event, position, volume, pitch or 0).
-        Sounds(Vec<(u32, DVec3, f32, f32)>),
+        Sounds(Vec<(u32, Option<DVec3>, f32, f32)>),
         /// Keyframe animations started on entities: (entity, name, looping); empty name = none.
         PlayAction(Vec<(u64, String, bool)>),
         /// A player's own skin (PNG), for their entity.

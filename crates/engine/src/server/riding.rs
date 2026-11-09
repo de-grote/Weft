@@ -11,20 +11,12 @@ use crate::content::Content;
 /// How deep a chain of riders goes at most; deeper ones are taken off.
 const MOST_RIDING: usize = 32;
 
-/// `v` in a mount's frame (+Z ahead, +X right) turned into the world's by its yaw.
-pub fn turned(v: DVec3, yaw: f32) -> DVec3 {
-    let (sy, cy) = (yaw as f64).sin_cos();
-    let ahead = DVec3::new(-sy, 0.0, -cy);
-    let right = DVec3::new(cy, 0.0, -sy);
-    right * v.x + DVec3::Y * v.y + ahead * v.z
-}
-
 impl Dim {
     /// Where a rider's feet go in seat `seat` of `mount`, if it has that seat.
     pub fn seat_pos(&self, c: &Content, mount: u64, seat: u8) -> Option<DVec3> {
         let m = self.entities.get(mount)?;
         let s = c.game.entities[m.kind as usize].seats.get(seat as usize)?;
-        Some(m.pos + turned(s.pos, m.yaw))
+        Some(m.pos + crate::world::turned(s.pos, m.yaw))
     }
 
     /// Who sits in `seat` of `mount`.
@@ -130,7 +122,7 @@ impl Dim {
     pub fn leave(&mut self, c: &Content, rider: u64) {
         let Some((mount, _)) = self.entities.get_mut(rider).and_then(|e| e.vehicle.take()) else { return };
         // What it is saved and moved between regions with says so too, at once.
-        self.entities.comps.remove(&(rider, c.game.field_comps[11]));
+        self.entities.comps.remove(&(rider, c.game.fields.riding));
         if let Some(m) = self
             .entities
             .get_mut(mount)
@@ -155,7 +147,7 @@ impl Dim {
                 .unwrap_or(sat)
         };
         match s.exit {
-            abi::seat_exit::OFFSET => mpos + turned(s.exit_at, myaw),
+            abi::seat_exit::OFFSET => mpos + crate::world::turned(s.exit_at, myaw),
             abi::seat_exit::STAY => sat,
             abi::seat_exit::CALL => {
                 let first = nearest(self, 2.0);
@@ -202,7 +194,7 @@ impl Dim {
 
     /// Before physics: a mob in a seat that steers walks its mount the way its AI walks it.
     pub fn steer_mounts(&mut self, c: &Content) {
-        let mut steered: Vec<(u64, ([f32; 2], f32, bool))> = Vec::new();
+        let mut steered: Vec<(u64, super::entity::Walk)> = Vec::new();
         for e in self
             .entities
             .list
@@ -308,18 +300,20 @@ impl Dim {
         let dy = pos.y - m.pos.y;
         m.moved = (pos - m.pos).with_y(0.0).length() as f32;
         (m.pos, m.yaw, m.vel, m.on_ground) = (pos, yaw, vel, on_ground);
-        let k = &c.game.entities[m.kind as usize];
         let fell = super::entity::track_fall(&mut m.fall, dy, on_ground, m.in_liquid);
-        let land = fell.and_then(|f| super::entity::fall_damage(k, f));
-        if let Some(amount) = land {
-            self.damage(c, mount, amount, 0, abi::damage_cause::FALL);
-            self.riders_fall(c, mount, amount);
+        if let Some(f) = fell {
+            if let Some(amount) = self.fall_damage(c, mount, f) {
+                self.damage(c, mount, amount, 0, abi::damage_cause::FALL);
+            }
+            self.riders_fall(c, mount, f);
         }
         self.seat_riders(c);
     }
 
     /// A mount's fall hurts its riders too, when its kind says so (`RIDERS_FALL`).
-    pub fn riders_fall(&mut self, c: &'static Content, mount: u64, amount: f32) {
+    /// Riders of a mount that takes its riders' falls fall as far as it did, each hurt by its own
+    /// attributes.
+    pub fn riders_fall(&mut self, c: &'static Content, mount: u64, fell: f32) {
         let Some(m) = self.entities.get(mount) else { return };
         if !c.game.entities[m.kind as usize].is(crate::tag_bits::entity::RIDERS_FALL) {
             return;
@@ -332,7 +326,9 @@ impl Dim {
             .map(|e| e.id)
             .collect();
         for r in riders {
-            self.damage(c, r, amount, 0, abi::damage_cause::FALL);
+            if let Some(amount) = self.fall_damage(c, r, fell) {
+                self.damage(c, r, amount, 0, abi::damage_cause::FALL);
+            }
         }
     }
 }

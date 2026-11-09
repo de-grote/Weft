@@ -41,6 +41,8 @@ pub struct WorldMeta {
     pub day_offsets: Vec<(String, i64)>,
     /// Each dimension's weather by name, and the tick it changes.
     pub weather: Vec<(String, String, u64)>,
+    /// Timers on each dimension (`Host::timer`): when, the event, its value.
+    pub timers: Vec<(String, u64, String, Vec<u8>)>,
     /// Players given a permission level: their key and the level.
     pub ops: Vec<(String, u32)>,
     /// Area edits per dimension (`server::area::AreaFill::spec`), in order.
@@ -77,6 +79,7 @@ impl WorldMeta {
             day_offsets: Vec::new(),
             ops: Vec::new(),
             weather: Vec::new(),
+            timers: Vec::new(),
             edits: Vec::new(),
             forced: Vec::new(),
             next_entity: 1,
@@ -100,6 +103,17 @@ impl WorldMeta {
                         if let [name, until] = w[..] {
                             m.weather
                                 .push((d.to_string(), name.to_string(), until.parse().unwrap_or(0)));
+                        }
+                    } else if let Some(d) = k.strip_prefix("timer.") {
+                        let d = d.rsplit_once('.').map_or(d, |(d, _)| d);
+                        let w: Vec<&str> = v.split_whitespace().collect();
+                        if let [at, event, ref data @ ..] = w[..] {
+                            let data = data.first().unwrap_or(&"");
+                            let bytes = (0..data.len() / 2)
+                                .filter_map(|i| u8::from_str_radix(&data[i * 2..i * 2 + 2], 16).ok())
+                                .collect();
+                            m.timers
+                                .push((d.to_string(), at.parse().unwrap_or(0), event.to_string(), bytes));
                         }
                     } else if let Some(key) = k.strip_prefix("op.") {
                         m.ops.push((key.to_string(), v.parse().unwrap_or(0)));
@@ -132,6 +146,13 @@ impl WorldMeta {
         );
         for (d, weather, until) in &self.weather {
             s.push_str(&format!("weather.{d} = {weather} {until}\n"));
+        }
+        for (i, (d, at, event, data)) in self.timers.iter().enumerate() {
+            let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
+            s.push_str(&format!(
+                "timer.{d}.{i} = {at} {event} {hex}
+"
+            ));
         }
         for (key, level) in &self.ops {
             s.push_str(&format!("op.{key} = {level}\n"));
@@ -202,6 +223,7 @@ pub fn create(saves: &Path, name: &str, seed: u64) -> WorldMeta {
         day_offsets: Vec::new(),
         ops: Vec::new(),
         weather: Vec::new(),
+        timers: Vec::new(),
         edits: Vec::new(),
         forced: Vec::new(),
         next_entity: 1,

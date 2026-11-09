@@ -607,10 +607,6 @@ impl VulkanBackend {
         }
     }
 
-    pub fn device_name(&self) -> &str {
-        &self.device_name
-    }
-
     unsafe fn recreate_swapchain(&mut self) -> Result<(), Error> {
         unsafe {
             let caps = self
@@ -653,15 +649,13 @@ impl VulkanBackend {
                 .surface_fn
                 .get_physical_device_surface_present_modes(self.pdev, self.surface)
                 .map_err(err("present modes"))?;
-            let mode = if self.vsync {
-                vk::PresentModeKHR::FIFO
-            } else if modes.contains(&vk::PresentModeKHR::MAILBOX) {
-                vk::PresentModeKHR::MAILBOX
-            } else if modes.contains(&vk::PresentModeKHR::IMMEDIATE) {
-                vk::PresentModeKHR::IMMEDIATE
-            } else {
-                vk::PresentModeKHR::FIFO
-            };
+            // Off is as many frames as come: mailbox caps them at the refresh rate on some drivers.
+            use vk::PresentModeKHR as P;
+            let want = if self.vsync { [P::FIFO; 2] } else { [P::IMMEDIATE, P::MAILBOX] };
+            let mode = want
+                .into_iter()
+                .find(|m| modes.contains(m))
+                .unwrap_or(P::FIFO);
             let mut count = caps.min_image_count + 1;
             if caps.max_image_count > 0 {
                 count = count.min(caps.max_image_count);

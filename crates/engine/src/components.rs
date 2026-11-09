@@ -36,13 +36,12 @@ pub const BUILTIN: &[(&str, &str)] = &[
     (abi::comp::TINT_FACES, "u8"),
     (abi::comp::SPREADS_TO, "match"),
     (abi::comp::SPREAD_TIME, "f32"),
-    (abi::comp::SPREAD_LIGHT, "u32"),
+    (abi::comp::SPREAD_WHEN, "[str]"),
     (abi::comp::AMBIENT_PARTICLE, "str"),
     (abi::comp::DRIP, "str"),
     (abi::comp::SPLASH, "str"),
     (abi::comp::BUBBLE, "str"),
     (abi::comp::SWIMS_IN, "match"),
-    (abi::comp::JOINS, "match"),
     (abi::comp::LIQUIDS, ""),
     (abi::comp::UNBREAKABLE, ""),
     (abi::comp::CONDUCTOR, ""),
@@ -255,6 +254,8 @@ pub struct Components {
     columns: Vec<Vec<abi::Column>>,
     refs: Option<Box<Refs>>,
     abi: Box<abi::ComponentTable>,
+    /// Per component: the table holds a `Slice` to its packed items (a list).
+    packed: Vec<bool>,
 }
 
 unsafe impl Send for Components {}
@@ -274,12 +275,18 @@ impl Components {
         (comp as usize) < self.names.len() && self.tables[kind].has(entry, comp)
     }
 
-    /// Value bytes, if the entry has the component and it carries a value.
+    /// Value bytes, if the entry has the component and it carries a value; of a list, its packed
+    /// items (the table holds a `Slice` to them).
     pub fn bytes(&self, kind: usize, entry: u32, comp: u32) -> Option<&[u8]> {
         if comp as usize >= self.names.len() {
             return None;
         }
-        self.tables[kind].value(entry, comp)
+        let v = self.tables[kind].value(entry, comp)?;
+        if self.packed[comp as usize] {
+            let s = unsafe { std::ptr::read_unaligned(v.as_ptr() as *const abi::Slice<u8>) };
+            return Some(unsafe { s.as_slice() });
+        }
+        Some(v)
     }
 
     /// Typed read; the caller knows the schema (engine built-ins).
@@ -588,7 +595,11 @@ impl Builder {
         let columns: Vec<Vec<abi::Column>> = tables.iter().map(Table::columns).collect();
         let kinds: [abi::KindTable; KINDS] = std::array::from_fn(|k| tables[k].view(&columns[k]));
         let abi = Box::new(abi::ComponentTable { components: names.len() as u32, kinds });
-        Components { names, schemas, by_name: ids, tables, texts, blobs, columns, refs, abi }
+        let packed = schemas
+            .iter()
+            .map(|s| s.starts_with('<') || abi::data::list_of(s).is_some())
+            .collect();
+        Components { names, schemas, by_name: ids, tables, texts, blobs, columns, refs, abi, packed }
     }
 }
 

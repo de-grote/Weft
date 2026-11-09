@@ -12,6 +12,9 @@ pub struct ClientView {
     raw: *mut abi::ClientCtx,
 }
 
+static GAME_MODE: Component<u32> = Component::named(abi::comp::GAME_MODE);
+static PERMISSION: Component<u32> = Component::named(abi::comp::PERMISSION);
+
 impl ClientView {
     pub(crate) fn from_raw(raw: *mut abi::ClientCtx) -> ClientView {
         ClientView { raw }
@@ -47,7 +50,7 @@ impl ClientView {
     }
     /// The player's permission level (`abi::permission`).
     pub fn permission(&self) -> u32 {
-        unsafe { (host().client_permission)(self.raw) }
+        self.component(&PERMISSION).unwrap_or(0)
     }
     /// Own player's synced component. Unlike `World::component` it takes no entity: another
     /// one's is `component_of`.
@@ -80,11 +83,12 @@ impl ClientView {
     }
     /// The local player's mode spares it damage and hunger: no bars to show.
     pub fn outside_survival(&self) -> bool {
-        crate::comps::game_mode::INVULNERABLE.on_id(self.game_mode())
+        self.attribute(&crate::attribute::INVULNERABLE) >= 1.0
     }
     /// `abi::game_mode`.
     pub fn game_mode(&self) -> u32 {
-        unsafe { (host().client_game_mode)(self.raw) }
+        self.component(&GAME_MODE)
+            .unwrap_or(abi::game_mode::SURVIVAL)
     }
     /// Another entity's component the server shares with this client (`SYNC_WATCHERS`, or
     /// `SYNC_MENU` while its menu is open).

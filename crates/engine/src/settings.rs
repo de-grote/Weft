@@ -77,110 +77,108 @@ impl Settings {
         Settings { run_dir: run_dir.to_path_buf(), read_only: false }
     }
 
-    pub fn language(&self) -> String {
-        config::text(id("core:language"))
-    }
-    /// 0 = automatic.
-    pub fn gui_scale(&self) -> u32 {
-        number("core:gui_scale") as u32
-    }
-    pub fn view_distance(&self) -> i32 {
-        number("core:view_distance") as i32
-    }
-    pub fn vsync(&self) -> bool {
-        number("core:vsync") != 0.0
-    }
-    /// The chosen renderer's name (`core:renderer`).
-    pub fn renderer(&self) -> String {
-        let id = id("core:renderer");
-        crate::content::content()
-            .game
-            .configs
-            .get(id as usize)
-            .map(|d| d.show(config::get(id)))
-            .unwrap_or_default()
-    }
-    pub fn fov(&self) -> f32 {
-        number("core:fov") as f32
-    }
-    pub fn fov_effects(&self) -> f32 {
-        number("core:fov_effects") as f32
-    }
-    pub fn sensitivity(&self) -> f32 {
-        number("core:sensitivity") as f32
-    }
-    /// 0 moody .. 1 bright.
-    pub fn brightness(&self) -> f32 {
-        number("core:brightness") as f32
-    }
-    /// Bit per debug overlay group shown (F3 + number).
-    pub fn debug_groups(&self) -> u32 {
-        number("core:debug_groups") as u32
-    }
-    /// Mouse up looks down instead.
-    pub fn invert_y(&self) -> bool {
-        number("core:invert_y") != 0.0
-    }
-    /// The sneak key switches sneaking on and off instead of being held.
-    /// The sprint key switches sprinting on and off instead of being held.
-    pub fn name(&self) -> String {
-        config::text(id("core:name"))
-    }
-    pub fn server_port(&self) -> u16 {
-        number("core:server_port") as u16
-    }
-    /// Extra iroh relay URLs; empty uses the public defaults.
-    pub fn relays(&self) -> Vec<String> {
-        list("core:relays")
-    }
-    /// Enabled resource packs, highest priority first.
-    pub fn resource_packs(&self) -> Vec<String> {
-        list("core:resource_packs")
-    }
-    pub fn shader_pack(&self) -> Option<String> {
-        Some(config::text(id("core:shader_pack"))).filter(|p| !p.is_empty())
-    }
-
-    pub fn occlusion_culling(&self) -> bool {
-        number("core:occlusion_culling") != 0.0
-    }
-
-    pub fn show_avatars(&self) -> bool {
-        number("core:show_avatars") != 0.0
-    }
-
-    pub fn first_person_model(&self) -> bool {
-        number("core:first_person_model") != 0.0
-    }
-
-    pub fn set(&self, name: &str, v: f64) {
-        config::set(id(&format!("core:{name}")), v);
-    }
-    pub fn set_text(&self, name: &str, v: &str) {
-        config::set_text(id(&format!("core:{name}")), v);
-    }
-    pub fn set_resource_packs(&self, packs: &[String]) {
-        self.set_text("resource_packs", &packs.join(","));
-    }
-
     pub fn saves_dir(&self) -> PathBuf {
         self.run_dir.join("saves")
     }
+}
 
-    /// Every key as its `core:key.<action>` setting says.
-    pub fn apply_binds(&self, input: &mut Input) {
-        let actions: Vec<String> = input.binds.iter().map(|b| b.action.clone()).collect();
-        for action in actions {
-            match Binding::parse_slots(&config::text(id(&format!("core:key.{action}")))) {
-                Some(k) => input.rebind(&action, k),
-                None => log::warn!("key binding {action}: unknown key {}", config::text(id(&format!("core:key.{action}")))),
-            }
+pub fn language() -> String {
+    config::text(id("core:language"))
+}
+/// 0 = automatic.
+pub fn gui_scale() -> u32 {
+    number("core:gui_scale") as u32
+}
+pub fn view_distance() -> i32 {
+    number("core:view_distance") as i32
+}
+pub fn vsync() -> bool {
+    number("core:vsync") != 0.0
+}
+/// The chosen renderer's name (`core:renderer`).
+pub fn renderer() -> String {
+    let id = id("core:renderer");
+    crate::content::content()
+        .game
+        .configs
+        .get(id as usize)
+        .map(|d| d.show(config::get(id)))
+        .unwrap_or_default()
+}
+pub fn fov() -> f32 {
+    number("core:fov") as f32
+}
+pub fn fov_effects() -> f32 {
+    number("core:fov_effects") as f32
+}
+pub fn sensitivity() -> f32 {
+    number("core:sensitivity") as f32
+}
+/// 0 moody .. 1 bright.
+pub fn brightness() -> f32 {
+    number("core:brightness") as f32
+}
+/// Bit per debug overlay group shown (F3 + number).
+pub fn debug_groups() -> u32 {
+    number("core:debug_groups") as u32
+}
+/// Mouse up looks down instead.
+pub fn invert_y() -> bool {
+    number("core:invert_y") != 0.0
+}
+pub fn name() -> String {
+    config::text(id("core:name"))
+}
+pub fn server_port() -> u16 {
+    number("core:server_port") as u16
+}
+/// Extra iroh relay URLs; empty uses the public defaults.
+pub fn relays() -> Vec<String> {
+    list("core:relays")
+}
+/// Enabled resource packs, highest priority first.
+pub fn resource_packs() -> Vec<String> {
+    list("core:resource_packs")
+}
+pub fn shader_pack() -> Option<String> {
+    Some(config::text(id("core:shader_pack"))).filter(|p| !p.is_empty())
+}
+
+pub fn occlusion_culling() -> bool {
+    number("core:occlusion_culling") != 0.0
+}
+
+pub fn show_avatars() -> bool {
+    number("core:show_avatars") != 0.0
+}
+
+pub fn first_person_model() -> bool {
+    number("core:first_person_model") != 0.0
+}
+
+pub fn set(name: &str, v: f64) {
+    config::set(id(&format!("core:{name}")), v);
+}
+pub fn set_text(name: &str, v: &str) {
+    config::set_text(id(&format!("core:{name}")), v);
+}
+pub fn set_resource_packs(packs: &[String]) {
+    set_text("resource_packs", &packs.join(","));
+}
+
+/// Every key as its `core:key.<action>` setting says.
+pub fn apply_binds(input: &mut Input) {
+    let actions: Vec<String> = input.binds.iter().map(|b| b.action.clone()).collect();
+    for action in actions {
+        match Binding::parse_slots(&config::text(id(&format!("core:key.{action}")))) {
+            Some(k) => input.rebind(&action, k),
+            None => log::warn!("key binding {action}: unknown key {}", config::text(id(&format!("core:key.{action}")))),
         }
     }
+}
 
-    pub fn set_bind(&self, action: &str, keys: &Slots) {
-        config::set_text(id(&format!("core:key.{action}")), &Binding::slots_id(keys));
-    }
+pub fn set_bind(action: &str, keys: &Slots) {
+    config::set_text(id(&format!("core:key.{action}")), &Binding::slots_id(keys));
 }
 
 /// Brings settings files written by older versions up to date.

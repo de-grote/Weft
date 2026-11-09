@@ -272,7 +272,7 @@ pub(super) fn rider_meets(c: &Content, there: u32) -> RiderMeets {
     let s = &c.states[there as usize];
     if there == AIR || s.liquid.is_some() || s.flags & bf::REPLACEABLE != 0 || s.signal.kind == sk::WIRE {
         RiderMeets::Nothing
-    } else if s.flags & bf::SOLID != 0 {
+    } else if s.solid() {
         RiderMeets::Wall
     } else {
         RiderMeets::Breaks
@@ -331,20 +331,12 @@ impl Signals {
                 .is_some_and(|n| n.as_ref().is_some_and(|n| n.cut))
     }
 
-    fn outside_gives(&self, n: IVec3, dir: u8) -> u8 {
+    /// The most other spaces give at `n` toward `dir`, `which` picking what reads it.
+    fn outside_gives(&self, n: IVec3, dir: u8, which: fn(&Gives) -> &[u8; 6]) -> u8 {
         self.outside
             .values()
             .filter_map(|m| m.get(&n))
-            .map(|g| g.all[dir as usize])
-            .max()
-            .unwrap_or(0)
-    }
-
-    fn outside_gives_wire(&self, n: IVec3, dir: u8) -> u8 {
-        self.outside
-            .values()
-            .filter_map(|m| m.get(&n))
-            .map(|g| g.to_wire[dir as usize])
+            .map(|g| which(g)[dir as usize])
             .max()
             .unwrap_or(0)
     }
@@ -364,7 +356,7 @@ impl Signals {
 
     /// Power coming into `p` from direction `dir`; `None`: that can't be told, it is cut off.
     fn read(&self, c: &Content, cubes: View, p: IVec3, dir: u8) -> Option<u8> {
-        let from_outside = self.outside_gives(p + DIRS[dir as usize], dir ^ 1);
+        let from_outside = self.outside_gives(p + DIRS[dir as usize], dir ^ 1, |g| &g.all);
         self.read_here(c, cubes, p, dir)
             .map(|v| v.max(from_outside))
     }
@@ -1001,7 +993,7 @@ impl Signals {
             let v = match port {
                 Port::Direct(at, dir) => self.device_signal(c, at).map_or(0, |s| direct(s, dir)),
                 Port::Strong(at) => self.strong_in(c, at),
-                Port::Outside(at, dir) => self.outside_gives_wire(at, dir),
+                Port::Outside(at, dir) => self.outside_gives(at, dir, |g| &g.to_wire),
             };
             if v > net.next[i as usize] {
                 net.next[i as usize] = v;
@@ -1194,7 +1186,19 @@ impl Signals {
                 effects.push(Effect::Gate { p, inputs });
             }
             sk::SINK => {
-                let most = most!(s.inputs);
+                let mut most = most!(s.inputs);
+                // A big block takes power at any of its cells.
+                for &(o, _) in &c.states[state as usize].cells {
+                    for dir in 0..6u8 {
+                        match self.read(c, d.signal_view(), p + o, dir) {
+                            Some(v) => most = most.max(v),
+                            None => {
+                                self.held.insert(p);
+                                return;
+                            }
+                        }
+                    }
+                }
                 if self.devices[&p].input != most {
                     effects.push(Effect::Sink { p, level: most });
                 }
@@ -1590,6 +1594,26 @@ impl Dim {
             if here == AIR {
                 continue;
             }
+            // A big block moves whole, whichever of its cells is pushed.
+            if let Some((own, s)) = self
+                .block_at(c, at)
+                .filter(|&(own, s)| own != at || !c.states[s as usize].cells.is_empty())
+            {
+                if own == base || !self.movable(c, s) {
+                    log::debug!("in the way of a piston: {} at {own}", c.state_name(s));
+                    return None;
+                }
+                for cell in std::iter::once(own).chain(c.states[s as usize].cells.iter().map(|(o, _)| own + *o)) {
+                    if !moved.contains(&cell) {
+                        if moved.len() == PUSH_LIMIT {
+                            return None;
+                        }
+                        moved.push(cell);
+                        todo.push(cell + step);
+                    }
+                }
+                continue;
+            }
             let info = &c.states[here as usize];
             if info.liquid.is_some() {
                 broken.push(at);
@@ -1599,7 +1623,7 @@ impl Dim {
                 log::debug!("in the way of a piston: {} at {at}", c.state_name(here));
                 return None;
             }
-            if info.flags & bf::SOLID == 0 {
+            if !info.solid() {
                 broken.push(at);
                 continue;
             }
@@ -1617,7 +1641,7 @@ impl Dim {
                     }
                     // What can't come along stays behind, unlike what is in the way.
                     let s = self.get(n)?;
-                    if s != AIR && c.states[s as usize].flags & bf::SOLID != 0 && self.movable(c, s) {
+                    if s != AIR && c.solid(s) && self.movable(c, s) {
                         todo.push(n);
                     }
                 }
@@ -1668,7 +1692,7 @@ impl Dim {
             if s.flags as u32 & abi::signal_flags::STICKY != 0 && held_on {
                 let beyond = head + step;
                 let here = self.get(beyond)?;
-                if here != AIR && c.states[here as usize].flags & bf::SOLID != 0 && self.movable(c, here) {
+                if here != AIR && c.solid(here) && self.movable(c, here) {
                     if let Some((moved, broken)) = self.gather_move(c, p, Some(head), beyond, -step) {
                         (plan.moved, plan.broken) = (moved, broken);
                     }
@@ -1696,7 +1720,7 @@ impl Dim {
         let mut seen: FxHashSet<IVec3> = [p, grip].into_iter().collect();
         let mut todo = Vec::new();
         let held = self.get(grip)?;
-        if held != AIR && c.states[held as usize].flags & bf::SOLID != 0 {
+        if held != AIR && c.solid(held) {
             if !self.movable(c, held) {
                 log::debug!("a floater at {p} has in front of it what can't be moved");
                 return None;
@@ -1715,7 +1739,7 @@ impl Dim {
                     continue;
                 }
                 let s = self.get(n)?;
-                if s != AIR && c.states[s as usize].flags & bf::SOLID != 0 && self.movable(c, s) {
+                if s != AIR && c.solid(s) && self.movable(c, s) {
                     if moved.len() == BODY_LIMIT {
                         log::debug!("too much for a floater at {p}");
                         return None;
@@ -1754,7 +1778,7 @@ impl Dim {
                 }
                 let Some(state) = self.get(n) else { continue };
                 let info = &c.states[state as usize];
-                if state == AIR || info.flags & bf::SOLID != 0 || info.liquid.is_some() {
+                if state == AIR || info.solid() || info.liquid.is_some() {
                     continue;
                 }
                 let held_by = |f: u8| moved.contains(&(n + DIRS[f as usize]));
@@ -1827,35 +1851,30 @@ impl Dim {
             }
         }
         let short = |h: u32| c.state_with(h, "short", "true").unwrap_or(h);
-        // The head, which isn't a block anywhere as it moves out, or comes off to move in.
+        // The head on its way is the body's: out, it is the piston's own cell, and in, the piston
+        // is a cell again. Meanwhile the piston is moving, its short base.
         let mut also = Vec::new();
-        let mut carried_head = None;
         let mut head_turns = None;
-        if plan.extend {
-            let h = info
-                .head
-                .and_then(|b| c.state_with(c.blocks[b as usize].first_state, "facing", wire::dir_name(plan.dir)));
-            if let Some(h) = h {
+        let h = info
+            .head
+            .and_then(|b| c.state_with(c.blocks[b as usize].first_state, "facing", wire::dir_name(plan.dir)));
+        if let Some(h) = h {
+            if plan.extend {
                 // From inside the piston, out of its short base.
                 also.push((IVec3::ZERO, short(h)));
-                carried_head = Some(Carried { local: IVec3::ZERO, to: head, state: h, entity: None });
                 head_turns = Some((IVec3::ZERO, h));
+            } else {
+                also.push((head - plan.p, h));
+                head_turns = Some((head - plan.p, short(h)));
             }
-        } else if let Some(h) = self
-            .get(head)
-            .filter(|h| c.states[*h as usize].signal.kind == sk::PISTON_HEAD)
-        {
-            also.push((head - plan.p, h));
-            head_turns = Some((head - plan.p, short(h)));
-            self.write_block(c, head, AIR, true);
         }
+        self.set(c, plan.p, with_level(&info, state, 1));
         // Where they are going is taken from now on.
         self.space.signals.reserved.insert(head);
         for &m in &plan.moved {
             self.space.signals.reserved.insert(m + plan.step);
         }
         if plan.extend {
-            self.set(c, plan.p, with_level(&info, state, 15));
             if let Some(d) = self
                 .space
                 .signals
@@ -1876,9 +1895,8 @@ impl Dim {
             .map(|&m| (m, None))
             .chain(plan.riding.iter().map(|&(n, part)| (n, Some(part))))
             .map(|(m, part)| Lifted { from: m, local: m - plan.p, to: m + plan.step, part });
-        let (body, mut blocks) =
+        let (body, blocks) =
             self.lift(c, c.game.moving_kind, plan.p.as_dvec3() + DVec3::new(0.5, 0.0, 0.5), cells, &also, Liveness::OnTheWay);
-        blocks.extend(carried_head);
         if let Some(e) = self.entities.get_mut(body) {
             e.motion = Motion::To { to: e.pos + plan.step.as_dvec3(), left: MOVE_TICKS as u16 };
         }
@@ -1928,19 +1946,13 @@ impl Dim {
         for b in &m.blocks {
             self.space.signals.reserved.remove(&b.to);
         }
-        // A head without its piston goes with it.
-        let blocks: Vec<Carried> = m
-            .blocks
-            .iter()
-            .copied()
-            .filter(|b| c.states[b.state as usize].signal.kind != sk::PISTON_HEAD || out)
-            .collect();
+        let blocks = m.blocks.clone();
+        // In, or out with its head: a piston gone meanwhile leaves the head with the body.
         let mut also = Vec::new();
-        if m.retracting {
-            if let Some(s) = base.filter(|_| out) {
-                self.set(c, m.piston, with_level(&c.states[s as usize].signal, s, 0));
-                also.push((m.piston, s));
-            }
+        if let Some(s) = base.filter(|_| out) {
+            let info = c.states[s as usize].signal;
+            self.set(c, m.piston, with_level(&info, s, if m.retracting { 0 } else { 15 }));
+            also.push((m.piston, s));
         }
         self.space.signals.dirty_devices.insert(m.piston);
         self.space.signals.give_another_go();
@@ -1963,42 +1975,6 @@ impl Dim {
             self.land_piston(c, m);
         }
         self.finish_landings();
-    }
-
-    /// The piston whose head this is, if it is one.
-    pub(super) fn head_of_piston(&self, c: &Content, p: IVec3, state: u32) -> Option<IVec3> {
-        let s = c.states[state as usize].signal;
-        if s.kind != sk::PISTON_HEAD || s.front >= 6 {
-            return None;
-        }
-        let base = p - DIRS[s.front as usize];
-        let there = c.states[self.get(base)? as usize].signal;
-        (there.kind == sk::PISTON && there.level > 0 && there.front == s.front).then_some(base)
-    }
-
-    /// A piston and its head go together.
-    pub(super) fn signal_block_gone(&mut self, c: &'static Content, p: IVec3, old: u32, new: u32) {
-        let s = c.states[old as usize].signal;
-        if c.states[old as usize].block == c.states[new as usize].block || s.front >= 6 {
-            return;
-        }
-        let step = DIRS[s.front as usize];
-        if s.kind == sk::PISTON && s.level > 0 {
-            let head = p + step;
-            if self
-                .get(head)
-                .is_some_and(|h| c.states[h as usize].signal.kind == sk::PISTON_HEAD)
-            {
-                self.set(c, head, AIR);
-            }
-        } else if s.kind == sk::PISTON_HEAD {
-            // Blown up or set from outside; a player's break goes for the piston first.
-            if let Some(base) = self.head_of_piston(c, p, old) {
-                if let Some(state) = self.get(base) {
-                    self.break_off(c, base, state);
-                }
-            }
-        }
     }
 }
 

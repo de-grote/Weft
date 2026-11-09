@@ -127,22 +127,7 @@ impl Looks {
 }
 
 /// Every texture name there is, the content's first, numbering new ones.
-pub struct Names {
-    pub list: Vec<String>,
-    ids: FxHashMap<String, u32>,
-}
-
-impl Names {
-    pub fn id(&mut self, name: &str) -> u32 {
-        if let Some(&i) = self.ids.get(name) {
-            return i;
-        }
-        let i = self.list.len() as u32;
-        self.list.push(name.to_string());
-        self.ids.insert(name.to_string(), i);
-        i
-    }
-}
+pub type Names = crate::content::Interner;
 
 /// What a model file draws, by texture ids. A face it names no texture for shows `own` of that
 /// face. A cube parent is a whole cube's box.
@@ -167,15 +152,7 @@ pub fn set(looks: Looks) {
 /// The packs' models, and the names of all textures so far.
 pub fn load(assets: &Assets, c: &Content) -> (Looks, Names) {
     let mut looks = Looks::default();
-    let mut names = Names {
-        list: c.textures.clone(),
-        ids: c
-            .textures
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (n.clone(), i as u32))
-            .collect(),
-    };
+    let mut names = Names::new(c.textures.clone());
     let mut id = |name: &str| names.id(name);
     let read = |name: &str| {
         assets

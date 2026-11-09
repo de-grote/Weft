@@ -6,6 +6,11 @@ var<private> UVS: array<vec2<f32>, 4> = array<vec2<f32>, 4>(vec2(0.0, 1.0), vec2
 var<private> TRI: array<u32, 6> = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
 var<private> SHADE: array<f32, 6> = array<f32, 6>(0.6, 0.6, 0.5, 1.0, 0.8, 0.8);
 
+// `SHADE` blended for any unit normal.
+fn normal_shade(n: vec3<f32>) -> f32 {
+    return n.x * n.x * 0.6 + n.z * n.z * 0.8 + n.y * n.y * select(0.5, 1.0, n.y > 0.0);
+}
+
 // How far into the fog a point at `dist` is, 0..1.
 fn fog_amount(dist: f32, start: f32, end: f32) -> f32 {
     if dist <= start {
@@ -26,10 +31,13 @@ fn unpack_light(l: u32) -> vec4<f32> {
 
 // Vanilla 26.1's lightmap: dim ambient, sky light that turns blue and weaker at night, warm block
 // light that whitens towards both ends, then the Brightness setting bends it up keeping the hue.
-// `day` daylight 0..1, `ambient` the dimension's floor 0..1, `bright` the Brightness setting.
-fn lightmap(light: vec4<f32>, day: f32, ambient: f32, bright: f32) -> vec3<f32> {
-    let d = clamp((day - 0.12) / 0.88, 0.0, 1.0);
-    let sky = brightness_curve(light.x) * mix(0.24, 1.0, d);
+// `day` daylight 0..1, `ambient` the dimension's floor 0..1, `bright` the Brightness setting,
+// `night` night vision 0..1: lit everywhere as under the open sky at noon, lamps adding their
+// warmth on top (not vanilla's raising of each color to full, which makes a torch at night look
+// like a dark patch).
+fn lightmap(light: vec4<f32>, day: f32, ambient: f32, bright: f32, night: f32) -> vec3<f32> {
+    let d = clamp((mix(day, 1.0, night) - 0.12) / 0.88, 0.0, 1.0);
+    let sky = brightness_curve(mix(light.x, 1.0, night)) * mix(0.24, 1.0, d);
     var c = max(vec3(0.04), vec3(brightness_curve(ambient))) + mix(vec3(0.478, 0.478, 1.0), vec3(1.0), d) * sky;
     let block = light.yzw;
     if any(block > vec3(0.0)) {

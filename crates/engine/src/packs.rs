@@ -225,7 +225,7 @@ impl Screen for ResourcePacks {
         }
         let (Some(available), Some(chosen)) = (ui.find("packs_available"), ui.find("packs_selected")) else { return true };
         let (left, right) = (ui.nodes[available].rect, ui.nodes[chosen].rect);
-        let before = ctx.settings.resource_packs();
+        let before = crate::settings::resource_packs();
         let mut packs: Vec<String> = before.iter().filter(|p| **p != id).cloned().collect();
         if cursor.x >= (left.x + left.w + right.x) / 2.0 {
             let above = packs
@@ -236,7 +236,7 @@ impl Screen for ResourcePacks {
             packs.insert(above, id);
         }
         if packs != before {
-            ctx.settings.set_resource_packs(&packs);
+            crate::settings::set_resource_packs(&packs);
             ctx.requests.push(Request::Rebuild);
         }
         true
@@ -245,7 +245,7 @@ impl Screen for ResourcePacks {
     fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
         let dir = resource_dir(&cx.settings.run_dir);
         let all = list(&dir);
-        let selected = cx.settings.resource_packs();
+        let selected = crate::settings::resource_packs();
         let missing =
             |id: &str| PackInfo { id: id.to_string(), name: id.to_string(), description: cx.lang.get("packs.missing").to_string() };
         let dragging = self.dragging.as_deref();
@@ -326,7 +326,7 @@ impl Screen for ShaderPacks {
     fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
         let dir = shader_dir(&cx.settings.run_dir);
         let all = list(&dir);
-        let current = cx.settings.shader_pack();
+        let current = crate::settings::shader_pack();
         frame(ui, cx, "settings.shader_packs", |ui| {
             ui.panel(
                 "panel",
@@ -350,8 +350,7 @@ impl Screen for ShaderPacks {
                             "button",
                             Style::default().min_h(20.0).pad_xy(6.0, 4.0).stretch(),
                             Rc::new(move |c: &mut Ctx| {
-                                c.settings
-                                    .set_text("shader_pack", id.as_deref().unwrap_or(""));
+                                crate::settings::set_text("shader_pack", id.as_deref().unwrap_or(""));
                                 c.requests.push(Request::Rebuild);
                             }),
                             |ui| {

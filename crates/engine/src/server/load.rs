@@ -326,7 +326,7 @@ impl Server {
                     if let Some(s) = &storage {
                         // Written in the background; loads queue behind it there.
                         let (s, mut bytes, dim) = (s.clone(), serialize(c, r, &inside), r.id);
-                        persist::append_ticks(&mut bytes, &r.ticks_in(pos));
+                        persist::append_timers(&mut bytes, c, &r.take_timers(pos));
                         crate::background().spawn(move || s.lock().save(c, dim, pos, &cube, &around, &bytes));
                     }
                     for id in inside {

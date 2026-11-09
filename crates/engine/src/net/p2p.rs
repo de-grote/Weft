@@ -127,9 +127,8 @@ fn mod_list() -> String {
         .join(", ")
 }
 
-fn relay_mode(settings: &Settings) -> RelayMode {
-    let custom: Vec<RelayUrl> = settings
-        .relays()
+fn relay_mode() -> RelayMode {
+    let custom: Vec<RelayUrl> = crate::settings::relays()
         .iter()
         .filter_map(|r| r.parse().ok())
         .collect();
@@ -139,7 +138,7 @@ fn relay_mode(settings: &Settings) -> RelayMode {
 async fn endpoint(settings: &Settings, accept: bool, port: Option<u16>) -> Result<Endpoint, String> {
     let mut b = Endpoint::builder(presets::N0)
         .secret_key(identity(&settings.run_dir)?)
-        .relay_mode(relay_mode(settings));
+        .relay_mode(relay_mode());
     if accept {
         b = b.alpns(vec![ALPN.to_vec()]);
     }
@@ -269,7 +268,7 @@ pub fn host(connect: crossbeam_channel::Sender<ServerConn>, settings: &Settings)
     *HOSTING.lock() = Some(Hosting { ticket: None, task: None });
     let settings = settings.clone();
     let task = runtime().spawn(async move {
-        let port = settings.server_port();
+        let port = crate::settings::server_port();
         let ep = match endpoint(&settings, true, Some(port)).await {
             Ok(e) => e,
             // The ticket still works without it, say with a second game on this machine.
@@ -444,7 +443,8 @@ pub fn join(ticket: &str, settings: &Settings) -> Result<ClientConn, String> {
     let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<ClientConn, String>>(1);
     runtime().spawn(async move {
         let result = async {
-            let addr = if is_address(&ticket) { ask_ticket(&ticket, settings.server_port()).await? } else { parse_ticket(&ticket)? };
+            let addr =
+                if is_address(&ticket) { ask_ticket(&ticket, crate::settings::server_port()).await? } else { parse_ticket(&ticket)? };
             let (ep, conn) = connect(&settings, addr).await?;
             let (mut send, mut recv) = conn.open_bi().await.map_err(|e| e.to_string())?;
             let mut hello = codec::W::default();

@@ -125,6 +125,48 @@ pub async fn night_light(t: T) -> R {
     Ok(())
 }
 
+/// Light that moves with entities, which clients draw alone, in a closed dark room: the player's
+/// own (`LIGHT` set while it lives), an effect's until it ends (by ticks, which `/time set`
+/// doesn't move), and the item a block entity shows.
+pub async fn moving_light(t: T) -> R {
+    t.flat().await?;
+    let f = t.feet();
+    t.fill(add(f, [-5, -1, -9]), add(f, [5, 4, 2]), "stone")
+        .await?;
+    t.fill(add(f, [-4, 0, -8]), add(f, [4, 3, 1]), "air")
+        .await?;
+    t.fill(add(f, [-4, -1, -8]), add(f, [4, -1, 1]), "birch_planks")
+        .await?;
+    t.cmd("/time set 18000").await?;
+    t.c().set_look(0.0, -35.0);
+    let floor = [f[0] as f64 + 0.5, f[1] as f64, f[2] as f64 - 2.5];
+    let color = |what: &'static str| {
+        let t = &t;
+        async move { Ok::<_, String>(avg_around(t, &t.shot(what).await?, floor, 0.03)) }
+    };
+    t.op("glow me 0 0 15").await?;
+    t.secs(0.5).await?;
+    let c = color("own light").await?;
+    t.probe("the floor in the player's own blue light (blue minus red)", c[2] - c[0], c[2] - c[0] > 15.0);
+    t.op("glow me 0 0 0").await?;
+    t.op("lit me 400").await?;
+    t.secs(0.5).await?;
+    let c = color("effect light").await?;
+    t.probe("the floor in the green light of an effect (green minus red)", c[1] - c[0], c[1] - c[0] > 15.0);
+    t.op("lit me 1").await?;
+    t.secs(1.5).await?;
+    let c = color("effect over").await?;
+    t.probe("dark again once the effect is over", crate::runner::lum(c), crate::runner::lum(c) < 20.0);
+    let p = add(f, [0, 0, -4]);
+    t.set(p, "testkit:pedestal").await?;
+    t.op(&format!("insert {} {} {} base:red_lamp", p[0], p[1], p[2]))
+        .await?;
+    t.secs(0.5).await?;
+    let c = color("shown item").await?;
+    t.probe("the floor by a pedestal showing a red lamp is reddish", c[0] - c[1], c[0] - c[1] > 15.0);
+    Ok(())
+}
+
 /// What stands behind water is seen through it, tinted: a pig in a pool shows violet, not
 /// pink; lava covers what is under it.
 pub async fn liquid_layers(t: T) -> R {

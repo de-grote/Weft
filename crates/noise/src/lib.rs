@@ -1,6 +1,9 @@
-//! Hashing, a small random stream and the world's noise. The noise is 32-bit integers only
-//! (`fixed`), so every platform and the GPU get the same bits. The engine's terrain and mods
-//! share it, so a feature written in a mod sees the same fields the engine does.
+//! Hashing, a small random stream, the world's noise and a cache of per-column data. The noise
+//! is 32-bit integers only (`fixed`), so every platform and the GPU get the same bits. The
+//! engine's terrain and mods share it, so a feature written in a mod sees the same fields the
+//! engine does.
+
+pub mod cache;
 
 #[inline]
 pub fn hash(seed: u64, x: i64, y: i64, z: i64) -> u64 {

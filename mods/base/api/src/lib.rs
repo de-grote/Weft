@@ -42,11 +42,6 @@ value! {
     /// Read by the hunger system; other mods set it on their own food.
     pub struct Food { pub hunger: u32, pub saturation: f32 }
 }
-value! {
-    /// Protection while worn: about 4% less damage per point, less against big hits unless
-    /// `toughness` holds them back, the way modern's armor works.
-    pub struct Armor { pub points: u32, pub toughness: f32 }
-}
 
 // The common vocabulary the base game reads; any mod may set these on its own content.
 pub static FOOD: Component<Food> = Component::named("food");
@@ -57,7 +52,7 @@ pub fn eat(u: &mut ItemUse) -> bool {
     let stack = u.stack();
     let Some(food) = FOOD.on_stack(&stack) else { return false };
     let w = u.world();
-    let Some(h) = w.component_mut(u.player(), &HUNGER) else { return false };
+    let Some(h) = w.component_mut(u.entity(), &HUNGER) else { return false };
     if h.food >= 20.0 {
         return false;
     }
@@ -68,7 +63,13 @@ pub fn eat(u: &mut ItemUse) -> bool {
 }
 /// Burn time in ticks.
 pub static FUEL: Component<u32> = Component::named("fuel");
-pub static ARMOR: Component<Armor> = Component::named("armor");
+/// Protection: about 4% less damage per point, less against big hits unless toughness holds them
+/// back, the way modern's armor works. Attributes, so a piece gives them worn
+/// (`Modifier::add(&ARMOR, 3.0).worn()`), and so may anything else (an effect, a pose).
+pub static ARMOR: Attribute = Attribute::named("base:armor");
+pub static ARMOR_TOUGHNESS: Attribute = Attribute::named("base:armor_toughness");
+/// A piece of armor: wears when its wearer is hit.
+pub static ARMOR_PIECE: Tag<Item> = Tag::named("armor");
 /// How readily fire takes it.
 pub static FLAMMABLE: Component<u32> = Component::named("flammable");
 

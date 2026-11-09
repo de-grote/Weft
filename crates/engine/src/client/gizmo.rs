@@ -152,8 +152,7 @@ impl Gizmos {
                         let (Some(below), Some(here)) = (client.world.block_or_air(p - IVec3::Y), client.world.block_or_air(p)) else {
                             continue;
                         };
-                        let solid = |s: u32| c.states[s as usize].flags & weft_abi::block_flags::SOLID != 0;
-                        if !solid(below) || solid(here) {
+                        if !c.solid(below) || c.solid(here) {
                             continue;
                         }
                         let block = weft_abi::light::block(client.world.light(p)).min(15);

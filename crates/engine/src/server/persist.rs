@@ -72,7 +72,8 @@ impl R<'_> {
     }
 }
 
-pub fn write(c: &Content, out: &mut Vec<u8>, list: &[ToSave<'_>]) {
+/// `now`: the tick of the entities' dimension, what their effects' ends count from.
+pub fn write(c: &Content, out: &mut Vec<u8>, list: &[ToSave<'_>], now: u64) {
     let mut w = W(out);
     w.u32(list.len() as u32);
     for (e, inv, comps, blocks) in list {
@@ -115,7 +116,11 @@ pub fn write(c: &Content, out: &mut Vec<u8>, list: &[ToSave<'_>]) {
         w.u16(saved.len() as u16);
         for (id, bytes) in saved {
             w.str(&c.game.components[*id as usize].name);
-            let named = crate::stack::holds_stacks(c, *id).then(|| crate::stack::contents_to_names(c, bytes));
+            let named = if crate::stack::holds_stacks(c, *id) {
+                Some(crate::stack::contents_to_names(c, bytes))
+            } else {
+                (*id == c.game.fields.effect).then(|| effects_to_save(c, bytes, now))
+            };
             let bytes = named.as_deref().unwrap_or(bytes);
             // Component values over 64 KB say so with a marker, older saves never have it.
             if bytes.len() >= u16::MAX as usize {
@@ -141,42 +146,52 @@ pub fn write(c: &Content, out: &mut Vec<u8>, list: &[ToSave<'_>]) {
     }
 }
 
-/// Marks the trailer of a cube's saved data that holds its pending block ticks: (position in the
-/// cube, ticks left) pairs, their count, this. Older saves simply don't end in it.
-const TICKS_MAGIC: u32 = 0x4B43_4954;
+/// Marks the trailer of a cube's saved data that holds the timers on its blocks: each the block,
+/// then as `dim::push_timer` writes it; their length in bytes, this.
+const TIMERS_MAGIC: u32 = 0x5352_4D54;
 
-pub fn append_ticks(out: &mut Vec<u8>, ticks: &[(u16, u32)]) {
-    for (at, left) in ticks {
-        out.extend_from_slice(&at.to_le_bytes());
-        out.extend_from_slice(&left.to_le_bytes());
+pub fn append_timers(out: &mut Vec<u8>, c: &Content, timers: &[super::space::BlockTimer]) {
+    let start = out.len();
+    for (at, p, event, data) in timers {
+        p.iter()
+            .for_each(|v| out.extend_from_slice(&v.to_le_bytes()));
+        super::dim::push_timer(out, *at, &c.game.events[*event as usize].name, data);
     }
-    out.extend_from_slice(&(ticks.len() as u32).to_le_bytes());
-    out.extend_from_slice(&TICKS_MAGIC.to_le_bytes());
+    out.extend_from_slice(&((out.len() - start) as u32).to_le_bytes());
+    out.extend_from_slice(&TIMERS_MAGIC.to_le_bytes());
 }
 
-pub fn read_ticks(data: &[u8]) -> Vec<(u16, u32)> {
+/// The timers `append_timers` wrote, but those of events no mod has now.
+pub fn read_timers(c: &Content, data: &[u8]) -> Vec<super::space::BlockTimer> {
     let word = |at: usize| {
         data.get(at..at + 4)
             .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
     };
     let Some(end) = data.len().checked_sub(8) else { return Vec::new() };
-    if word(end + 4) != Some(TICKS_MAGIC) {
+    if word(end + 4) != Some(TIMERS_MAGIC) {
         return Vec::new();
     }
-    let n = word(end).unwrap_or(0) as usize;
-    let Some(start) = end.checked_sub(n * 6) else { return Vec::new() };
-    data[start..end]
-        .chunks_exact(6)
-        .map(|p| (u16::from_le_bytes([p[0], p[1]]), u32::from_le_bytes([p[2], p[3], p[4], p[5]])))
-        .collect()
+    let Some(mut at) = end.checked_sub(word(end).unwrap_or(0) as usize) else { return Vec::new() };
+    let mut out = Vec::new();
+    while at + 12 < end {
+        let p = [0, 1, 2].map(|i| word(at + i * 4).unwrap_or(0) as i32);
+        let Some((len, (until, name, value))) = super::dim::read_timer(&data[at + 12..end]) else { break };
+        at += 12 + len;
+        match c.game.event_names.get(&name) {
+            Some(&e) => out.push((until, p, e, value.into())),
+            None => log::warn!("a timer at {p:?} for event {name}, which no mod has now"),
+        }
+    }
+    out
 }
 
-pub fn read(c: &Content, data: &[u8]) -> Vec<Saved> {
+/// `now`: the tick of the dimension they come back to, what their effects' ends count from.
+pub fn read(c: &Content, data: &[u8], now: u64) -> Vec<Saved> {
     let mut r = R(data);
     let mut out = Vec::new();
     let Some(n) = r.u32() else { return out };
     for _ in 0..n {
-        let Some(e) = read_one(c, &mut r) else { break };
+        let Some(e) = read_one(c, &mut r, now) else { break };
         if let Some(e) = e {
             out.push(e);
         }
@@ -184,7 +199,7 @@ pub fn read(c: &Content, data: &[u8]) -> Vec<Saved> {
     out
 }
 
-fn read_one(c: &Content, r: &mut R) -> Option<Option<Saved>> {
+fn read_one(c: &Content, r: &mut R, now: u64) -> Option<Option<Saved>> {
     let kind_name = r.str()?;
     let id = r.u64()?;
     let mut v = [0.0f64; 6];
@@ -217,7 +232,13 @@ fn read_one(c: &Content, r: &mut R) -> Option<Option<Saved>> {
         let len = if len == u16::MAX as usize { r.u32()? as usize } else { len };
         let bytes = r.take(len)?.to_vec();
         if let Some(id) = c.game.component(&name) {
-            let bytes = if crate::stack::holds_stacks(c, id) { crate::stack::contents_from_names(c, &bytes) } else { bytes };
+            let bytes = if crate::stack::holds_stacks(c, id) {
+                crate::stack::contents_from_names(c, &bytes)
+            } else if id == c.game.fields.effect {
+                effects_from_save(c, &bytes, now)
+            } else {
+                bytes
+            };
             comps.push((id, c.game.fit_component(id, bytes)));
         }
     }
@@ -248,4 +269,33 @@ fn read_one(c: &Content, r: &mut R) -> Option<Option<Saved>> {
         return Some(None);
     }
     Some(Some((e, inv, comps, blocks)))
+}
+
+/// An `EFFECT` component as saves keep it: each effect by name, with its level and the ticks it has
+/// left, so a mod coming or going and time passing elsewhere change nothing.
+pub fn effects_to_save(c: &Content, bytes: &[u8], now: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    for f in crate::world::effects_on(Some(bytes), now) {
+        let Some(d) = c.game.entity_effects.get(f.id as usize) else { continue };
+        out.extend((d.name.len() as u16).to_le_bytes());
+        out.extend(d.name.as_bytes());
+        out.extend(f.level.to_le_bytes());
+        out.extend((f.until - now).min(u32::MAX as u64).to_le_bytes()[..4].iter());
+    }
+    out
+}
+
+/// `effects_to_save` read back for a dimension at tick `now`, but those no mod has now.
+pub fn effects_from_save(c: &Content, bytes: &[u8], now: u64) -> Vec<u8> {
+    let mut r = R(bytes);
+    let mut list = Vec::new();
+    while let Some(len) = r.u16() {
+        let (Some(name), Some(level), Some(left)) = (r.take(len as usize), r.u32(), r.u32()) else { break };
+        let name = String::from_utf8_lossy(name);
+        if let Some(&id) = c.game.entity_effect_names.get(name.as_ref()) {
+            let until = if left == weft_abi::INFINITE_TICKS { crate::world::FOREVER } else { now + left as u64 };
+            list.push(crate::world::OnEffect { id, level, until });
+        }
+    }
+    crate::world::encode_effects(&list).into_vec()
 }

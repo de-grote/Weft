@@ -205,19 +205,35 @@ pub fn register(r: &mut Registry) {
                 let mut f = all("piston_side");
                 f[2].0 = "piston_bottom";
                 let s = s.orientation(Orientation::up(p.facing()));
-                if p.is("power", "on") {
-                    f[3].0 = "piston_inner";
-                    s.model_box_faces([0.0, 0.0, 0.0], [16.0, 12.0, 16.0], f)
-                } else {
+                if p.is("power", "off") {
                     f[3].0 = top;
-                    s.model_box_faces([0.0, 0.0, 0.0], [16.0, 16.0, 16.0], f)
-                        .light_opacity(15)
+                    return s
+                        .model_box_faces([0.0, 0.0, 0.0], [16.0, 16.0, 16.0], f)
+                        .light_opacity(15);
                 }
+                f[3].0 = "piston_inner";
+                let s = s.model_box_faces([0.0, 0.0, 0.0], [16.0, 12.0, 16.0], f);
+                if p.is("power", "moving") {
+                    return s;
+                }
+                // Out, its head the next cell: vanilla's plate and the rod from the base to it.
+                let strip = ("piston_side", [0.0, 0.0, 16.0, 4.0]);
+                let plate = [strip, strip, ("piston_top", UV_FROM_BOX), (top, UV_FROM_BOX), strip, strip];
+                let none = ("piston_side", UV_NO_FACE);
+                let rod = [strip, strip, none, none, strip, strip];
+                s.cells(&[[0, 1, 0]])
+                    .model_box_faces([0.0, 28.0, 0.0], [16.0, 32.0, 16.0], plate)
+                    .model_box_faces([6.0, 12.0, 6.0], [10.0, 28.0, 10.0], rod)
+                    .turned([1, 1, 0, 0, 1, 1])
+                    .hitbox([0.0, 0.0, 0.0], [16.0, 12.0, 16.0])
+                    .hitbox([0.0, 28.0, 0.0], [16.0, 32.0, 16.0])
+                    .hitbox([6.0, 12.0, 6.0], [10.0, 28.0, 10.0])
             })
             .sound_group("stone")
             .hardness(1.5)
             .mined_by("pickaxe", tool_tier::HAND)
             .tab(&crate::tabs::REDSTONE);
+        // What the head looks like on its way; out, it is the piston's own.
         r.block(head)
             .facing(Facings::ALL, Toward::Player)
             .signal_piston_head()

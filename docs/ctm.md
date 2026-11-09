@@ -107,10 +107,10 @@ values: `true`, `false`
 ---
 
 ### blocks
-Only for these blocks, separated by spaces. Written like blocks are named anywhere else: a full name, a state (`base:furnace[lit=true]`) or a tag (`#logs`, `#ores/*`).
+Only for these blocks, separated by spaces. Written like blocks are named anywhere else: a full name, a state (`base:furnace[lit=true]`), a tag (`#logs`, `#ores/*`), and `!` before any of them to leave it out.
 A name nothing has is reported in the log with the file.
 
-example: `blocks = base:stone base:cobblestone #ores/*`
+example: `blocks = #logs !base:oak_log[axis=y]`
 
 ---
 

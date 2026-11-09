@@ -358,19 +358,22 @@ impl ConditionCtx {
     }
 }
 
-enum Target {
-    World(World),
-    Client(Client),
-}
-
 /// Particles sent when this is dropped: `w.spawn_particles(&SPARK, pos).count(10).speed(1.5)`.
 pub struct Burst {
-    target: Target,
+    target: crate::out::Out,
     burst: abi::ParticleBurst,
     area: Option<crate::Shape>,
 }
 
 impl Burst {
+    pub(crate) fn new(target: crate::out::Out, kind: u32, pos: Vec3) -> Burst {
+        Burst { target, burst: abi::ParticleBurst { kind, pos, ..abi::ParticleBurst::DEFAULT }, area: None }
+    }
+    /// For whom, of the players on the server (those near it unless said).
+    pub fn to(mut self, who: impl Into<crate::Who>) -> Self {
+        self.target.to(who.into());
+        self
+    }
     /// The particles start anywhere inside `shape` (a ring, a shell, a magic circle) instead
     /// of a box around the position; `outward` sends them away from the position.
     pub fn area(mut self, shape: &crate::Shape) -> Self {
@@ -423,9 +426,12 @@ impl Drop for Burst {
         if std::thread::panicking() || self.burst.kind == u32::MAX {
             return;
         }
-        let send = |b: &abi::ParticleBurst| match &self.target {
-            Target::World(w) => unsafe { (host().particle_burst)(w.raw(), b) },
-            Target::Client(c) => unsafe { (host().client_particle_burst)(c.raw(), b) },
+        if !self.target.here() {
+            return;
+        }
+        let send = |b: &abi::ParticleBurst| match self.target {
+            crate::out::Out::World(w, who) => unsafe { (host().particle_burst)(w.raw(), who, b) },
+            crate::out::Out::Client(c, _) => unsafe { (host().client_particle_burst)(c.raw(), b) },
         };
         let Some(area) = &self.area else { return send(&self.burst) };
         // One particle per point inside, found by trying points in the box around the shape.
@@ -459,23 +465,7 @@ impl Drop for Burst {
     }
 }
 
-fn burst(target: Target, kind: &Particle, pos: Vec3) -> Burst {
-    Burst { target, burst: abi::ParticleBurst { kind: kind.id(), pos, ..abi::ParticleBurst::DEFAULT }, area: None }
-}
-
-impl World {
-    /// Particles every player near `pos` sees (one by default).
-    pub fn spawn_particles(&self, kind: &Particle, pos: impl Into<Vec3>) -> Burst {
-        burst(Target::World(*self), kind, pos.into())
-    }
-}
-
 impl Client {
-    /// Particles only this client shows.
-    pub fn spawn_particles(&self, kind: &Particle, pos: impl Into<Vec3>) -> Burst {
-        burst(Target::Client(*self), kind, pos.into())
-    }
-
     /// Turns a screen effect (`shaders/post/<name>.wgsl`) on at `strength` (0 turns it off).
     pub fn post_effect(&self, effect: &crate::Shader, strength: f32) -> bool {
         unsafe { (host().client_op)(self.raw(), abi::client_op::POST_EFFECT, Str::new(effect.name()), strength as f64) != 0 }
@@ -592,30 +582,9 @@ impl Registry {
     }
 }
 
-impl World {
-    /// Sound event `sound` at `pos` for the players in its range, sent at the end of the
-    /// statement; `.pitch(p)` sets the playback speed.
-    pub fn play_sound(&self, sound: &crate::Sound, pos: impl Into<Vec3>, volume: f32) -> PlaySound {
-        let pos = pos.into();
-        PlaySound { to: Hearer::World(*self), sound: sound.id(), pos: Some(pos), volume, pitch: 0.0 }
-    }
-}
-
-impl Client {
-    /// Only this client hears it; `None` = not positioned (UI sounds).
-    pub fn play_sound(&self, sound: &crate::Sound, pos: Option<Vec3>, volume: f32) -> PlaySound {
-        PlaySound { to: Hearer::Client(*self), sound: sound.id(), pos, volume, pitch: 0.0 }
-    }
-}
-
-enum Hearer {
-    World(World),
-    Client(Client),
-}
-
-/// A sound about to play (`World::play_sound`, `Client::play_sound`).
+/// A sound about to play (`Output::play_sound`).
 pub struct PlaySound {
-    to: Hearer,
+    to: crate::out::Out,
     sound: u32,
     pos: Option<Vec3>,
     volume: f32,
@@ -623,6 +592,14 @@ pub struct PlaySound {
 }
 
 impl PlaySound {
+    pub(crate) fn new(to: crate::out::Out, sound: u32, pos: Option<Vec3>, volume: f32) -> PlaySound {
+        PlaySound { to, sound, pos, volume, pitch: 0.0 }
+    }
+    /// Who hears it, of the players on the server (those in its range unless said).
+    pub fn to(mut self, who: impl Into<crate::Who>) -> Self {
+        self.to.to(who.into());
+        self
+    }
     /// Playback speed (1 = as recorded, 2 an octave up) instead of one picked from the sound's
     /// range: a note block's `2f32.powf((key - 12) as f32 / 12.0)`.
     pub fn pitch(mut self, pitch: f32) -> Self {
@@ -637,10 +614,13 @@ impl Drop for PlaySound {
             .pos
             .as_ref()
             .map_or(std::ptr::null(), |p| p as *const Vec3);
+        if !self.to.here() {
+            return;
+        }
         unsafe {
             match self.to {
-                Hearer::World(w) => (host().play_sound)(w.raw(), self.sound, p, self.volume, self.pitch),
-                Hearer::Client(c) => (host().client_play_sound)(c.raw(), self.sound, p, self.volume, self.pitch),
+                crate::out::Out::World(w, who) => (host().play_sound)(w.raw(), who, self.sound, p, self.volume, self.pitch),
+                crate::out::Out::Client(c, _) => (host().client_play_sound)(c.raw(), self.sound, p, self.volume, self.pitch),
             }
         }
     }

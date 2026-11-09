@@ -17,7 +17,7 @@
 //! symmetry = opposite    # random: none, opposite (pairs opposite faces), all
 //! width = 2              # repeat
 //! height = 2
-//! blocks = base:stone #ores/*
+//! blocks = base:stone #ores/* !base:oak_log[axis=y]
 //! heights = 0-40 100-    # world y ranges
 //! biomes = !base:desert #cold
 //!
@@ -71,7 +71,8 @@ struct Rule {
     /// Bit per face direction.
     faces: u8,
     inner_seams: bool,
-    blocks: Vec<u32>,
+    /// The block states it is for, a bit each (`refs::compile`); empty: any.
+    blocks: Vec<u64>,
     heights: Vec<(i32, i32)>,
     biomes: Option<(bool, Vec<u64>)>,
     tiles: Vec<u32>,
@@ -419,14 +420,14 @@ pub fn load(assets: &Assets, c: &Content, looks: &Looks, mut names: Names) -> (C
             } else {
                 Vec::new()
             };
-            // References like anywhere else: names, `name[prop=value]`, `#tag`, `#pattern/*`.
-            let mut blocks = Vec::new();
-            for b in kv.get("blocks").map_or("", |v| *v).split_whitespace() {
-                match crate::refs::blocks(b, &c.block_names, &c.blocks, &c.components) {
-                    Ok(list) => blocks.extend(list),
-                    Err(e) => log::error!("{name}.ctm: blocks: {e}"),
-                }
-            }
+            // A matcher like anywhere else: names, `name[prop=value]`, `#tag`, `#pattern/*`, `!`.
+            let blocks = kv.get("blocks").map_or(Vec::new(), |v| {
+                crate::refs::compile(v, &c.block_names, &c.blocks, &c.components).unwrap_or_else(|e| {
+                    log::error!("{name}.ctm: blocks: {e}");
+                    // No block, rather than every block.
+                    vec![0]
+                })
+            });
             let biomes = kv.get("biomes").map(|v| {
                 let (invert, list) = v.strip_prefix('!').map_or((false, *v), |r| (true, r));
                 let mut set = vec![0u64; c.biomes.len() / 64 + 1];
@@ -485,7 +486,7 @@ pub fn load(assets: &Assets, c: &Content, looks: &Looks, mut names: Names) -> (C
         let r = &ctm.rules[rule];
         let name = &names.list[tex as usize];
         let on = c.states.iter().enumerate().find_map(|(st, s)| {
-            let hit = (r.blocks.is_empty() || r.blocks.contains(&s.block)) && off_cube(&looks.drawn(st as u32, s), tex, r.faces);
+            let hit = r.covers(st as u32) && off_cube(&looks.drawn(st as u32, s), tex, r.faces);
             hit.then(|| {
                 c.block_names
                     .iter()
@@ -536,6 +537,12 @@ pub fn load(assets: &Assets, c: &Content, looks: &Looks, mut names: Names) -> (C
     (ctm, extra)
 }
 
+impl Rule {
+    fn covers(&self, state: u32) -> bool {
+        self.blocks.is_empty() || crate::refs::has(&self.blocks, state)
+    }
+}
+
 impl Ctm {
     /// Works out what the rules mean for each block state.
     fn see_states(&mut self, c: &Content, looks: &Looks) {
@@ -569,7 +576,7 @@ impl Ctm {
                 for tex in d.on_face(dir) {
                     let &(start, len) = self.by_texture.get(tex as usize).unwrap_or(&(0, 0));
                     for rule in &self.rules[start as usize..(start + len) as usize] {
-                        if !rule.blocks.is_empty() && !rule.blocks.contains(&s.block) {
+                        if !rule.covers(st as u32) {
                             continue;
                         }
                         if rule.open {
@@ -583,10 +590,6 @@ impl Ctm {
             }
         }
     }
-}
-
-fn hash(x: i32, y: i32, z: i32, f: u32) -> u64 {
-    weft_noise::hash(f as u64, x as i64, y as i64, z as i64)
 }
 
 impl Ctm {
@@ -663,7 +666,7 @@ impl Ctm {
             pidx(x + r[0] * a + u[0] * b + extra[0], y + r[1] * a + u[1] * b + extra[1], z + r[2] * a + u[2] * b + extra[2])
         };
         for rule in &self.rules[rules] {
-            if rule.faces & (1 << dir) == 0 || (!rule.blocks.is_empty() && !rule.blocks.contains(&info.block)) {
+            if rule.faces & (1 << dir) == 0 || !rule.covers(s) {
                 continue;
             }
             if !rule.heights.is_empty()
@@ -745,7 +748,7 @@ impl Ctm {
                 }
                 Method::Random => {
                     let group = (dir as u32) / rule.symmetry as u32;
-                    rule.pick[(hash(world[0], world[1], world[2], group) >> 56) as usize] as usize
+                    rule.pick[(weft_noise::hash(group as u64, world[0] as i64, world[1] as i64, world[2] as i64) >> 56) as usize] as usize
                 }
                 Method::Repeat => {
                     let dot = |a: [i32; 3]| world[0] * a[0] + world[1] * a[1] + world[2] * a[2];

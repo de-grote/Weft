@@ -34,7 +34,7 @@ impl Screen for Multiplayer {
                                 crate::clipboard::set(&t);
                             }
                         });
-                        label(ui, cx, "multiplayer.your_port", &[Arg::Int(cx.settings.server_port() as i64)], "dim");
+                        label(ui, cx, "multiplayer.your_port", &[Arg::Int(crate::settings::server_port() as i64)], "dim");
                     } else {
                         button(ui, cx, "multiplayer.host", &[], 200.0, |c| c.requests.push(Request::Host));
                     }

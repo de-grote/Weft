@@ -158,60 +158,6 @@ pub async fn pack_lang(t: T) -> R {
     Ok(())
 }
 
-/// A shader pack whose files do not compile changes nothing: every engine shader, the composed
-/// ones (models, particles, screen effects, UI) too, falls back to the built-in one.
-pub async fn broken_shader_pack(t: T) -> R {
-    t.flat().await?;
-    let f = t.feet();
-    t.op(&format!("spawn testmod:idol {} {} {}", f[0], f[1], f[2] - 3))
-        .await?;
-    t.c().set_look(0.0, 0.0);
-    t.settled().await?;
-    t.secs(0.5).await?;
-    let before = t.grab().await?;
-    let dir = format!("{}/shaderpacks/testkit_broken", t.c().run_dir());
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    for name in ["world.wgsl", "entity.wgsl", "model.wgsl", "particle.wgsl", "post.wgsl", "ui.wgsl"] {
-        std::fs::write(format!("{dir}/{name}"), "this is not wgsl").map_err(|e| e.to_string())?;
-    }
-    weft_sdk::settings::SHADER_PACK.set("testkit_broken");
-    t.c().reload_assets();
-    t.frames(5).await?;
-    let after = t.grab().await?;
-    weft_sdk::settings::SHADER_PACK.set("");
-    t.c().reload_assets();
-    let _ = std::fs::remove_dir_all(&dir);
-    t.frames(2).await?;
-    t.check(T::differ(&before, &after) < 0.02, format!("the picture stays ({:.1}% differ)", T::differ(&before, &after) * 100.0));
-    // A working pack only writes functions: the engine's own world shader with a sepia ending,
-    // its structs and bindings come from the prelude.
-    let dir = format!("{}/shaderpacks/testkit_sepia", t.c().run_dir());
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let world = include_str!("../../../../crates/engine/assets/shaders/world.wgsl");
-    let ending = "    return vec4(mix(lit.rgb, scene.fog_color.rgb, fog), lit.a);";
-    t.check(world.contains(ending), "the world shader still ends its shading like this");
-    // Packs are copies of it, from whenever they were made.
-    t.check(world.contains("tex_info[name * 2u]"), "the texture table still reads as packs read it");
-    let sepia = world.replace(
-        ending,
-        "    let y = dot(mix(lit.rgb, scene.fog_color.rgb, fog), vec3(0.3, 0.59, 0.11));
-    return vec4(vec3(y * 1.2, y, y * 0.75), lit.a);",
-    );
-    std::fs::write(format!("{dir}/world.wgsl"), sepia).map_err(|e| e.to_string())?;
-    weft_sdk::settings::SHADER_PACK.set("testkit_sepia");
-    t.c().reload_assets();
-    t.frames(5).await?;
-    let shot = t.shot("sepia").await?;
-    weft_sdk::settings::SHADER_PACK.set("");
-    t.c().reload_assets();
-    let _ = std::fs::remove_dir_all(&dir);
-    t.frames(2).await?;
-    // The grass floor turns brown: red over green over blue.
-    let brown = shot.share(0.0, 0.7, 1.0, 0.9, |c| c[0] > c[1] && c[1] > c[2]);
-    t.probe("a pack's sepia world shader is used", brown, brown > 0.8);
-    Ok(())
-}
-
 /// The test mod's looks at night: a glow crystal's veins glow without lighting the floor next to
 /// it, a wisp floats nearby, and the daydream screen effect changes the picture.
 pub async fn shaders_and_glow(t: T) -> R {

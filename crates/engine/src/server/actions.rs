@@ -12,42 +12,14 @@ impl Server {
         }
     }
 
-    /// Items held long enough take effect; another item in hand ends it.
-    pub(super) fn finish_uses(&mut self, c: &'static Content) {
-        for pi in 0..self.players.len() {
-            let Some((item, done, slot)) = self.players[pi].using else { continue };
-            let held = self
-                .region(pi)
-                .map_or(ItemStack::EMPTY, |(r, id)| r.entities.inventory_slot(id, slot));
-            let selected = self
-                .region(pi)
-                .and_then(|(r, id)| r.entities.get(id).map(|e| e.selected));
-            let off = c.game.player_layout.off == Some(slot);
-            if held.item != item || held.is_empty() || (!off && selected != Some(slot)) {
-                self.stop_using(pi);
-            } else if self.tick >= done {
-                self.stop_using(pi);
-                self.use_in_hand(c, pi, slot, None, true);
-            }
-        }
-    }
-
-    fn stop_using(&mut self, pi: usize) {
-        self.players[pi].using = None;
-        self.players[pi].conn.send(ToClient::Using(None));
-        if let Some(e) = self.region(pi).and_then(|(r, id)| r.entities.get_mut(id)) {
-            e.using = (0, false);
-        }
-    }
-
     /// The hands to try, in order, for the player's right click.
     fn hands(&mut self, c: &'static Content, pi: usize) -> Vec<u32> {
         self.region(pi).map_or(Vec::new(), |(r, id)| {
-            let sel = r.entities.get(id).map_or(0, |e| e.selected);
+            let Some(e) = r.entities.get(id) else { return Vec::new() };
             r.entities
                 .inventories
                 .get(&id)
-                .map_or(Vec::new(), |i| crate::content::hands_in_order(c, i, sel))
+                .map_or(Vec::new(), |i| crate::content::hands_in_order(c, e.kind, i, e.selected))
         })
     }
 
@@ -64,9 +36,9 @@ impl Server {
         look: [f32; 3],
         hit: [f32; 3],
     ) -> bool {
-        let off_hand = c.game.player_layout.off == Some(slot);
         let Some((r, entity)) = self.region(pi) else { return false };
         let Some(e) = r.entities.get(entity) else { return false };
+        let off_hand = c.game.entities[e.kind as usize].off == Some(slot);
         let creative = e.mode.has(crate::tag_bits::game_mode::NO_COSTS);
         let no_place = e.mode.has(crate::tag_bits::game_mode::NO_PLACE);
         let held = r.entities.inventory_slot(entity, slot);
@@ -77,7 +49,7 @@ impl Server {
             .filter(|_| !held.is_empty() && !no_place)
         else {
             // Items used on a block (buckets) work on the world's blocks only, so far.
-            return self.use_in_hand(c, pi, slot, (frame == 0).then_some((pos, face)), false);
+            return self.use_in_hand(c, pi, slot, (frame == 0).then_some((pos, face)));
         };
         let placed = r.with_space(c, frame, |d, _| {
             let hit = hit.map(|v| v.clamp(0.0, 1.0));
@@ -94,7 +66,7 @@ impl Server {
         });
         // Where it can't be placed, it is used like any item (a seed's own use, a bucket of it).
         if !matches!(placed, Some(Some(()))) {
-            return self.use_in_hand(c, pi, slot, (frame == 0).then_some((pos, face)), false);
+            return self.use_in_hand(c, pi, slot, (frame == 0).then_some((pos, face)));
         }
         if !creative {
             r.entities
@@ -108,69 +80,11 @@ impl Server {
         true
     }
 
-    /// Uses the item in `slot` on what was clicked: true if it did something, or started to.
-    fn use_in_hand(&mut self, c: &'static Content, pi: usize, slot: u32, target: Option<(IVec3, u8)>, finishing: bool) -> bool {
-        let off_hand = c.game.player_layout.off == Some(slot);
-        let Some((r, entity)) = self.region(pi) else { return false };
-        let held = r.entities.inventory_slot(entity, slot);
-        let Some(def) = c.items.get(held.item as usize) else { return false };
-        let (pos, face) = target.unwrap_or((IVec3::ZERO, 0));
-        let state = target.and_then(|_| r.get(pos)).unwrap_or(0);
-        let mut q = abi::Query { entity, item: held.item, pos: pos.to_array().into(), state, ..abi::Query::DEFAULT };
-        if !r.ask(c, abi::action::USE_ITEM, &mut q) {
-            return false;
-        }
-        // An item that takes time starts here, and comes back through this when it is done.
-        let ticks = crate::content::use_ticks(c, &held);
-        if ticks > 0 && !finishing {
-            if let Some(e) = r.entities.get_mut(entity) {
-                e.using = (ticks, off_hand);
-            }
-            let done = self.tick + ticks as u64;
-            self.players[pi].using = Some((held.item, done, slot));
-            self.players[pi]
-                .conn
-                .send(ToClient::Using(Some((ticks, off_hand))));
-            return true;
-        }
-        let Some((r, entity)) = self.region(pi) else { return false };
-        let mut used = false;
-        if def.on_use.is_none() {
-            if let Some(after) = r.use_container(c, entity, held) {
-                if after != held {
-                    r.entities.set_slot(entity, slot, after);
-                    used = true;
-                }
-            }
-        } else if let Some((by, cb)) = def.on_use {
-            let a = r.call(by, cb, |w| abi::ItemUseArgs {
-                world: w,
-                player: entity,
-                stack: held,
-                slot,
-                pos: pos.to_array().into(),
-                face: face as u32,
-                has_target: target.is_some() as u32,
-                handled: 0,
-            });
-            if a.handled != 0 && a.stack != held && crate::host::known_item("on_use", &a.stack) {
-                r.entities.set_slot(entity, slot, a.stack);
-            }
-            used = a.handled != 0;
-        }
-        if used {
-            r.emit_engine(
-                c,
-                abi::action::USE_ITEM,
-                &abi::ItemUsed { player: entity, stack: held, pos: pos.to_array().into(), has_target: target.is_some() as u32 },
-            );
-            r.events
-                .push(DimEvent::EntitySwing { id: entity, off: off_hand });
-            self.players[pi]
-                .conn
-                .send(ToClient::Swing { used_item: true, off_hand });
-        }
-        used
+    /// Player `pi` uses the item in `slot` on what was clicked: true if it did something, or
+    /// started to.
+    fn use_in_hand(&mut self, c: &'static Content, pi: usize, slot: u32, target: Option<(IVec3, u8)>) -> bool {
+        self.region(pi)
+            .is_some_and(|(r, entity)| r.use_in_hand(c, entity, slot, target, false))
     }
 
     /// The region holding player `pi`'s entity, with the entity id.
@@ -214,27 +128,25 @@ impl Server {
         match msg {
             ToServer::Join { name, key } => self.join(c, pi, name, key),
             ToServer::StartBreak { pos, part, frame } => {
-                let Some((r, _)) = self.region(pi) else { return };
-                let (frame, pos) = r.landed_as(frame, pos);
-                self.players[pi].mining = Some(Mining { frame, pos, part, progress: 0.0 });
                 let Some((r, entity)) = self.region(pi) else { return };
-                let held = r.entities.held(entity).item;
+                let (frame, pos) = r.landed_as(frame, pos);
                 // Said now, or it would mine all that time for nothing.
-                let refused = r.with_space(c, frame, |d, _| {
-                    d.get(pos).is_some() && {
-                        let state = d.aimed_part(c, pos, part);
-                        !d.may_break(c, pos, state, held, entity)
-                    }
-                });
-                if refused == Some(true) {
-                    self.players[pi].mining = None;
+                if !r.start_mining(c, entity, frame, pos, part) {
                     self.players[pi]
                         .conn
                         .send(ToClient::BreakRefused { frame, pos });
                 }
             }
-            ToServer::StopBreak => self.players[pi].mining = None,
-            ToServer::StopUsing => self.stop_using(pi),
+            ToServer::StopBreak => {
+                if let Some((r, id)) = self.region(pi) {
+                    r.stop_mining(id);
+                }
+            }
+            ToServer::StopUsing => {
+                if let Some((r, entity)) = self.region(pi) {
+                    r.stop_using(entity);
+                }
+            }
             ToServer::SwapHands => {
                 let Some(off) = c.game.player_layout.off else { return };
                 let Some((r, entity)) = self.region(pi) else { return };
@@ -288,7 +200,6 @@ impl Server {
                 let here = crate::physics::around(c, &*r.space, pos, e.height(c));
                 let splash = entity::splashes(e.in_liquid, here.in_liquid, -walked.y);
                 let fell = entity::track_fall(&mut e.fall, walked.y, on_ground, here.in_liquid || here.climbing);
-                let land = fell.and_then(|f| entity::fall_damage(&c.game.entities[e.kind as usize], f));
                 e.sprinting = sprint;
                 e.flying = flying;
                 e.jumped |= jumped;
@@ -300,7 +211,7 @@ impl Server {
                 e.on_ground = on_ground;
                 e.in_liquid = here.in_liquid;
                 r.fall_effects(c, entity, fell, splash);
-                if let Some(amount) = land {
+                if let Some(amount) = fell.and_then(|f| r.fall_damage(c, entity, f)) {
                     r.damage(c, entity, amount, 0, abi::damage_cause::FALL);
                 }
             }
@@ -334,49 +245,20 @@ impl Server {
             }
 
             ToServer::Break { pos, part, face, hit, frame } => {
-                let Some((r, _)) = self.region(pi) else { return };
-                let (frame, pos) = r.landed_as(frame, pos);
-                let mining = self.players[pi].mining.take();
                 let Some((r, entity)) = self.region(pi) else { return };
-                let Some(e) = r.entities.get(entity) else { return };
-                let (eye, sel, creative) = (e.pos + DVec3::Y * e.eye(c), e.selected, e.mode.has(crate::tag_bits::game_mode::INSTANT_BREAK));
-                let no_break = e.mode.has(crate::tag_bits::game_mode::NO_BREAK);
-                let reach = r.block_reach(c, entity);
+                let (frame, pos) = r.landed_as(frame, pos);
+                let mining = r.entities.get_mut(entity).and_then(|e| e.mining.take());
                 let rate = r.mining_rate_of(c, entity, frame, pos, part);
                 let progress = mining
                     .filter(|m| m.frame == frame && m.pos == pos && m.part == part)
                     .map_or(0.0, |m| m.progress);
-                let mut refused = false;
-                let held = r.entities.held(entity);
-                let worn = r.with_space(c, frame, |d, o| {
-                    // Done by what the server added up, with room for lag: the client's word is
-                    // only that it is, and a modified one could say anything.
-                    let part = d.aimed_part(c, pos, part);
-                    let too_soon = rate < 1.0 && progress + 2.0 * rate < 0.7;
-                    let keeps = (creative && c.no_creative_break(held.item)) || no_break;
-                    let free = c
-                        .states
-                        .get(part as usize)
-                        .is_some_and(|s| s.hardness <= 0.0);
-                    let done = within(o.to_local(eye), pos, reach)
-                        && !too_soon
-                        && !keeps
-                        && d.break_piece(c, pos, part, face, hit, held, entity, !creative);
-                    // The client already shows air: a refused break sends the block back.
-                    if !done && d.get(pos).is_some() {
-                        d.resend_cell(pos);
-                        refused = true;
-                    }
-                    done && !free
-                });
-                if refused {
+                // Done by what the server added up, with room for lag: the client's word is only
+                // that it is, and a modified one could say anything.
+                let too_soon = rate < 1.0 && progress + 2.0 * rate < 0.7;
+                if r.break_mined(c, entity, frame, pos, part, face, hit, too_soon) {
                     self.players[pi]
                         .conn
                         .send(ToClient::BreakRefused { frame, pos });
-                }
-                let Some((r, _)) = self.region(pi) else { return };
-                if worn == Some(true) && !r.entities.held(entity).is_empty() {
-                    wear(c, r, entity, sel, 1);
                 }
             }
 
@@ -415,7 +297,7 @@ impl Server {
 
             ToServer::UseItem { target } => {
                 for slot in self.hands(c, pi) {
-                    if self.use_in_hand(c, pi, slot, target, false) {
+                    if self.use_in_hand(c, pi, slot, target) {
                         break;
                     }
                 }
@@ -572,6 +454,10 @@ impl Server {
                 self.change_dim(c, pi, c.spawn_dim, spawn);
                 if let Some((r, entity)) = self.region(pi) {
                     r.entities.reset_components(c, entity);
+                    // A death ends every effect, as vanilla's.
+                    let effect = c.game.fields.effect;
+                    r.entities.comps.insert((entity, effect), Box::default());
+                    r.entities.dirty_comp.insert((entity, effect));
                     // The game mode's modifiers went with the rest.
                     r.keep_sources(c, entity);
                     // After the components: modifiers are gone with them. Sent as any change.
@@ -703,7 +589,7 @@ pub(crate) fn in_reach(c: &Content, d: &Dim, me: &Entity, target: &Entity) -> bo
     let eye = me.pos + DVec3::Y * me.eye(c);
     let b = target.aabb(c);
     let slack = if me.player { ENTITY_SLACK } else { 0.0 };
-    let reach = d.attribute(c, me.id, extend::ENTITY_REACH, false) + slack;
+    let reach = d.attribute(c, me.id, crate::registry::attr::ENTITY_REACH, false) + slack;
     (eye.clamp(b.min, b.max) - eye).length_squared() <= reach * reach
 }
 
@@ -726,5 +612,260 @@ pub(super) fn wear(c: &Content, d: &mut Dim, player: u64, slot: u32, amount: u32
     let next = crate::stack::worn(c, stack, amount);
     if next != stack {
         d.entities.set_slot(player, slot, next);
+    }
+}
+
+impl Dim {
+    /// `entity` uses the item in `slot` on what it clicked (`target`), or finishes using one that
+    /// takes time: true if it did something, or started to. A player's right click and a mob's
+    /// `World::use_item` alike.
+    pub fn use_in_hand(&mut self, c: &'static Content, entity: u64, slot: u32, target: Option<(IVec3, u8)>, finishing: bool) -> bool {
+        let Some(e) = self.entities.get(entity) else { return false };
+        let off_hand = c.game.entities[e.kind as usize].off == Some(slot);
+        let held = self.entities.inventory_slot(entity, slot);
+        let Some(def) = c.items.get(held.item as usize) else { return false };
+        let (pos, face) = target.unwrap_or((IVec3::ZERO, 0));
+        let state = target.and_then(|_| self.get(pos)).unwrap_or(0);
+        let mut q = abi::Query { entity, item: held.item, pos: pos.to_array().into(), state, ..abi::Query::DEFAULT };
+        if !self.ask(c, abi::action::USE_ITEM, &mut q) {
+            return false;
+        }
+        // An item that takes time starts here, and comes back through this when it is done.
+        let ticks = crate::content::use_ticks(c, &held);
+        if ticks > 0 && !finishing {
+            let Some(e) = self.entities.get_mut(entity) else { return false };
+            // Asked again while at it (an AI asking every tick), it goes on.
+            if e.use_done
+                .is_some_and(|(item, _, s)| item == held.item && s == slot)
+            {
+                return true;
+            }
+            (e.using, e.use_done) = ((ticks, off_hand), Some((held.item, ticks, slot)));
+            self.events
+                .push(DimEvent::Using { entity, using: Some((ticks, off_hand)) });
+            return true;
+        }
+        let mut used = false;
+        let gifts = c
+            .components
+            .id(abi::comp::GIVES_EFFECTS)
+            .and_then(|id| c.components.bytes(crate::components::ITEM, held.item, id))
+            .and_then(abi::data::from_bytes::<Vec<abi::EffectGift>>);
+        let give = |d: &mut Dim, gifts: &[abi::EffectGift]| {
+            for g in gifts {
+                if let Some(&effect) = c.game.entity_effect_names.get(&g.effect) {
+                    d.give_effect(c, entity, effect, g.level, g.ticks);
+                }
+            }
+        };
+        if let Some(gifts) = gifts.as_ref().filter(|_| def.on_use.is_none()) {
+            give(self, gifts);
+            // What is left of it: its remainder (the potion's bottle), else one fewer.
+            let creative = self
+                .entities
+                .get(entity)
+                .is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::NO_COSTS));
+            if !creative {
+                let rest = c
+                    .components
+                    .id(abi::comp::REMAINDER)
+                    .and_then(|id| {
+                        c.components
+                            .get::<u32>(crate::components::ITEM, held.item, id)
+                    })
+                    .filter(|&r| r != 0);
+                let after = match rest {
+                    Some(r) if held.count <= 1 => ItemStack::new(r, 1),
+                    Some(r) => {
+                        let left = self.entities.insert_item(c, entity, ItemStack::new(r, 1));
+                        if !left.is_empty() {
+                            self.spawn_item(c, self.entities.get(entity).map_or(DVec3::ZERO, |e| e.pos), left);
+                        }
+                        ItemStack { count: held.count - 1, ..held }
+                    }
+                    None => ItemStack { count: held.count - 1, ..held },
+                };
+                self.entities
+                    .set_slot(entity, slot, if after.count == 0 { ItemStack::EMPTY } else { after });
+            }
+            used = true;
+        } else if def.on_use.is_none() {
+            if let Some(after) = self.use_container(c, entity, held) {
+                if after != held {
+                    self.entities.set_slot(entity, slot, after);
+                    used = true;
+                }
+            }
+        } else if let Some((by, cb)) = def.on_use {
+            let a = self.call(by, cb, |w| abi::ItemUseArgs {
+                world: w,
+                entity,
+                stack: held,
+                slot,
+                pos: pos.to_array().into(),
+                face: face as u32,
+                has_target: target.is_some() as u32,
+                handled: 0,
+            });
+            if a.handled != 0 && a.stack != held && crate::host::known_item("on_use", &a.stack) {
+                self.entities.set_slot(entity, slot, a.stack);
+            }
+            used = a.handled != 0;
+            // Its own use (eating) and what it gives besides: a golden apple.
+            if let Some(gifts) = gifts.as_ref().filter(|_| used) {
+                give(self, gifts);
+            }
+        }
+        if used {
+            self.emit_engine(
+                c,
+                abi::action::USE_ITEM,
+                &abi::ItemUsed { entity, stack: held, pos: pos.to_array().into(), has_target: target.is_some() as u32 },
+            );
+            self.events
+                .push(DimEvent::EntitySwing { id: entity, off: off_hand });
+            self.events.push(DimEvent::Used { entity, off: off_hand });
+        }
+        used
+    }
+
+    /// One tick of using items: held long enough they take effect; another item in hand ends
+    /// their use. `players_only` while the world is frozen: players still act.
+    pub fn finish_uses(&mut self, c: &'static Content, players_only: bool) {
+        let using: Vec<(u64, u32, u32, u32, u32, u32)> = self
+            .entities
+            .list
+            .iter()
+            .filter(|e| !e.removed && (e.player || !players_only))
+            .filter_map(|e| {
+                e.use_done
+                    .map(|(item, left, slot)| (e.id, item, left, slot, e.selected, e.kind))
+            })
+            .collect();
+        for (id, item, left, slot, selected, kind) in using {
+            let held = self.entities.inventory_slot(id, slot);
+            let off = c.game.entities[kind as usize].off == Some(slot);
+            if held.item != item || held.is_empty() || (!off && selected != slot) {
+                self.stop_using(id);
+            } else if left <= 1 {
+                self.stop_using(id);
+                self.use_in_hand(c, id, slot, None, true);
+            } else if let Some(e) = self.entities.get_mut(id) {
+                e.use_done = Some((item, left - 1, slot));
+            }
+        }
+    }
+
+    /// `id` lets go of what it was using.
+    pub fn stop_using(&mut self, id: u64) {
+        let Some(e) = self.entities.get_mut(id) else { return };
+        let was = e.use_done.take().is_some();
+        e.using = (0, false);
+        if was {
+            self.events
+                .push(DimEvent::Using { entity: id, using: None });
+        }
+    }
+}
+
+impl Dim {
+    /// `entity` starts breaking `part` of the cell at `pos` in `frame` (`u32::MAX`: what it
+    /// stands for), a player holding the button or a mob (`World::start_mining`). False when
+    /// it may not (`actions::BREAK_BLOCK`), said now so it doesn't mine all that time for nothing.
+    pub fn start_mining(&mut self, c: &'static Content, entity: u64, frame: u64, pos: IVec3, part: u32) -> bool {
+        let held = self.entities.held(entity).item;
+        let aimed = self.with_space(c, frame, |d, _| {
+            let state = d.aimed_part(c, pos, part);
+            (d.get(pos).is_none() || d.may_break(c, pos, state, held, entity)).then_some(state)
+        });
+        let Some(e) = self.entities.get_mut(entity) else { return false };
+        e.mining = match aimed {
+            Some(None) => None,
+            // What it stands for, as cracks are drawn by.
+            Some(Some(state)) if part == u32::MAX => Some(super::entity::Mining { frame, pos, part: state, progress: 0.0 }),
+            _ => Some(super::entity::Mining { frame, pos, part, progress: 0.0 }),
+        };
+        e.mining.is_some()
+    }
+
+    pub fn stop_mining(&mut self, id: u64) {
+        if let Some(e) = self.entities.get_mut(id) {
+            e.mining = None;
+        }
+    }
+
+    /// One tick of mining, by what each one holds and where it is now. A player's client says
+    /// when it is done (`ToServer::Break`, checked against this); anything else breaks the block
+    /// when it gets there. `players_only` while the world is frozen: players still act.
+    pub fn mine(&mut self, c: &'static Content, players_only: bool) {
+        let mining: Vec<(u64, super::entity::Mining, bool)> = self
+            .entities
+            .list
+            .iter()
+            .filter(|e| !e.removed && (e.player || !players_only))
+            .filter_map(|e| e.mining.map(|m| (e.id, m, e.player)))
+            .collect();
+        for (id, m, player) in mining {
+            let progress = (m.progress + self.mining_rate_of(c, id, m.frame, m.pos, m.part)).min(1.0);
+            let Some(e) = self.entities.get_mut(id) else { continue };
+            e.mining = Some(super::entity::Mining { progress, ..m });
+            if player || progress < 1.0 {
+                continue;
+            }
+            e.mining = None;
+            // The face toward it, its middle hit.
+            let eye = e.pos + DVec3::Y * e.eye(c);
+            let to = self
+                .in_frame(m.frame, |d| d.place.to_local(eye))
+                .unwrap_or(eye)
+                - (m.pos.as_dvec3() + DVec3::splat(0.5));
+            let axis = to.abs().max_position();
+            let face = (axis * 2 + (to[axis] > 0.0) as usize) as u8;
+            self.break_mined(c, id, m.frame, m.pos, m.part, face, [0.5; 3], false);
+        }
+    }
+
+    /// `entity` breaks what it mined: within its reach, unless its mode keeps blocks, what it
+    /// holds wearing for a block that took work. `too_soon`: refused anyway (a client saying it is
+    /// done before the server's count does). True when a block stays that it didn't break, which
+    /// is sent back to who already shows it gone.
+    #[allow(clippy::too_many_arguments)]
+    pub fn break_mined(
+        &mut self,
+        c: &'static Content,
+        entity: u64,
+        frame: u64,
+        pos: IVec3,
+        part: u32,
+        face: u8,
+        hit: [f32; 3],
+        too_soon: bool,
+    ) -> bool {
+        let Some(e) = self.entities.get(entity) else { return false };
+        let (eye, sel, creative) = (e.pos + DVec3::Y * e.eye(c), e.selected, e.mode.has(crate::tag_bits::game_mode::INSTANT_BREAK));
+        let no_break = e.mode.has(crate::tag_bits::game_mode::NO_BREAK);
+        let (reach, held) = (self.block_reach(c, entity), self.entities.held(entity));
+        let mut refused = false;
+        let worn = self.with_space(c, frame, |d, o| {
+            let part = d.aimed_part(c, pos, part);
+            let keeps = (creative && c.no_creative_break(held.item)) || no_break;
+            let free = c
+                .states
+                .get(part as usize)
+                .is_some_and(|s| s.hardness <= 0.0);
+            let done = within(o.to_local(eye), pos, reach)
+                && !too_soon
+                && !keeps
+                && d.break_piece(c, pos, part, face, hit, held, entity, !creative);
+            if !done && d.get(pos).is_some() {
+                d.resend_cell(pos);
+                refused = true;
+            }
+            done && !free
+        });
+        if worn == Some(true) && !held.is_empty() {
+            wear(c, self, entity, sel, 1);
+        }
+        refused
     }
 }

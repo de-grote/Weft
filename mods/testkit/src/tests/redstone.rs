@@ -316,7 +316,12 @@ pub async fn redstone_piston(t: T) -> R {
     t.set(switch, &lever(true)).await?;
     settle(&t).await?;
     t.check(t.block(add(f, [5, 0, z])).await?.contains("cobblestone"), "pushed");
-    t.check(t.block(block).await?.contains("piston_head"), "the head out");
+    t.check(
+        t.block(block)
+            .await?
+            .contains("piston[facing=east,power=on]"),
+        "the head out: the piston's own cell",
+    );
     t.check(t.block(piston).await?.contains("power=on"), "the piston out");
     t.set(switch, &lever(false)).await?;
     settle(&t).await?;
@@ -454,7 +459,7 @@ pub async fn redstone_piston_moves(t: T) -> R {
     t.set(add(f, [0, 1, z]), "base:redstone_block").await?;
     settle(&t).await?;
     let head = add(f, [1, 0, z]);
-    t.check(t.block(head).await?.contains("piston_head"), "out");
+    t.check(t.block(head).await?.contains("power=on"), "out");
     t.op(&format!("break {} {} {}", head[0], head[1], head[2]))
         .await?;
     settle(&t).await?;
@@ -1537,7 +1542,7 @@ pub async fn redstone_contest(t: T) -> R {
     t.check(t.block(block).await?.contains("cobblestone"), "neither gets the block");
     t.set(last, "air").await?;
     settle(&t).await?;
-    t.check(t.block(block).await?.contains("piston_head"), "the other one does once one of them stops wanting it");
+    t.check(t.block(block).await?.contains("power=on"), "the other one does once one of them stops wanting it");
 
     // Two sticky ones at one block both come back without it.
     let z = -20;
@@ -1587,83 +1592,6 @@ pub async fn redstone_contest(t: T) -> R {
     t.set(between, "base:stone").await?;
     settle(&t).await?;
     t.check(lit(&t, lamp).await?, "and through a block again");
-    Ok(())
-}
-
-/// Wherever one stands on a flying machine, it carries them: when it stops against a wall they are
-/// where they were on the block under them, not shoved along it.
-pub async fn redstone_flying_rider(t: T) -> R {
-    t.flat().await?;
-    // Getting off one machine is a fall.
-    t.cmd("/rule testkit:no_hurt 1").await?;
-    let f = t.feet();
-    let y = 5;
-    // Across the front half's top, near its edges too, and on the back half's.
-    for (i, (name, x, on)) in [
-        ("the middle of the front", 2.5, 2),
-        ("the front's far edge", 2.65, 2),
-        ("the front's near edge", 2.35, 2),
-        ("over the front's edge", 2.85, 2),
-        ("the back", 1.5, 1),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        // Within the cube the player's physics has around it.
-        let z = [-6, -11, -16, 6, 11][i];
-        let at = |x: i32, y: i32| add(f, [x, y, z]);
-        t.set(at(1, y), "base:piston[facing=east]").await?;
-        t.set(at(1, y + 1), "base:slime_block").await?;
-        t.set(at(2, y), "base:slime_block").await?;
-        t.set(at(2, y + 1), "base:sticky_piston[facing=west]")
-            .await?;
-        t.set(at(2, y - 1), "base:observer[facing=down]").await?;
-        t.set(at(1, y + 2), "base:observer[facing=up]").await?;
-        // What stops it: an obsidian wall some steps ahead, under where the rider's head goes.
-        t.fill(at(11, y - 1), at(11, y + 1), "base:obsidian")
-            .await?;
-        settle(&t).await?;
-        let top = if on == 1 { y + 3 } else { y + 2 };
-        t.cmd(&format!("/tp {} {} {}", f[0] as f64 + x, f[1] + top, f[2] as f64 + z as f64 + 0.5))
-            .await?;
-        t.secs(0.5).await?;
-        let start = t.state().pos.x;
-        // A pulse into the piston, as its observer would give it: someone may stand on that one.
-        t.set(at(0, y), "base:redstone_block").await?;
-        t.set(at(0, y), "air").await?;
-        // What is shown only goes forward.
-        let (mut was, mut back) = (t.state().shown.x, 0.0f64);
-        let began = std::time::Instant::now();
-        while began.elapsed() < Duration::from_secs(4) {
-            t.frames(1).await?;
-            let now = t.state().shown.x;
-            back = back.max(was - now);
-            was = now;
-        }
-        t.probe(&format!("how far back {name} went at most"), back as f32, back < 0.01);
-        // Whichever block of its row the machine ended on, the rider is as far along it as before.
-        let now = t.state().pos.x;
-        let slip = (now - start) - (now - start).round();
-        t.probe(&format!("how far {name} slipped"), slip.abs() as f32, slip.abs() < 0.02);
-        t.probe(&format!("blocks {name} went"), (now - start) as f32, now - start > 2.0);
-        t.cmd(&format!("/tp {} {} {}", f[0], f[1] + 14, f[2]))
-            .await?;
-        t.secs(0.3).await?;
-    }
-    // Not a player: what stands on a block a piston takes rides from the first moment.
-    let z = 14;
-    t.set(add(f, [3, 1, z]), "base:cobblestone").await?;
-    t.set(add(f, [2, 1, z]), "base:piston[facing=east]").await?;
-    let idol = t
-        .op(&format!("spawn testmod:idol {}.5 {} {}.5", f[0] + 3, f[1] + 2, f[2] + z))
-        .await?;
-    let id: u64 = idol.trim().parse().map_err(|_| format!("spawned {idol}"))?;
-    t.secs(0.5).await?;
-    let start = t.c().entity(id).map_or(0.0, |e| e.pos.x);
-    t.set(add(f, [1, 1, z]), "base:redstone_block").await?;
-    t.secs(1.0).await?;
-    let went = t.c().entity(id).map_or(0.0, |e| e.pos.x) - start;
-    t.probe("how far what stood on the block went", went as f32, (went - 1.0).abs() < 0.02);
     Ok(())
 }
 

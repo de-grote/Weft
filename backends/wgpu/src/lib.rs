@@ -780,16 +780,13 @@ impl Backend for WgpuBackend {
     }
 
     fn set_vsync(&mut self, vsync: bool) {
-        let modes = &self.present_modes;
-        let mode = if vsync {
-            wgpu::PresentMode::Fifo
-        } else if modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else if modes.contains(&wgpu::PresentMode::Immediate) {
-            wgpu::PresentMode::Immediate
-        } else {
-            wgpu::PresentMode::Fifo
-        };
+        // Off is as many frames as come: mailbox caps them at the refresh rate on some drivers.
+        use wgpu::PresentMode as P;
+        let want = if vsync { [P::Fifo; 2] } else { [P::Immediate, P::Mailbox] };
+        let mode = want
+            .into_iter()
+            .find(|m| self.present_modes.contains(m))
+            .unwrap_or(P::Fifo);
         if self.config.present_mode != mode {
             self.config.present_mode = mode;
             self.dirty_surface = true;

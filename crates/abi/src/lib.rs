@@ -582,6 +582,8 @@ pub mod comp {
         pub const NO_KNOCKBACK: &str = "damage.no_knockback";
         /// No hurt sound.
         pub const SILENT: &str = "damage.silent";
+        /// Never kills: what it would take below half a heart it leaves (poison).
+        pub const NOT_LETHAL: &str = "damage.not_lethal";
         pub const DEATH_MESSAGE: &str = "damage.death_message";
         pub const DEATH_MESSAGE_BY: &str = "damage.death_message_by";
     }
@@ -597,8 +599,6 @@ pub mod comp {
         pub const NO_PLACE: &str = "game_mode.no_place";
         /// Nothing used up: placed blocks, poured buckets, wear; picking a block gives a stack.
         pub const NO_COSTS: &str = "game_mode.no_costs";
-        /// No damage, hunger or air (mods read it as `World::outside_survival`).
-        pub const INVULNERABLE: &str = "game_mode.invulnerable";
         /// Always flies.
         pub const ALWAYS_FLY: &str = "game_mode.always_fly";
         /// Goes through blocks.
@@ -658,8 +658,25 @@ pub mod comp {
     }
 
     /// An entity effect's `SHADER` (`str`, `shaders/entity_effect/<name>.wgsl`, its own name by
-    /// default); a condition's `CALL` (`callback`, `ConditionArgs`).
+    /// default, nothing drawn where that file isn't), `HAZARDS` (`[Hazard]`, `hazard_at::SELF`:
+    /// poison), `MODIFIERS` (`[Modifier]`: speed) and `LIGHT` while it is on; modifiers and hazards
+    /// times its level unless some are given for a level (then those of the highest level up to
+    /// it). A status effect, one its entity's player sees, has an `ICON`
+    /// (`str`, a texture) and a `COLOR` (`u32`, `0xRRGGBB`, of the swirls around who has it, none
+    /// without), tags `BENEFICIAL` or `HARMFUL`, and `INSTANT` for one that acts once when given
+    /// (healing) and doesn't stay. `SCREEN` (`str`, `shaders/post/<name>.wgsl`) is laid over
+    /// what its player sees while it has it (night vision), its strength fading the last second;
+    /// `HIDES` keeps its entity from being drawn for others (invisibility). A condition's `CALL`
+    /// (`callback`, `ConditionArgs`).
     pub const ENTITY_EFFECT_SHADER: &str = "entity_effect.shader";
+    pub const ENTITY_EFFECT_HAZARDS: &str = "entity_effect.hazards";
+    pub const ENTITY_EFFECT_ICON: &str = "entity_effect.icon";
+    pub const ENTITY_EFFECT_COLOR: &str = "entity_effect.color";
+    pub const ENTITY_EFFECT_BENEFICIAL: &str = "entity_effect.beneficial";
+    pub const ENTITY_EFFECT_HARMFUL: &str = "entity_effect.harmful";
+    pub const ENTITY_EFFECT_INSTANT: &str = "entity_effect.instant";
+    pub const ENTITY_EFFECT_SCREEN: &str = "entity_effect.screen";
+    pub const ENTITY_EFFECT_HIDES: &str = "entity_effect.hides";
     pub const CONDITION_CALL: &str = "condition.call";
 
     /// A sound event's: `FILES` (`[str]`, `sounds/<name>.ogg` or `.wav`, one picked at random),
@@ -724,7 +741,12 @@ pub mod comp {
     /// A setting's, shown as `config.<ns>.<key>` (and `.tooltip`) from the language files: `KIND`
     /// (`u32`, `config_kind`, `BOOL`), `DEFAULT` (`f64`, 0), `RANGE` (`[f64;2]`, 0..1) and `STEP`
     /// (`f64`, 0 any) of numbers, `CHOICES` (`[str]`), `SCOPE` (`u32`, `config_scope`, `CLIENT`),
-    /// `TEXT` (`str`, the default of a text setting), tag `RESTART_REQUIRED`.
+    /// `TEXT` (`str`, the default of a text setting), `PAGE` (`str`, the settings page it is on:
+    /// `core:settings`, `core:chat_settings`, `core:sound` or a mod's own, titled `page.<ns>.<name>`;
+    /// none: its mod's page), `ORDER` (`i32`, lower first, then by name, 0), tags
+    /// `RESTART_REQUIRED`, `PERCENT` (shown times 100). Its value shows as `config.<ns>.<key>.<value>`
+    /// where there is one (a choice, a number with a name of its own), else through
+    /// `config.<ns>.<key>.value` (`{0} cubes`).
     pub mod config {
         pub const KIND: &str = "config.kind";
         pub const DEFAULT: &str = "config.default";
@@ -735,6 +757,9 @@ pub mod comp {
         pub const TEXT: &str = "config.text";
         /// Takes effect after a restart; the settings screen says so.
         pub const RESTART_REQUIRED: &str = "config.restart_required";
+        pub const PERCENT: &str = "config.percent";
+        pub const PAGE: &str = "config.page";
+        pub const ORDER: &str = "config.order";
     }
 
     /// An equipment slot's: `COVERS` (`[str]`, bones what is worn there covers; a name with a role,
@@ -770,8 +795,8 @@ pub mod comp {
     pub mod attribute {
         pub const DEFAULT: &str = "attribute.default";
         pub const RANGE: &str = "attribute.range";
-        /// Tag: players' base of it is a world rule named like it (`/rule`), `DEFAULT` and
-        /// `RANGE` its own; `/attribute` sets one player's apart.
+        /// Tag: the base of it for kinds that don't set their own is a world rule named like it
+        /// (`/rule`), `DEFAULT` and `RANGE` its own; `/attribute` sets one entity's apart.
         pub const RULE: &str = "attribute.rule";
     }
 
@@ -783,8 +808,14 @@ pub mod comp {
     pub const SOUND_CATEGORY_WORLD: &str = "sound_category.world";
     pub const TINT_KIND_DEFAULT: &str = "tint_kind.default";
     pub const KEY_DEFAULT: &str = "key.default";
-    /// Attribute modifiers (`[Modifier]`) of a game mode, an item, a pose or an entity kind.
+    /// Attribute modifiers (`[Modifier]`) of a game mode, an item, a pose, an entity kind or
+    /// an entity effect.
     pub const MODIFIERS: &str = "modifiers";
+    /// A player's own, for its client: game mode (`u32` id), permission level (`u32`), every
+    /// attribute's value (`f32` by id).
+    pub const GAME_MODE: &str = "core:game_mode";
+    pub const PERMISSION: &str = "core:permission";
+    pub const ATTRIBUTES: &str = "core:attributes";
 
     /// A key's contexts, tags of its entry: where it acts. Two keys on one binding conflict
     /// only where their contexts meet; a key with none acts wherever the world has the input
@@ -912,8 +943,8 @@ pub mod comp {
     /// of key characters of a shaped one) with `KEYS` (`[RecipeKey]`), `INPUTS` (`[str]`, of a
     /// shapeless or processing one: item names or `#tags`, a liquid by its name) with `AMOUNTS`
     /// (`[u32]`, of each, millibuckets for liquids, 1), `OUTPUT` (`str`) and `COUNT` (`u32`, 1),
-    /// `TIME` (`u32`, ticks, the kind says what they mean, 0), `OUTPUTS` (`[RecipeOutput]`, more
-    /// results), tag `HIDDEN` (works, the recipe viewer doesn't list it). Any other component is
+    /// `TIME` (`u32`, ticks, the kind says what they mean, 0), `OUTPUTS` (`[LootPool]`, more
+    /// results, rolled as loot is: a 5% one is a pool of it and nothing by weight), tag `HIDDEN` (works, the recipe viewer doesn't list it). Any other component is
     /// data it carries for what makes it (energy per tick).
     pub mod recipe {
         pub const KIND: &str = "recipe.kind";
@@ -948,7 +979,8 @@ pub mod comp {
     }
 
     /// An ore's (`entry_kind::ORE`), scattered after the dimension's generator: `VEINS` (`u32`,
-    /// started per cube, 4), `SIZE` (`u32`, blocks per vein, 8), `SHAPE` (`VeinShape`, a walk),
+    /// started per cube, 4), `SIZE` (`u32`, blocks per vein, 8), `SHAPE` (`VeinShape`, a walk;
+    /// `vein_shape::STEPS`: `STEPS`, `[ShapeStep]`, any shape about its start, a geode's shell),
     /// `HEIGHT` (`OreHeight`, how the starts spread over `common::Y`, evenly), `REPLACES`
     /// (`match`: what it may replace), `REPLACES_WITH` (`[OreVariant]`), `EXPOSED`
     /// (`f32`, share of its blocks left out where they would touch air, 0).
@@ -956,6 +988,7 @@ pub mod comp {
         pub const VEINS: &str = "ore.veins";
         pub const SIZE: &str = "ore.size";
         pub const SHAPE: &str = "ore.shape";
+        pub const STEPS: &str = "ore.steps";
         pub const HEIGHT: &str = "ore.height";
         pub const REPLACES: &str = "ore.replaces";
         pub const REPLACES_WITH: &str = "ore.replaces_with";
@@ -983,8 +1016,9 @@ pub mod comp {
 
     /// What happens where two liquids meet (`entry_kind::REACTION`): when `LIQUID` (`match`) has
     /// `TOUCHING` (`match`) beside or above it, it turns into
-    /// `SOURCE` (`str`, a block) if it was a source, else `FLOWING` (`str`); when it flows down
-    /// into `TOUCHING`, that block becomes `FALLS_INTO` (`str`). What is not set stays as it is.
+    /// `SOURCE` (`str`, a block) if it was a source, else `FLOWING` (`str`); when it comes down
+    /// onto `TOUCHING`, that block becomes `FALLS_INTO` (`str`). What is not set stays as it is.
+    /// Each is block rules of the liquids' states at freeze (`comp::block::RULES`).
     pub mod reaction {
         pub const LIQUID: &str = "reaction.liquid";
         pub const TOUCHING: &str = "reaction.touching";
@@ -1016,13 +1050,15 @@ pub mod comp {
         pub const GENERATE: &str = "decoration.generate";
     }
 
-    /// A structure's (`entry_kind::STRUCTURE`, named like the template it places): a `CHANCE`
-    /// (`f32`, 0.5) per `SPACING` x `SPACING` cell (`u32`, 32) of the world, standing on the
-    /// surface sunk by `BURIED` (`i32`, 0) blocks.
+    /// A structure's (`entry_kind::STRUCTURE`, named like the template it places): a scatter
+    /// whose blocks are its template, a `CHANCE` (`f32`, 0.5) per `SPACING` x `SPACING` cell
+    /// (`u32`, 32) of the world, standing on the surface sunk by `BURIED` (`i32`, 0) blocks,
+    /// turned a random quarter about the vertical with tag `TURNS`.
     pub mod structure {
         pub const SPACING: &str = "structure.spacing";
         pub const CHANCE: &str = "structure.chance";
         pub const BURIED: &str = "structure.buried";
+        pub const TURNS: &str = "structure.turns";
     }
 
     /// A template's `BLOCKS` (`[TemplateBlock]`): a fixed shape for world structures, moving
@@ -1110,7 +1146,8 @@ pub mod comp {
     /// whole block) and `OUTLINE` (likewise, what is outlined and cracked when it isn't the
     /// hitbox), `SIGNAL` (`SignalDesc`), `LIQUID_WALLS` (`u8`, a bit per `FACE_DIRS` side a liquid
     /// in its cell can't pass; none: the sides its hitbox covers whole), `PIECES` (`[Piece]`, what a
-    /// hit breaks off alone; none: all of it), `RULES` (`[BlockRule]`, what happens to it by
+    /// hit breaks off alone; none: all of it), `CELLS` (`[[i32;3]]`, the other cells it takes
+    /// besides its own, a door's upper half; joined by faces), `RULES` (`[BlockRule]`, what happens to it by
     /// itself), `HAZARDS` (`[Hazard]`, what it does to entities touching it), `TURN` (`u8`, `Turn::index`:
     /// all of the above written facing north, turned so; none: as written). It is opaque (hides its
     /// neighbors' faces, gets ambient occlusion) as a cube on the opaque layer. Any other component
@@ -1157,6 +1194,7 @@ pub mod comp {
         pub const STICKY: &str = "block.sticky";
         pub const NOT_STOOD_ON: &str = "block.not_stood_on";
         pub const PIECES: &str = "block.pieces";
+        pub const CELLS: &str = "block.cells";
         pub const RULES: &str = "block.rules";
         pub const HAZARDS: &str = "block.hazards";
     }
@@ -1203,6 +1241,7 @@ pub mod comp {
         pub const COLUMN: &str = "dimension.column";
         pub const CUBES: &str = "dimension.cubes";
         pub const SKY_ABOVE: &str = "dimension.sky_above";
+        pub const HAZARDS: &str = "dimension.hazards";
         pub const GRAVITY: &str = "dimension.gravity";
         pub const DAY_LENGTH: &str = "dimension.day_length";
         pub const FIXED_TIME: &str = "dimension.fixed_time";
@@ -1258,7 +1297,11 @@ pub mod comp {
     /// of that template, block (0, 0, 0) centered on it), `BLOCK` (`str`, the block it is the block
     /// entity of: made with its inventory where one is placed, gone with its items when it breaks),
     /// `SEATS` (`[Seat]`, where riders sit, numbered in this order), `ATTACH` (`[Attach]`, components
-    /// each one carries). Callbacks: `ON_TICK` (`EntityTickArgs`, every one of the kind in one
+    /// each one carries, starting as the kind's own value of each), `LIGHT_AT` (`[f32;3]`, where the
+    /// light it gives comes from: blocks from its feet, +Z ahead, turned with it; none: its middle, a
+    /// block entity's block),
+    /// `SHOWN_SLOTS` (`[u32]`, slots of its inventory everyone around sees, their items in
+    /// `core:shown`: what a pedestal holds; they give their light too). Callbacks: `ON_TICK` (`EntityTickArgs`, every one of the kind in one
     /// call), `ON_INTERACT` (`EntityEventArgs`, a player right clicked one and
     /// `action::INTERACT_ENTITY` let it; `handled = 1` swings the player's arm), `STEER`
     /// (`SteerArgs`, on the client of the player in a seat that steers: what the mount does with
@@ -1283,6 +1326,8 @@ pub mod comp {
         pub const TEMPLATE: &str = "entity.template";
         pub const BLOCK: &str = "entity.block";
         pub const SEATS: &str = "entity.seats";
+        pub const LIGHT_AT: &str = "entity.light_at";
+        pub const SHOWN_SLOTS: &str = "entity.shown_slots";
         pub const ATTACH: &str = "entity.attach";
         pub const ON_TICK: &str = "entity.on_tick";
         pub const ON_INTERACT: &str = "entity.on_interact";
@@ -1292,21 +1337,26 @@ pub mod comp {
         pub const SLOT_GROUPS: &str = "entity.slot_groups";
         pub const INVENTORY_MENU: &str = "entity.inventory_menu";
         pub const NO_GRAVITY: &str = "entity.no_gravity";
-        pub const INVULNERABLE: &str = "entity.invulnerable";
-        /// Burns in daylight (undead).
-        pub const BURNS_IN_SUN: &str = "entity.burns_in_sun";
+        /// `[Hazard]`: what it does to entities, itself (`hazard_at::SELF`: the sun burning
+        /// the undead) or what it squeezes (`CRUSHED`).
+        pub const HAZARDS: &str = "entity.hazards";
         pub const SWIMS: &str = "entity.swims";
         /// A solid body: others stand on it (riding along), bump into it and get pushed by it.
         pub const SOLID: &str = "entity.solid";
         /// Moved exactly by its velocity (set by mod logic): no gravity, no block collision.
         pub const KINEMATIC: &str = "entity.kinematic";
-        /// A solid body hurts what it squeezes against blocks instead of only pushing.
-        pub const CRUSHES: &str = "entity.crushes";
         /// Its riders take the damage of its falls too, as a horse's rider does.
         pub const RIDERS_FALL: &str = "entity.riders_fall";
         /// Has the equipment slots (`Registry::equipment_slot`) the player has, after its own:
         /// armor on a zombie, shown on its model and counted like a player's.
         pub const WEARS: &str = "entity.wears";
+        /// Picks up the dropped items it touches into its inventory, as a player does (a zombie,
+        /// an allay).
+        pub const PICKS_UP: &str = "entity.picks_up";
+        /// Takes the poses a player does, by the keys its walk holds (`walk::*`) and the poses'
+        /// conditions: crouches, swims lying down, crawls where nothing higher fits. A cow
+        /// without it stands where it stands.
+        pub const POSES: &str = "entity.poses";
         /// Takes no fall damage, which every kind does otherwise.
         pub const NO_FALL_DAMAGE: &str = "entity.no_fall_damage";
         /// Others don't push it away, which every kind does otherwise.
@@ -1349,7 +1399,11 @@ pub mod comp {
     pub const ATTACK_DAMAGE: &str = "attack_damage";
     /// Item: ticks of holding the use button before it takes effect (food 32); slows while held.
     pub const USE_TICKS: &str = "use_ticks";
-    /// Item: full swings per second (a sword 1.6). An empty hand does 4.
+    /// Item: `[EffectGift]` its user gets when it is used (after `USE_TICKS`), the item turning
+    /// into its `REMAINDER` (a potion's bottle) or one fewer; nothing else needed for a potion.
+    pub const GIVES_EFFECTS: &str = "gives_effects";
+    /// Item: full swings per second (a sword 1.6). On an entity kind, its bare hand's (the
+    /// player 4); 1 when neither says.
     pub const ATTACK_SPEED: &str = "attack_speed";
     /// Item: a full swing standing on the ground also hits what stands next to the target.
     pub const SWEEPS: &str = "sweeps";
@@ -1387,8 +1441,10 @@ pub mod comp {
     pub const FRICTION: &str = "friction";
     /// Block: movement speed multiplier inside it (`f32`, 1 by default; cobweb, liquids).
     pub const DRAG: &str = "drag";
-    /// Block: emitted light per color channel (`[u8;3]`). 15 is a full-strength source (torch
-    /// 14); higher values reach further.
+    /// Emitted light per color channel (`[u8;3]`). 15 is a full-strength source (torch 14);
+    /// higher values reach further. On an item (held, worn, shown or dropped), an entity kind, an
+    /// entity effect or an entity itself (attached, set while it lives) it moves with the entity,
+    /// drawn by clients alone: it lights what players see, not the world.
     pub const LIGHT: &str = "light";
     /// Block: a tint kind by name (`tint`: `core:grass`, `core:foliage`, `core:water` or a mod's
     /// own), colored by the biome.
@@ -1444,20 +1500,18 @@ pub mod comp {
     pub const WEAR_PER_HIT: &str = "wear_per_hit";
     /// Tag of biomes players may start in (the engine's spawn search tries them first).
     pub const SPAWN_BIOME: &str = "spawn_biome";
-    /// Block: spreads onto these blocks (`match`; grass onto dirt) within `spread_reach`,
-    /// where the target has light (`spread_light`) and nothing opaque on top (unless tagged
-    /// `spreads_covered`). In `spread_time` seconds on average, sooner with more of it around.
+    /// Block: spreads onto these blocks (`match`; grass onto dirt) within `spread_reach` while
+    /// `spread_when` holds for the target. In `spread_time` seconds on average, sooner with more
+    /// of it around.
     pub const SPREADS_TO: &str = "spreads_to";
     /// `[i32;6]`: the box it reaches, from itself to the target, min x y z then max x y z, at
     /// most 4 each way; by default 1 sideways, 3 down and 1 up (grass).
     pub const SPREAD_REACH: &str = "spread_reach";
-    /// Block tag: it spreads onto covered targets too (moss on a wall), taking the light of
-    /// the target's brightest side.
-    pub const SPREADS_COVERED: &str = "spreads_covered";
     /// `f32`: mean seconds for one spreading block to take a target (vanilla grass about 765).
     pub const SPREAD_TIME: &str = "spread_time";
-    /// `u32`: light the target needs above it (vanilla grass 9).
-    pub const SPREAD_LIGHT: &str = "spread_light";
+    /// `[str]`: conditions about the target (`condition`), by default `light(9.., up)` and
+    /// `!covered` (vanilla grass); moss up a wall takes `light(9.., any)`.
+    pub const SPREAD_WHEN: &str = "spread_when";
     /// Block: a particle kind (`str`) clients show around it now and then, near the player only
     /// (vanilla's torch smoke); nothing of it reaches the server.
     pub const AMBIENT_PARTICLE: &str = "ambient_particle";
@@ -1472,9 +1526,6 @@ pub mod comp {
     /// Entity kinds and worn items: the liquids sprinting swims in (`match`); a worn item's add
     /// to its wearer's.
     pub const SWIMS_IN: &str = "swims_in";
-    /// Block: what it joins on the sides its `true`/`false` side properties name (`match`,
-    /// fences: `#fences`), kept up to date by the SDK's `joins`.
-    pub const JOINS: &str = "joins";
     /// Tag the engine puts on every liquid's block.
     pub const LIQUIDS: &str = "liquids";
     /// Tag the engine puts on blocks of negative `hardness`, liquids aside.
@@ -1623,14 +1674,22 @@ pub mod hazard_at {
     pub const HEAD: u32 = 2;
     /// Its box is within a sixteenth of the shape: a cactus.
     pub const TOUCH: u32 = 3;
+    /// Wherever it is, asked at its eyes: an entity kind's own (the sun burning a zombie) or a
+    /// dimension's (the void).
+    pub const SELF: u32 = 4;
+    /// A body of this kind squeezes it into something solid; a kind with one crushes instead of
+    /// only pushing.
+    pub const CRUSHED: u32 = 5;
 }
 
 crate::data! {
-    /// What a block does to an entity meeting it `at` (`hazard_at`, `comp::block::HAZARDS`): every
+    /// What a block, an entity kind or a dimension does to an entity meeting it `at` (`hazard_at`,
+    /// `comp::block::HAZARDS`, `comp::entity::HAZARDS`, `comp::dimension::HAZARDS`): every
     /// `every` ticks (0 or 1: each tick, a hurt entity's pause between hits aside) while all of
     /// `when` hold for the entity there (`condition`, `!flying`), `damage` of `cause` (a damage
     /// cause, empty for none) and `fire` ticks of burning. Every opaque full block suffocates
-    /// at the head; a `hot` one without hazards of its own burns like lava.
+    /// at the head; a `hot` one without hazards of its own burns like lava; every dimension's
+    /// void hurts 64 blocks below its floor.
     pub struct Hazard {
         pub at: u32,
         pub damage: f32,
@@ -1638,6 +1697,9 @@ crate::data! {
         pub fire: u32,
         pub every: u32,
         pub when: alloc::vec::Vec<alloc::string::String>,
+        /// An entity effect's: only at this level of it, as it is; 0, at every level, `damage`
+        /// times the level. Negative damage heals.
+        pub level: u32,
     }
 }
 
@@ -1661,6 +1723,9 @@ pub mod rule_then {
     pub const BREAK: u32 = 2;
     /// It falls as a moving block (`Host::fall_block`, sand).
     pub const FALL: u32 = 3;
+    /// A piece of it comes off: it becomes `into` (properties, `north=false`), dropping what
+    /// the piece left so drops alone (a side of a vine or of wire); with nothing left, air.
+    pub const SHED: u32 = 4;
 }
 
 crate::data! {
@@ -2057,10 +2122,11 @@ pub struct PlaceArgs {
 #[repr(C)]
 pub struct ItemUseArgs {
     pub world: *mut WorldCtx,
-    pub player: u64,
+    /// Who uses it: a player, or a mob (`World::use_item`).
+    pub entity: u64,
     /// In/out: the held stack; change it to consume (eating, placing).
     pub stack: ItemStack,
-    /// The slot of the player's inventory it is in.
+    /// The slot of its inventory it is in.
     pub slot: u32,
     /// Target block if any (`has_target`).
     pub pos: BlockPos,
@@ -2163,6 +2229,19 @@ impl From<BlockPos> for Holder {
     fn from(pos: BlockPos) -> Holder {
         Holder::block(pos)
     }
+}
+
+/// The movement keys `entity_walk` holds, as a player's are: the same physics and poses answer.
+pub mod walk {
+    /// Jumps; swims and flies up.
+    pub const JUMP: u32 = 1;
+    /// Never steps off an edge, holds on to ladders, crouches (the `core:sneak` poses); flies down.
+    pub const SNEAK: u32 = 2;
+    /// Faster, a longer jump, swims lying down in a liquid it swims in.
+    pub const SPRINT: u32 = 4;
+    /// Takes off and flies, if its `core:can_fly` attribute is 1 or more; it comes down when it
+    /// lands without `JUMP`, as a player does.
+    pub const FLY: u32 = 8;
 }
 
 /// `EntityState::flags`: what happened to the entity, not what its kind is (its tags,
@@ -2514,7 +2593,7 @@ pub mod entity_set {
     /// Players: flying, whether the game mode lets them or not (it stops on landing then).
     pub const FLYING: u32 = 32;
     pub const FIRE: u32 = 64;
-    /// Players: the hotbar slot in hand.
+    /// The slot in its main hand: a player's hotbar, a mob's own slots (`comp::entity::WEARS`).
     pub const SELECTED: u32 = 128;
     pub const PITCH: u32 = 256;
 }
@@ -2525,6 +2604,21 @@ pub mod spawn_set {
     pub const PICKUP_DELAY: u32 = 4;
 }
 
+/// An effect on an entity (`Host::entity_effects`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EffectOn {
+    pub effect: u32,
+    /// 1 and up.
+    pub level: u32,
+    /// `INFINITE_TICKS` for one that doesn't end.
+    pub ticks_left: u32,
+}
+
+/// Ticks of an entity effect that never ends (`Host::entity_effect`, `EffectGift`), vanilla's
+/// `infinite`.
+pub const INFINITE_TICKS: u32 = u32::MAX;
+
 /// The engine's entity effects, registered first in this order.
 pub mod entity_effect {
     /// White, a creeper about to go off.
@@ -2533,7 +2627,9 @@ pub mod entity_effect {
     pub const HURT: u32 = 1;
     /// Lit up whatever the light around.
     pub const GLOW: u32 = 2;
-    pub const NAMES: [&str; 3] = ["core:flash", "core:hurt", "core:glow"];
+    /// Not drawn: the light every burning entity gives.
+    pub const BURNING: u32 = 3;
+    pub const NAMES: [&str; 4] = ["core:flash", "core:hurt", "core:glow", "core:burning"];
 }
 
 /// What a damage cause does besides the damage itself.
@@ -2564,6 +2660,16 @@ pub mod game_mode {
 }
 
 crate::data! {
+    /// An entity effect an item gives when used (`comp::GIVES_EFFECTS`): its name, its level (1
+    /// and up) and for how many ticks (`INFINITE_TICKS`: for good).
+    pub struct EffectGift {
+        pub effect: alloc::string::String,
+        pub level: u32,
+        pub ticks: u32,
+    }
+}
+
+crate::data! {
     /// An attribute modifier something gives (`comp::MODIFIERS`): a game mode its players, an item
     /// while held in the main hand or (`worn`) in an equipment slot, a pose while in it, an entity
     /// kind while all of `when` hold for it (`condition`; checked each tick).
@@ -2573,6 +2679,9 @@ crate::data! {
         pub amount: f64,
         pub worn: bool,
         pub when: alloc::vec::Vec<alloc::string::String>,
+        /// An entity effect's: only at this level of it, as it is; 0, at every level, `amount`
+        /// times the level (a `SET` sets the same at every level).
+        pub level: u32,
     }
 }
 
@@ -2657,7 +2766,7 @@ pub struct EntityState {
     pub fall_distance: f32,
     /// Ticks it burns for yet.
     pub fire: u32,
-    /// Players: the hotbar slot in hand.
+    /// The slot in its main hand: a player's hotbar, a mob's own slots (`comp::entity::WEARS`).
     pub selected: u32,
     /// Distance walked this tick (hunger exhaustion); read on a client, the limb swing (0
     /// standing, 1 running) in the frame of what it stands on.
@@ -2725,6 +2834,9 @@ pub struct ShapeStep {
     pub v: [f64; 8],
 }
 defaults!(ShapeStep { kind: 0, axis: 3, seed: 0, v: [0.0; 8] });
+impl Schema for ShapeStep {
+    const SCHEMA: &'static str = "{kind:u32,axis:u32,seed:u64,v:[f64;8]}";
+}
 
 pub mod shape_kind {
     /// Center x y z, radius.
@@ -2779,12 +2891,6 @@ pub mod component_flags {
 crate::data! {
     /// A key of a shaped recipe's pattern: the character, and an item name or `#tag`.
     pub struct RecipeKey { pub name: alloc::string::String, pub item: alloc::string::String }
-}
-
-crate::data! {
-    /// A result of a recipe after its output: an item, or a liquid by its name and millibuckets,
-    /// coming out with `chance` (0..1) each time.
-    pub struct RecipeOutput { pub item: alloc::string::String, pub count: u32, pub chance: f32 }
 }
 
 /// A recipe the viewer shows with a kind's own `display`.
@@ -3161,10 +3267,11 @@ pub struct Host {
     /// `cb` (`WorldTickArgs`) once per tick in every region of every dimension, for logic that
     /// isn't one entity's or block's (a dimension's loaded parts are regions run in parallel).
     pub reg_world_tick: unsafe extern "C" fn(reg: *mut Registrar, cb: Callback),
-    /// In `ticks` ticks, `event` fires with `data` (one value of its type), and the timer is
-    /// saved with `entity` until then. One per entity and event: a second call moves it. A
-    /// timer of a gone entity never fires.
-    pub emit_after: unsafe extern "C" fn(world: *mut WorldCtx, entity: u64, ticks: u32, event: u32, data: Slice<u8>),
+    /// In `ticks` ticks `event` fires with `data` (one value of its type). The timer is saved with
+    /// its holder: an entity (gone with it), a block (with its cube, `event::BLOCK_TICK` being the
+    /// block's own tick), or `NONE` for the dimension. Time an unloaded holder misses counts, so a
+    /// timer due while away fires when it loads. A stack (`HELD`) doesn't tick, so it can't hold one.
+    pub timer: unsafe extern "C" fn(world: *mut WorldCtx, holder: *const Holder, ticks: u32, event: u32, data: Slice<u8>),
     /// Chat command `/name`, arguments described by `usage` (see the engine's command syntax);
     /// `cb` gets `CommandArgs` with one value per named parameter.
     /// `client` non-zero: it runs on the client that types it, never sent to the server, `cb` getting
@@ -3221,13 +3328,15 @@ pub struct Host {
     pub part_add: unsafe extern "C" fn(world: *mut WorldCtx, pos: *const BlockPos, state: u32) -> u32,
     /// Replaces a part of a cell with another state, air taking it out; 0 if it isn't there.
     pub part_replace: unsafe extern "C" fn(world: *mut WorldCtx, pos: *const BlockPos, old: u32, new: u32) -> u32,
-    pub schedule_tick: unsafe extern "C" fn(world: *mut WorldCtx, pos: *const BlockPos, delay: u32),
     pub game_time: unsafe extern "C" fn(world: *mut WorldCtx) -> u64,
     /// Deterministic per-world random stream.
     pub random: unsafe extern "C" fn(world: *mut WorldCtx) -> u64,
     pub light: unsafe extern "C" fn(world: *mut WorldCtx, pos: *const BlockPos) -> u32,
     /// 0..1 sun strength for the world's time of day.
     pub daylight: unsafe extern "C" fn(world: *mut WorldCtx) -> f32,
+    /// A number of its own for each time a world is opened: entity ids and time start over in
+    /// another world, so what a mod keeps by them goes by this too.
+    pub world_session: unsafe extern "C" fn(world: *mut WorldCtx) -> u64,
 
     /// An entity as `desc` says; 0 if it can't be (an unknown kind, one that belongs to a
     /// block, an item kind without a stack).
@@ -3250,13 +3359,22 @@ pub struct Host {
     /// Writes the fields of `state` that `set` names (`entity_set::*`), players' on their client
     /// too. Health only comes back by respawning: 0 or less is a death by `damage_cause::VOID`.
     pub entity_set: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, set: u32, state: *const EntityState),
-    /// AI steering: horizontal direction and speed factor applied by the physics, optional jump.
-    pub entity_walk: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, dir: *const [f32; 2], speed: f32, jump: u32),
+    /// AI steering for this tick: horizontal direction, speed factor, and the movement keys a
+    /// player would hold (`walk::*`), which the same physics and poses answer.
+    pub entity_walk: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, dir: *const [f32; 2], speed: f32, keys: u32),
     pub entity_damage: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, amount: f32, source: u64, cause: u32) -> u32,
-    /// `attacker` hits `target` like a player does: the `ATTACK` question, the `ATTACK_DAMAGE`
-    /// chain from the held item's (players) or the kind's `attack_damage`, and the attacker's
-    /// cooldown (mobs: once a second). Non-zero if the hit landed.
+    /// `attacker` hits `target` with what it holds: the `ATTACK` question, the `ATTACK_DAMAGE`
+    /// chain from the held item's damage (else the kind's `attack_damage`), as strong as its
+    /// swing is charged. Non-zero if the hit landed.
     pub entity_attack: unsafe extern "C" fn(world: *mut WorldCtx, attacker: u64, target: u64) -> u32,
+    /// `id` uses what is in its main hand, or its other one (`off`), on the block at `target`
+    /// (null: on nothing) from `face`, as a player's right click does. 1 if it did something
+    /// or started to (eating takes time; it goes on while the hand holds the item).
+    pub entity_use_item: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, off: u32, target: *const BlockPos, face: u32) -> u32,
+    /// `id` starts breaking the block at `pos` (null: stops), as a player holding the button does:
+    /// as fast as what it holds mines it, cracks shown, broken when done within its reach. 0 when
+    /// it may not (`action::BREAK_BLOCK`).
+    pub entity_mine: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, pos: *const BlockPos) -> u32,
     /// Whether `target` is within `id`'s `ENTITY_REACH` attribute, from its eyes to the nearest
     /// point of the target's box. Non-zero if so.
     pub entity_in_reach: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, target: u64) -> u32,
@@ -3316,8 +3434,11 @@ pub struct Host {
     /// `stacks`, any order: its number + 1, or 0.
     pub recipe_find: unsafe extern "C" fn(kind: Str, stacks: *const ItemStack, count: u32, from: u32) -> u32,
     pub recipe_info: unsafe extern "C" fn(kind: Str, recipe: u32, out: *mut RecipeInfo) -> u32,
-    /// Output `index` of a recipe, a liquid's as its item by the millibucket, and its chance.
+    /// Output `index` of a recipe, a liquid's as its item by the millibucket, and its chance: the
+    /// main one, then each its pools can give, with the most of it.
     pub recipe_output: unsafe extern "C" fn(kind: Str, recipe: u32, index: u32, stack: *mut ItemStack, chance: *mut f32) -> u32,
+    /// Rolls the recipe's pools for what else one run of it gives, like `roll_loot`.
+    pub recipe_roll: unsafe extern "C" fn(world: *mut WorldCtx, kind: Str, recipe: u32, out: *mut ItemStack, max: usize) -> usize,
     /// Takes the recipe's inputs out of `stacks` (counts, the matching stacks); 0 if they are not
     /// all there, then nothing changes.
     pub recipe_consume: unsafe extern "C" fn(kind: Str, recipe: u32, stacks: *mut ItemStack, count: u32) -> u32,
@@ -3335,12 +3456,9 @@ pub struct Host {
     /// Ticks left of the item being used, negative when none.
     pub client_use_ticks_left: unsafe extern "C" fn(client: *mut ClientCtx) -> f32,
     pub client_day_time: unsafe extern "C" fn(client: *mut ClientCtx) -> u64,
-    pub client_permission: unsafe extern "C" fn(client: *mut ClientCtx) -> u32,
     /// Synced component of an entity the client knows (own player always), null if unknown.
     pub client_component: unsafe extern "C" fn(client: *mut ClientCtx, id: u64, comp: u32) -> *const u8,
     pub client_entity: unsafe extern "C" fn(client: *mut ClientCtx, id: u64, out: *mut EntityState) -> u32,
-    /// `game_mode` of the local player (client side, for HUDs and screens).
-    pub client_game_mode: unsafe extern "C" fn(client: *mut ClientCtx) -> u32,
 
     /// Energy contract (`energy` component, on an entity or a stack): moves `amount` in (positive)
     /// or out (negative), respecting capacity and rate limits. Returns what moved (or would, when
@@ -3364,13 +3482,15 @@ pub struct Host {
     pub chat_format_set: unsafe extern "C" fn(args: *mut ChatFormatArgs, key: Str, list: Slice<UiArg>),
     /// Non-zero when a player in this world shows gizmo group `group` (`/gizmo <group>`).
     pub gizmo_shown: unsafe extern "C" fn(world: *mut WorldCtx, group: Str) -> u32,
-    /// Debug shape (`gizmo_kind`) for players showing `group`, from `a` to `b`; `color` is
-    /// 0xRRGGBBAA, kept for `ticks`.
-    pub gizmo: unsafe extern "C" fn(world: *mut WorldCtx, group: Str, kind: u32, a: *const Vec3, b: *const Vec3, color: u32, ticks: u32),
-    /// The translation `key` with `args` at `pos` for players showing `group`, `size` times as
-    /// big as menu text (0 counts as 1), in each viewer's language.
+    /// Debug shape (`gizmo_kind`) for `who` of the players showing `group` (empty: all of them),
+    /// from `a` to `b`; `color` is 0xRRGGBBAA, kept for `ticks`.
+    pub gizmo:
+        unsafe extern "C" fn(world: *mut WorldCtx, who: Who, group: Str, kind: u32, a: *const Vec3, b: *const Vec3, color: u32, ticks: u32),
+    /// The translation `key` with `args` at `pos` as `gizmo` shows a shape, `size` times as big as
+    /// menu text (0 counts as 1), in each viewer's language.
     pub gizmo_text: unsafe extern "C" fn(
         world: *mut WorldCtx,
+        who: Who,
         group: Str,
         pos: *const Vec3,
         size: f32,
@@ -3405,8 +3525,8 @@ pub struct Host {
     /// Value of `--name value` on the command line, empty if not given.
     pub launch_option: unsafe extern "C" fn(name: Str) -> Str,
 
-    /// Server: sends `data` on channel `name` to `player`'s client (after this tick's changes).
-    pub send_packet: unsafe extern "C" fn(world: *mut WorldCtx, player: u64, name: Str, schema: Str, data: Slice<u8>),
+    /// Server: sends `data` on channel `name` to the clients of `who` (after this tick's changes).
+    pub send_packet: unsafe extern "C" fn(world: *mut WorldCtx, who: Who, name: Str, schema: Str, data: Slice<u8>),
     /// Moves an entity (players too, their client follows) at the end of the tick; `dim` is a
     /// dimension id, `u32::MAX` = the same one.
     pub entity_teleport: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, dim: u32, pos: *const Vec3),
@@ -3553,9 +3673,13 @@ pub struct Host {
     pub weather_now: unsafe extern "C" fn(world: *mut WorldCtx) -> u32,
     /// The weather the client has now.
     pub client_weather: unsafe extern "C" fn(client: *mut ClientCtx) -> u32,
-    /// Shader effect `effect` on an entity for everyone who sees it (players coming along later
-    /// too) at `strength` for `ticks`; 0 ticks ends it. One at a time: a new one replaces it.
-    pub entity_effect: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, effect: u32, strength: f32, ticks: u32),
+    /// Effect `effect` on an entity at `level` (1 and up) for `ticks`, seen by everyone (players
+    /// coming along later too), with its hazards and modifiers; 0 ticks ends it, `INFINITE_TICKS`
+    /// keeps it on until taken off. Several at once,
+    /// one of each: giving one again replaces it; an instant one acts once and doesn't stay.
+    pub entity_effect: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, effect: u32, level: u32, ticks: u32),
+    /// The effects on entity `id`, at most `cap` of them into `out`; returns how many it has.
+    pub entity_effects: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, out: *mut EffectOn, cap: u32) -> u32,
     /// Holds an entity in `pose` (players too: their client follows), or with `u32::MAX` lets
     /// it go back to what its movement makes. `yaw` (radians) keeps it facing that way and still
     /// while it holds, `NaN` leaves it free (a bed, against a pet that sits).
@@ -3569,8 +3693,8 @@ pub struct Host {
     pub reg_command_branch: unsafe extern "C" fn(reg: *mut Registrar, command: Str, usage: Str, client: u32, cb: Callback),
 
     // ------------------------------------------------ text, shaders, particles
-    /// Server: particles for every player that sees `burst.pos`.
-    pub particle_burst: unsafe extern "C" fn(world: *mut WorldCtx, burst: *const ParticleBurst),
+    /// Server: particles for `who`.
+    pub particle_burst: unsafe extern "C" fn(world: *mut WorldCtx, who: Who, burst: *const ParticleBurst),
     /// The strongest redstone power coming into a cell.
     pub signal_at: unsafe extern "C" fn(world: *mut WorldCtx, pos: *const BlockPos) -> u32,
     /// Client: particles only this client shows.
@@ -3590,9 +3714,10 @@ pub struct Host {
     pub action_play: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, name: Str, looping: u32),
     /// Entity `id` plays action `to` wherever it would play `from`; `to` empty ends that.
     pub action_override: unsafe extern "C" fn(world: *mut WorldCtx, id: u64, from: Str, to: Str),
-    /// Server: sound event `sound` (`find` with `entry_kind::SOUND`) at `pos` for every player in
-    /// its range; `pitch` 0 picks one from the event's range.
-    pub play_sound: unsafe extern "C" fn(world: *mut WorldCtx, sound: u32, pos: *const Vec3, volume: f32, pitch: f32),
+    /// Server: sound event `sound` (`find` with `entry_kind::SOUND`) at `pos` for `who` (`Around`:
+    /// the players in its range); `pos` null = not positioned (a UI sound); `pitch` 0 picks one
+    /// from the event's range.
+    pub play_sound: unsafe extern "C" fn(world: *mut WorldCtx, who: Who, sound: u32, pos: *const Vec3, volume: f32, pitch: f32),
     /// Client: only this client hears it; `pos` null = not positioned (UI).
     pub client_play_sound: unsafe extern "C" fn(client: *mut ClientCtx, sound: u32, pos: *const Vec3, volume: f32, pitch: f32),
     /// Biome id at a block (underground biomes included); 0 where nothing is loaded.
@@ -3821,7 +3946,8 @@ pub mod condition {
     pub const UNDERGROUND: u32 = 2;
     pub const SURFACE: u32 = 3;
     /// `light(min..max)`, `light(..7)`, `light(9..)`: the light there is in the range, the
-    /// brighter of sky light times daylight and block light (0..15).
+    /// brighter of sky light times daylight and block light (0..15); `light(9.., up)` on that
+    /// side of the cell, `light(9.., any)` on its brightest.
     pub const LIGHT: u32 = 4;
     /// `chance(0.05)`: holds that share of the times it is asked; only where the world is.
     pub const CHANCE: u32 = 5;
@@ -3860,7 +3986,16 @@ pub mod condition {
     pub const OPEN: u32 = 19;
     /// Something opaque is on top.
     pub const COVERED: u32 = 20;
-    pub const NAMES: [&str; 21] = [
+    /// `sky(15)`, `sky(..7)`: the sky light there, 0..15, whatever the time of day.
+    pub const SKY: u32 = 21;
+    /// The weather now shelters from the sun (not `comp::weather::UNSHELTERED`): rain.
+    pub const SHELTERED: u32 = 22;
+    /// `height(..-64)`: the height there, in blocks.
+    pub const HEIGHT: u32 = 23;
+    /// `wears(head)`: the body asked about wears something over that bone (a helmet keeping the
+    /// sun off), or in the equipment slot of that name (`wears(base:feet)`).
+    pub const WEARS: u32 = 24;
+    pub const NAMES: [&str; 25] = [
         "core:day",
         "core:night",
         "core:underground",
@@ -3882,6 +4017,10 @@ pub mod condition {
         "core:beside",
         "core:open",
         "core:covered",
+        "core:sky",
+        "core:sheltered",
+        "core:height",
+        "core:wears",
     ];
 }
 
@@ -4023,6 +4162,8 @@ pub mod particle {
     pub const SPLASH: &str = "core:splash";
     /// Falling from a ceiling with water above it.
     pub const DRIP: &str = "core:drip";
+    /// Swirls around who has an entity effect with a color, tinted by it.
+    pub const EFFECT: &str = "core:effect";
 }
 
 /// Values are copied out before the call and written back after it (changes of synced
@@ -4042,6 +4183,9 @@ pub struct SystemArgs {
 
 /// Engine events (`Host::reg_event_handler`); values are the structs named in each line.
 pub mod event {
+    /// `[i32; 3]`, the block: its tick (liquids flowing, block rules, `block.on_scheduled`), when a
+    /// timer on a block with this event is due (`Host::timer`).
+    pub const BLOCK_TICK: &str = "core:block_tick";
     /// `PlayerEvent`.
     pub const PLAYER_JOINED: &str = "core:player_joined";
     /// `PlayerEvent`: a dead player came back, at the spawn point with fresh components (but the
@@ -4089,7 +4233,7 @@ impl Schema for DimensionChange {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ItemUsed {
-    pub player: u64,
+    pub entity: u64,
     /// As it was before the use.
     pub stack: ItemStack,
     pub pos: BlockPos,
@@ -4097,7 +4241,7 @@ pub struct ItemUsed {
     pub has_target: u32,
 }
 impl Schema for ItemUsed {
-    const SCHEMA: &'static str = "{player:u64,stack:{item:u32,count:u32,data:u32},pos:[i32;3],has_target:u32}";
+    const SCHEMA: &'static str = "{entity:u64,stack:{item:u32,count:u32,data:u32},pos:[i32;3],has_target:u32}";
 }
 
 #[repr(C)]
@@ -4182,11 +4326,11 @@ impl ChatMessage {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pickup {
-    pub player: u64,
+    pub entity: u64,
     pub stack: ItemStack,
 }
 impl Schema for Pickup {
-    const SCHEMA: &'static str = "{player:u64,stack:{item:u32,count:u32,data:u32}}";
+    const SCHEMA: &'static str = "{entity:u64,stack:{item:u32,count:u32,data:u32}}";
 }
 
 #[repr(C)]
@@ -4214,7 +4358,8 @@ pub mod action {
     pub const CHAT: &str = "core:chat";
     /// `DimensionChange`. `entity` about to change dimension to `dim`.
     pub const ENTER_DIMENSION: &str = "core:enter_dimension";
-    /// `Pickup`. `entity` (a player) picking up `item` (count in `amount`), `other` the item entity.
+    /// `Pickup`. `entity` (what has `comp::entity::PICKS_UP`) picking up `item` (count in
+    /// `amount`), `other` the item entity.
     pub const PICKUP_ITEM: &str = "core:pickup_item";
     /// `Hurt`, sent after armor and every modifier. Asked with `entity` about to be hurt by
     /// `other` for `amount` of `cause`, before the damage chain.
@@ -4339,6 +4484,35 @@ pub mod attribute {
     pub const FOV: &str = "core:fov";
     /// Whether it may fly, jumping twice (0; 1 in creative): a flying ring is a modifier.
     pub const CAN_FLY: &str = "core:can_fly";
+    /// 1: takes no damage, hunger or air (creative, a block entity, a shield effect) but from
+    /// causes that pierce it (the void); mods read it as `World::outside_survival`.
+    pub const INVULNERABLE: &str = "core:invulnerable";
+    /// Blocks it falls without harm (3; jump boost raises it, slow falling takes the harm away).
+    pub const SAFE_FALL: &str = "core:safe_fall";
+    /// Damage per block fallen past `SAFE_FALL` (1).
+    pub const FALL_DAMAGE_MULTIPLIER: &str = "core:fall_damage_multiplier";
+    /// Blocks it walks up without jumping (0.6).
+    pub const STEP_HEIGHT: &str = "core:step_height";
+    /// Multiplier on its dimension's gravity (1; slow falling 0.125, below 0 floats up).
+    pub const GRAVITY: &str = "core:gravity";
+    /// Share of knockback it shrugs off (0..1).
+    pub const KNOCKBACK_RESISTANCE: &str = "core:knockback_resistance";
+    /// Added to each of its melee hits (0; strength +3 a level).
+    pub const ATTACK_DAMAGE: &str = "core:attack_damage";
+    /// Share of damage taken off, after armor and the `DAMAGE` chain (0..1; resistance 0.2 a
+    /// level). What pierces invulnerability gets through.
+    pub const DAMAGE_RESISTANCE: &str = "core:damage_resistance";
+    /// Share of burning damage (`damage_cause::BURNING`) taken off (0..1; fire resistance 1).
+    pub const FIRE_RESISTANCE: &str = "core:fire_resistance";
+    /// Multiplier on how long what sets it on fire keeps it burning (1).
+    pub const BURNING_TIME: &str = "core:burning_time";
+    /// Multiplier on mining speed with its head in a liquid (0.2).
+    pub const SUBMERGED_MINING_SPEED: &str = "core:submerged_mining_speed";
+    /// Multiplier on mining speed off the ground (0.2).
+    pub const AIRBORNE_MINING_SPEED: &str = "core:airborne_mining_speed";
+    /// How much its player sees as if everything were under the noon sky, lamps still adding
+    /// their warmth (0..1; the night vision effect 1).
+    pub const NIGHT_VISION: &str = "core:night_vision";
 }
 
 /// How an attribute modifier applies, like vanilla: ADD amounts sum onto the base, then times
@@ -4728,6 +4902,8 @@ pub mod vein_shape {
     pub const SPHERE: u32 = 2;
     /// Flat and round, like clay and gravel under water.
     pub const DISK: u32 = 3;
+    /// The ore's `comp::ore::STEPS`, a shape like a fill's, about its start.
+    pub const STEPS: u32 = 4;
 }
 
 pub mod height_curve {
@@ -4935,10 +5111,14 @@ pub mod show_place {
     pub const NAMES: [&str; 5] = ["core:free", "core:chat", "core:hint", "core:title", "core:subtitle"];
 }
 
-/// Who sees text: one player (an entity id works as it is), or a group.
+/// Who gets what the server puts out (text, sounds, particles, gizmo shapes, packets): one player
+/// (an entity id works as it is), or a group.
 #[repr(C, u32)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Who {
+    /// Whoever it reaches by itself, from where it is: a sound's range, the players near
+    /// particles, the players showing a gizmo group, everyone in the dimension for text and packets.
+    Around,
     Player(u64),
     /// Everyone on the server, in any dimension.
     All,

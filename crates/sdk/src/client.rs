@@ -9,7 +9,7 @@
 //! r.key(&SCAN, "K").on_client(|c| { /* on this client */ });
 //! ```
 
-use crate::abi::{self, ItemStack, Slice, Str, gizmo_kind as gk};
+use crate::abi::{self, ItemStack, Slice, Str};
 use crate::abi::{BlockPos, Vec3};
 use crate::{ClientView, Key, Menu, Registry, Value, WithComponents, World, callback, host};
 
@@ -365,47 +365,6 @@ impl Client {
         true
     }
 
-    fn draw(&self, group: Option<&crate::GizmoGroup>, kind: u32, a: Vec3, b: Vec3, color: u32) {
-        unsafe { (host().client_draw)(self.raw, abi_str(group.map_or("", |g| g.name())), kind, &a, &b, color) }
-    }
-
-    /// The server's `draw_*` for this frame only: always, or with a `group` while the player
-    /// shows it (`/gizmo <group>`). Colors are 0xRRGGBBAA.
-    pub fn draw_line(&self, group: Option<&crate::GizmoGroup>, a: impl Into<Vec3>, b: impl Into<Vec3>, color: u32) {
-        self.draw(group, gk::LINE, a.into(), b.into(), color);
-    }
-
-    pub fn draw_box(&self, group: Option<&crate::GizmoGroup>, min: impl Into<Vec3>, max: impl Into<Vec3>, color: u32) {
-        self.draw(group, gk::BOX, min.into(), max.into(), color);
-    }
-
-    /// See-through by `color`'s alpha (range previews, blueprints).
-    pub fn draw_fill(&self, group: Option<&crate::GizmoGroup>, min: impl Into<Vec3>, max: impl Into<Vec3>, color: u32) {
-        self.draw(group, gk::FILL, min.into(), max.into(), color);
-    }
-    /// The outline of a shape, this frame.
-    pub fn draw_shape(&self, group: Option<&crate::GizmoGroup>, shape: &crate::Shape, color: u32) {
-        for (a, b) in shape.outline() {
-            self.draw_line(group, a, b, color);
-        }
-    }
-
-    /// The translation `key` with `args` at a world position, `size` times as big as menu text.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_text(
-        &self,
-        group: Option<&crate::GizmoGroup>,
-        pos: impl Into<Vec3>,
-        key: &str,
-        args: &[crate::Arg],
-        color: u32,
-        size: f32,
-    ) {
-        let (pos, raw) = (pos.into(), crate::ui::raw_args(args));
-        let group = abi_str(group.map_or("", |g| g.name()));
-        unsafe { (host().client_draw_text)(self.raw, group, &pos, size, color, abi_str(key), Slice::new(&raw)) }
-    }
-
     /// The translation `key` with `args`, centered at fractions of the window, `size` times as
     /// big as menu text. Part of the GUI: F1 hides it with the rest.
     pub fn draw_screen_text(&self, x: f32, y: f32, key: &str, args: &[crate::Arg], color: u32, size: f32) {
@@ -571,10 +530,10 @@ impl Packet {
 }
 
 impl World {
-    /// Sends `value` on `channel` to `player`'s client.
-    pub fn send<T: Payload>(&self, player: u64, channel: &Channel<T>, value: &T) {
+    /// Sends `value` on `channel` to the clients of `who` (a player's id for one).
+    pub fn send<T: Payload>(&self, who: impl Into<crate::Who>, channel: &Channel<T>, value: &T) {
         let data = value.encode();
-        unsafe { (host().send_packet)(self.raw(), player, abi_str(channel.name()), abi_str(&T::schema()), Slice::new(&data)) }
+        unsafe { (host().send_packet)(self.raw(), who.into(), abi_str(channel.name()), abi_str(&T::schema()), Slice::new(&data)) }
     }
 }
 

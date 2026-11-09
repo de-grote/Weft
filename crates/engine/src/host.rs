@@ -18,7 +18,7 @@ pub static HOST: Host = Host {
     log_at,
     log_enabled,
     reg_world_tick,
-    emit_after,
+    timer,
     reg_command,
     find,
     block_of,
@@ -42,11 +42,11 @@ pub static HOST: Host = Host {
     part_list,
     part_add,
     part_replace,
-    schedule_tick,
     game_time,
     random,
     light,
     daylight,
+    world_session,
     entity_spawn,
     entity_despawn,
     entity_mount,
@@ -64,6 +64,8 @@ pub static HOST: Host = Host {
     entities_in,
     in_liquid,
     entity_swing_strength,
+    entity_use_item,
+    entity_mine,
     component,
     player_count,
     player_at,
@@ -85,6 +87,7 @@ pub static HOST: Host = Host {
     recipe_find,
     recipe_info,
     recipe_output,
+    recipe_roll,
     recipe_consume,
     item_block,
     ui_open: crate::client::modui::ui_open,
@@ -96,10 +99,8 @@ pub static HOST: Host = Host {
     client_use_ticks_left: crate::client::modui::client_using,
     client_day_time: crate::client::modui::client_day_time,
     client_weather: crate::client::modui::client_weather,
-    client_permission: crate::client::modui::client_permission,
     client_component: crate::client::modui::client_component,
     client_entity: crate::client::modui::client_entity,
-    client_game_mode: crate::client::modui::client_game_mode,
     energy_move,
     component_get,
     component_set,
@@ -177,6 +178,7 @@ pub static HOST: Host = Host {
     set_weather,
     weather_now,
     entity_effect,
+    entity_effects,
     entity_set_pose,
     reg_command_permission,
     player_permission,
@@ -280,8 +282,8 @@ unsafe extern "C" fn navigate(w: *mut abi::WorldCtx, id: u64, target: *const abi
         let c = content();
         let d = dim(w);
         let target = d.place.to_world(crate::world::dvec(*target));
-        let mul = d.attribute(c, id, crate::server::MOVEMENT_SPEED, false) as f32;
-        let jump_mul = d.attribute(c, id, crate::server::JUMP_STRENGTH, false) as f32;
+        let mul = d.attribute(c, id, crate::registry::attr::MOVEMENT_SPEED, false) as f32;
+        let jump_mul = d.attribute(c, id, crate::registry::attr::JUMP_STRENGTH, false) as f32;
         if let Some(e) = d.entities.get_mut(id) {
             e.jump_mul = jump_mul;
         }
@@ -310,7 +312,7 @@ unsafe extern "C" fn action_override(w: *mut abi::WorldCtx, id: u64, from: Str, 
         if d.entities.get(id).is_none() {
             return;
         }
-        let comp = content().game.field_comps[7];
+        let comp = content().game.fields.swaps;
         let (from, to) = (from.as_str(), to.as_str());
         let now = d
             .entities
@@ -344,7 +346,7 @@ unsafe extern "C" fn action_play(w: *mut abi::WorldCtx, id: u64, name: Str, loop
     unsafe {
         let d = dim(w);
         // What loops goes on for whoever comes along later too, as anything else they should see.
-        let comp = content().game.field_comps[8];
+        let comp = content().game.fields.looping;
         let now = if looping != 0 { name.as_str().as_bytes() } else { &[] };
         if d.entities.get(id).is_some()
             && d.entities
@@ -362,10 +364,15 @@ unsafe extern "C" fn action_play(w: *mut abi::WorldCtx, id: u64, name: Str, loop
     }
 }
 
-unsafe extern "C" fn play_sound(w: *mut abi::WorldCtx, sound: u32, pos: *const abi::Vec3, volume: f32, pitch: f32) {
+unsafe extern "C" fn play_sound(w: *mut abi::WorldCtx, who: abi::Who, sound: u32, pos: *const abi::Vec3, volume: f32, pitch: f32) {
     unsafe {
         if (sound as usize) < content().game.sounds.len() {
-            dim(w).sound(sound, crate::world::dvec(*pos), volume, pitch);
+            let d = dim(w);
+            let pos = pos
+                .as_ref()
+                .map(|p| d.place.to_world(crate::world::dvec(*p)));
+            d.events
+                .push(crate::server::DimEvent::Sound { dim: d.id, who, sound, pos, volume, pitch });
         } else {
             misuse("play_sound", || format!("no sound {sound}"));
         }
@@ -452,16 +459,14 @@ unsafe extern "C" fn part_list(w: *mut abi::WorldCtx, pos: *const abi::BlockPos,
 }
 
 unsafe extern "C" fn part_add(w: *mut abi::WorldCtx, pos: *const abi::BlockPos, state: u32) -> u32 {
-    if state as usize >= content().states.len() {
-        misuse("part_add", || format!("no state {state}"));
+    if !known_state("part_add", state) {
         return 0;
     }
     unsafe { dim(w).add_part(content(), ip(pos), state) as u32 }
 }
 
 unsafe extern "C" fn part_replace(w: *mut abi::WorldCtx, pos: *const abi::BlockPos, old: u32, new: u32) -> u32 {
-    if new as usize >= content().states.len() {
-        misuse("part_replace", || format!("no state {new}"));
+    if !known_state("part_replace", new) {
         return 0;
     }
     unsafe { dim(w).replace_part(content(), ip(pos), old, new) as u32 }
@@ -469,6 +474,15 @@ unsafe extern "C" fn part_replace(w: *mut abi::WorldCtx, pos: *const abi::BlockP
 
 unsafe extern "C" fn world_dimension(w: *mut abi::WorldCtx) -> u32 {
     unsafe { dim(w).id }
+}
+
+/// Whether block state `state` exists, a `misuse` of `func` if not.
+fn known_state(func: &'static str, state: u32) -> bool {
+    let known = (state as usize) < content().states.len();
+    if !known {
+        misuse(func, || format!("no block state {state}"));
+    }
+    known
 }
 
 /// A mod called a host function with something that does not exist: logged, the first 20 times
@@ -492,8 +506,7 @@ pub(crate) fn misuse(func: &'static str, detail: impl FnOnce() -> String) {
 }
 
 unsafe extern "C" fn block_set(w: *mut abi::WorldCtx, pos: *const abi::BlockPos, state: u32) -> u32 {
-    if state as usize >= content().states.len() {
-        log::error!("mod tried to set invalid state {state}");
+    if !known_state("block_set", state) {
         return 0;
     }
     unsafe { dim(w).set_seen(content(), ip(pos), state).is_some() as u32 }
@@ -552,10 +565,6 @@ unsafe extern "C" fn signal_read_changed(w: *mut abi::WorldCtx, pos: *const abi:
     unsafe { dim(w).space.signals.read_changed(content(), ip(pos)) }
 }
 
-unsafe extern "C" fn schedule_tick(w: *mut abi::WorldCtx, pos: *const abi::BlockPos, delay: u32) {
-    unsafe { dim(w).schedule(ip(pos), delay) }
-}
-
 unsafe extern "C" fn game_time(w: *mut abi::WorldCtx) -> u64 {
     unsafe { dim(w).time }
 }
@@ -566,6 +575,10 @@ unsafe extern "C" fn random(w: *mut abi::WorldCtx) -> u64 {
 
 unsafe extern "C" fn light(w: *mut abi::WorldCtx, pos: *const abi::BlockPos) -> u32 {
     unsafe { dim(w).light(ip(pos)) }
+}
+
+extern "C" fn world_session(_: *mut abi::WorldCtx) -> u64 {
+    crate::server::SESSION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 unsafe extern "C" fn daylight(w: *mut abi::WorldCtx) -> f32 {
@@ -708,11 +721,12 @@ unsafe extern "C" fn entity_set(w: *mut abi::WorldCtx, id: u64, set: u32, s: *co
         if set & es::FIRE != 0 {
             e.fire = s.fire;
         }
-        if set & es::SELECTED != 0 && player {
-            e.selected = s
-                .selected
-                .min(c.game.player_layout.hotbar.saturating_sub(1));
-            told.push(Told::Selected(e.selected));
+        let hands = c.game.entities[e.kind as usize].hand_slots;
+        if set & es::SELECTED != 0 && hands > 0 {
+            e.selected = s.selected.min(hands - 1);
+            if player {
+                told.push(Told::Selected(e.selected));
+            }
         }
         // Only a respawn brings back the dead, and only damage kills: everything that follows
         // a death goes one way.
@@ -746,14 +760,21 @@ unsafe extern "C" fn entity_push(w: *mut abi::WorldCtx, id: u64, v: *const abi::
     }
 }
 
-unsafe extern "C" fn entity_walk(w: *mut abi::WorldCtx, id: u64, dir: *const [f32; 2], speed: f32, jump: u32) {
+unsafe extern "C" fn entity_walk(w: *mut abi::WorldCtx, id: u64, dir: *const [f32; 2], speed: f32, keys: u32) {
     unsafe {
-        let d = dim(w);
-        let mul = d.attribute(content(), id, crate::server::MOVEMENT_SPEED, false) as f32;
-        let jump_mul = d.attribute(content(), id, crate::server::JUMP_STRENGTH, false) as f32;
-        if let Some(e) = d.entities.get_mut(id) {
-            e.walk = Some((*dir, speed * mul, jump != 0));
+        let (d, c) = (dim(w), content());
+        let attr = |a| d.attribute(c, id, a, false) as f32;
+        use crate::registry::attr as a;
+        let (mul, jump_mul, can_fly, can_sprint) = (attr(a::MOVEMENT_SPEED), attr(a::JUMP_STRENGTH), attr(a::CAN_FLY), attr(a::CAN_SPRINT));
+        if let Some(e) = d.entities.get_mut(id).filter(|e| !e.player) {
+            // What it may not do, its keys don't do: as a hungry player's sprint key.
+            let keys = if can_sprint < 1.0 { keys & !abi::walk::SPRINT } else { keys };
+            e.walk = Some(crate::server::entity::Walk { dir: *dir, speed: speed * mul, keys });
             e.jump_mul = jump_mul;
+            // It takes off with the key, and comes down when it may fly no more or lands.
+            if keys & abi::walk::FLY != 0 || can_fly < 1.0 {
+                e.flying = keys & abi::walk::FLY != 0 && can_fly >= 1.0;
+            }
         }
     }
 }
@@ -804,6 +825,30 @@ unsafe extern "C" fn in_liquid(w: *mut abi::WorldCtx, pos: *const abi::Vec3) -> 
     unsafe {
         let d = dim(w);
         crate::physics::liquid_at(content(), &*d.space, crate::world::dvec(*pos)).is_some() as u32
+    }
+}
+
+unsafe extern "C" fn entity_use_item(w: *mut abi::WorldCtx, id: u64, off: u32, target: *const abi::BlockPos, face: u32) -> u32 {
+    unsafe {
+        let (d, c) = (dim(w), content());
+        let Some(e) = d.entities.get(id) else { return 0 };
+        let inv = d.entities.inventories.get(&id).map_or(&[][..], |i| &i[..]);
+        // The main hand as `content::in_main_hand` has it: none while both are needed.
+        let main = !crate::content::in_main_hand(c, e.kind, inv, e.selected).is_empty();
+        let slot = if off != 0 { c.game.entities[e.kind as usize].off } else { main.then_some(e.selected) };
+        let target = (!target.is_null()).then(|| (ip(target), face.min(5) as u8));
+        slot.is_some_and(|slot| d.use_in_hand(c, id, slot, target, false)) as u32
+    }
+}
+
+unsafe extern "C" fn entity_mine(w: *mut abi::WorldCtx, id: u64, pos: *const abi::BlockPos) -> u32 {
+    unsafe {
+        let d = dim(w);
+        if pos.is_null() {
+            d.stop_mining(id);
+            return 1;
+        }
+        d.start_mining(content(), id, 0, ip(pos), u32::MAX) as u32
     }
 }
 
@@ -1007,8 +1052,7 @@ unsafe extern "C" fn fill(w: *mut abi::WorldCtx, desc: *const abi::FillDesc) {
             misuse("fill", || "the shape's steps don't make one shape".to_string());
             return;
         };
-        if a.state as usize >= c.states.len() {
-            misuse("fill", || format!("no block state {}", a.state));
+        if !known_state("fill", a.state) {
             return;
         }
         let fill = match crate::server::area::AreaFill::new(c, shape, a.state, a.keep.as_str(), a.only.as_str()) {
@@ -1091,12 +1135,12 @@ unsafe extern "C" fn set_game_mode(w: *mut abi::WorldCtx, player: u64, mode: u32
     }
 }
 
-unsafe extern "C" fn send_packet(w: *mut abi::WorldCtx, player: u64, name: Str, schema: Str, data: abi::Slice<u8>) {
+unsafe extern "C" fn send_packet(w: *mut abi::WorldCtx, who: abi::Who, name: Str, schema: Str, data: abi::Slice<u8>) {
     unsafe {
         if let Some(channel) = channel_for(name.as_str(), schema.as_str()) {
-            dim(w)
-                .events
-                .push(crate::server::DimEvent::Packet { player, channel, data: data.as_slice().to_vec() });
+            let d = dim(w);
+            d.events
+                .push(crate::server::DimEvent::Packet { dim: d.id, who, channel, data: data.as_slice().to_vec() });
         }
     }
 }
@@ -1261,22 +1305,32 @@ unsafe extern "C" fn gizmo_shown(w: *mut abi::WorldCtx, group: Str) -> u32 {
     unsafe { dim(w).gizmo_groups.iter().any(|g| g == group.as_str()) as u32 }
 }
 
-unsafe extern "C" fn gizmo(w: *mut abi::WorldCtx, group: Str, kind: u32, a: *const abi::Vec3, b: *const abi::Vec3, color: u32, ticks: u32) {
+unsafe extern "C" fn gizmo(
+    w: *mut abi::WorldCtx,
+    who: abi::Who,
+    group: Str,
+    kind: u32,
+    a: *const abi::Vec3,
+    b: *const abi::Vec3,
+    color: u32,
+    ticks: u32,
+) {
     unsafe {
         let d = dim(w);
         let group = group.as_str();
-        if kind > abi::gizmo_kind::FILL || !d.gizmo_groups.iter().any(|g| g == group) {
+        if kind > abi::gizmo_kind::FILL || !d.gizmo_seen(group) {
             return;
         }
         let (a, b) = (d.place.to_world(crate::world::dvec(*a)), d.place.to_world(crate::world::dvec(*b)));
         d.gizmos
-            .push(crate::net::GizmoShape::shape(group, kind as u8, a, b, color, ticks.max(1)));
+            .push((who, crate::net::GizmoShape::shape(group, kind as u8, a, b, color, ticks.max(1))));
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 unsafe extern "C" fn gizmo_text(
     w: *mut abi::WorldCtx,
+    who: abi::Who,
     group: Str,
     pos: *const abi::Vec3,
     size: f32,
@@ -1288,13 +1342,13 @@ unsafe extern "C" fn gizmo_text(
     unsafe {
         let d = dim(w);
         let group = group.as_str();
-        if !d.gizmo_groups.iter().any(|g| g == group) {
+        if !d.gizmo_seen(group) {
             return;
         }
         let at = d.place.to_world(crate::world::dvec(*pos));
         let text = crate::ui::text::Msg::new(key.as_str(), crate::client::modui::args(args));
         d.gizmos
-            .push(crate::net::GizmoShape::text(group, at, size, color, ticks.max(1), text));
+            .push((who, crate::net::GizmoShape::text(group, at, size, color, ticks.max(1), text)));
     }
 }
 
@@ -1443,6 +1497,17 @@ unsafe extern "C" fn recipe_output(kind: Str, recipe: u32, index: u32, stack: *m
         *chance = o.chance;
     }
     1
+}
+
+unsafe extern "C" fn recipe_roll(w: *mut abi::WorldCtx, kind: Str, recipe: u32, out: *mut ItemStack, max: usize) -> usize {
+    let Some(r) = recipe_at(kind, recipe) else { return 0 };
+    unsafe {
+        let stacks = dim(w).roll_table(content(), &r.extras, &Default::default(), DVec3::ZERO, 0);
+        for (i, s) in stacks.iter().take(max).enumerate() {
+            *out.add(i) = *s;
+        }
+        stacks.len()
+    }
 }
 
 unsafe extern "C" fn recipe_consume(kind: Str, recipe: u32, stacks: *mut ItemStack, count: u32) -> u32 {
@@ -1664,32 +1729,33 @@ unsafe extern "C" fn reg_world_tick(r: *mut abi::Registrar, cb: Callback) {
     }
 }
 
-unsafe extern "C" fn emit_after(w: *mut abi::WorldCtx, entity: u64, ticks: u32, event: u32, data: abi::Slice<u8>) {
+unsafe extern "C" fn timer(w: *mut abi::WorldCtx, h: *const abi::Holder, ticks: u32, event: u32, data: abi::Slice<u8>) {
     unsafe {
         let c = content();
-        let Some(def) = c.game.events.get(event as usize) else {
-            misuse("after", || format!("no event {event}"));
-            return;
-        };
-        let d = dim(w);
-        if d.entities.get(entity).is_none() {
+        if c.game.events.get(event as usize).is_none() {
+            misuse("timer", || format!("no event {event}"));
             return;
         }
+        let (d, h, data) = (dim(w), &*h, data.as_slice());
         let until = d.time + ticks.max(1) as u64;
-        let list = d
-            .entities
-            .comps
-            .entry((entity, c.game.timers_comp))
-            .or_insert_with(|| Box::new([]));
-        // One timer per entity and event: setting it again moves it.
-        let mut v = Vec::new();
-        for (t, name, value) in crate::server::dim::read_timers(list) {
-            if name != def.name {
-                crate::server::dim::push_timer(&mut v, t, &name, &value);
+        match h.kind {
+            abi::holder::ENTITY if d.entities.get(h.entity).is_some() => {
+                let list = d
+                    .entities
+                    .comps
+                    .entry((h.entity, c.game.timers_comp))
+                    .or_insert_with(|| Box::new([]));
+                let mut v = list.to_vec();
+                crate::server::dim::push_timer(&mut v, until, &c.game.events[event as usize].name, data);
+                *list = v.into_boxed_slice();
             }
+            abi::holder::ENTITY => {}
+            // A block's own tick is the same whoever set it.
+            abi::holder::BLOCK if event == c.game.block_tick => d.schedule(ip(&h.pos), ticks),
+            abi::holder::BLOCK => d.timer_at(ip(&h.pos), ticks, event, data),
+            abi::holder::NONE => d.dim_timers.push((until, event, data.into())),
+            _ => misuse("timer", || "a stack doesn't tick, so it can't hold a timer".into()),
         }
-        crate::server::dim::push_timer(&mut v, until, &def.name, data.as_slice());
-        *list = v.into_boxed_slice();
     }
 }
 
@@ -1751,9 +1817,9 @@ pub(crate) unsafe fn shown(d: &abi::ShowDesc) -> crate::net::Shown {
 
 unsafe extern "C" fn show(w: *mut abi::WorldCtx, who: abi::Who, d: *const abi::ShowDesc) {
     unsafe {
-        dim(w)
-            .events
-            .push(crate::server::DimEvent::Show { who, shown: shown(&*d) })
+        let r = dim(w);
+        r.events
+            .push(crate::server::DimEvent::Show { dim: r.id, who, shown: shown(&*d) })
     }
 }
 
@@ -1983,31 +2049,36 @@ unsafe extern "C" fn weather_now(w: *mut abi::WorldCtx) -> u32 {
     unsafe { dim(w).weather as u32 }
 }
 
-unsafe extern "C" fn entity_effect(w: *mut abi::WorldCtx, id: u64, effect: u32, strength: f32, ticks: u32) {
+unsafe extern "C" fn entity_effect(w: *mut abi::WorldCtx, id: u64, effect: u32, level: u32, ticks: u32) {
+    let c = content();
+    if effect as usize >= c.game.entity_effects.len() {
+        misuse("entity_effect", || format!("no entity effect {effect}"));
+        return;
+    }
+    unsafe { dim(w).give_effect(c, id, effect, level, ticks) }
+}
+
+unsafe extern "C" fn entity_effects(w: *mut abi::WorldCtx, id: u64, out: *mut abi::EffectOn, cap: u32) -> u32 {
     unsafe {
         let d = dim(w);
-        let c = content();
-        if effect as usize >= c.game.entity_effects.len() {
-            misuse("entity_effect", || format!("no entity effect {effect}"));
-            return;
+        let comp = content().game.fields.effect;
+        let list: Vec<abi::EffectOn> = crate::world::effects_on(d.entities.comps.get(&(id, comp)).map(|b| &b[..]), d.time)
+            .map(|f| abi::EffectOn {
+                effect: f.id,
+                level: f.level,
+                ticks_left: if f.until == crate::world::FOREVER {
+                    abi::INFINITE_TICKS
+                } else {
+                    f.until
+                        .saturating_sub(d.time)
+                        .min(abi::INFINITE_TICKS as u64 - 1) as u32
+                },
+            })
+            .collect();
+        for (i, e) in list.iter().take(cap as usize).enumerate() {
+            *out.add(i) = *e;
         }
-        if d.entities.get(id).is_none() {
-            return;
-        }
-        let comp = c.game.field_comps[9];
-        let bytes: Vec<u8> = if ticks == 0 {
-            Vec::new()
-        } else {
-            let until = d.time + ticks as u64;
-            [effect.to_le_bytes(), strength.clamp(0.0, 1.0).to_le_bytes()]
-                .concat()
-                .into_iter()
-                .chain(until.to_le_bytes())
-                .collect()
-        };
-        d.entities
-            .comps
-            .insert((id, comp), bytes.into_boxed_slice());
+        list.len() as u32
     }
 }
 
@@ -2015,7 +2086,7 @@ unsafe extern "C" fn entity_set_pose(w: *mut abi::WorldCtx, id: u64, pose: u32, 
     unsafe {
         let d = dim(w);
         let c = content();
-        let comp = c.game.field_comps[10];
+        let comp = c.game.fields.forced;
         let Some(e) = d.entities.get_mut(id) else { return };
         let held = (pose as usize) < c.game.poses.len();
         e.facing = (held && !yaw.is_nan()).then_some(yaw);
@@ -2100,7 +2171,7 @@ unsafe extern "C" fn reg_mistake(r: *mut abi::Registrar, message: Str) {
     unsafe { reg(r).errors.push(message.as_str().to_string()) }
 }
 
-unsafe extern "C" fn particle_burst(w: *mut abi::WorldCtx, b: *const abi::ParticleBurst) {
+unsafe extern "C" fn particle_burst(w: *mut abi::WorldCtx, who: abi::Who, b: *const abi::ParticleBurst) {
     unsafe {
         let mut b = *b;
         if (b.kind as usize) < content().game.particles.len() {
@@ -2111,7 +2182,7 @@ unsafe extern "C" fn particle_burst(w: *mut abi::WorldCtx, b: *const abi::Partic
                 .to_array()
                 .into();
             d.events
-                .push(crate::server::DimEvent::Particles { dim: d.id, burst: b });
+                .push(crate::server::DimEvent::Particles { dim: d.id, who, burst: b });
         } else {
             misuse("particles", || format!("no particle {}", b.kind));
         }

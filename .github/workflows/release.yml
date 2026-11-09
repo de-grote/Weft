@@ -61,14 +61,14 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
 
-      # The game and every mod in the workspace; `--dist` then packs the mods.
+      # The game and every mod in the workspace; `dist` then packs the mods.
       - name: Build
         run: cargo build --release --workspace
 
       - name: Make the distribution
         shell: bash
         run: |
-          target/release/${{ matrix.exe }} --dist dist/Weft
+          target/release/${{ matrix.exe }} dist dist/Weft
           test -f dist/Weft/${{ matrix.exe }}
           test -n "$(ls dist/Weft/run/mods)"
 

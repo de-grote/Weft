@@ -46,12 +46,12 @@ thread_local! {
     /// The search's map and queue, kept between searches (thousands of mobs walk about).
     static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new((FxHashMap::default(), BinaryHeap::new()));
 }
-const MAX_DROP: i32 = 3;
 
 /// Cells a body `height` blocks tall can stand in, from the feet cell `from` towards `to`: the
 /// whole way, or as far as it gets (the reachable cell closest to the target) when `to` is out
 /// of reach or more than `MAX_NODES` cells away.
-pub fn find(c: &Content, block: &impl crate::physics::Cells, from: IVec3, to: IVec3, height: i32) -> Vec<IVec3> {
+/// `drop`: the most blocks it goes down at once (what it falls without harm).
+pub fn find(c: &Content, block: &impl crate::physics::Cells, from: IVec3, to: IVec3, height: i32, drop: i32) -> Vec<IVec3> {
     // Judged by the collision boxes walking bumps into, like the step itself.
     let top = |s: u32| crate::physics::collision_top(c, s);
     let open = |p: IVec3| {
@@ -120,7 +120,7 @@ pub fn find(c: &Content, block: &impl crate::physics::Cells, from: IVec3, to: IV
                 }
             } else {
                 // Open but nothing to stand on: drop down to the first ground.
-                for k in 1..=MAX_DROP {
+                for k in 1..=drop {
                     let down = q - IVec3::Y * k;
                     if !open(down) {
                         break;

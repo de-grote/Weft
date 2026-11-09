@@ -1,0 +1,44 @@
+name: Modding API
+description: The SDK can't do something you need for a mod, or makes it awkward.
+labels: [modding]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check `docs/modding.md` and the `docs/` folder first: a lot of things are a tag or a component away.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: What you're making
+      description: The block, item, mob or system, as it should work in the game, code snippets welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: missing
+    attributes:
+      label: What gets in the way
+      description: What is missing, what you had to work around, or what you couldn't find.
+    validations:
+      required: true
+
+  - type: textarea
+    id: code
+    attributes:
+      label: What you have now
+      description: The code you wrote or tried.
+      render: rust
+
+  - type: textarea
+    id: wish
+    attributes:
+      label: How you'd like to write it
+      description: Optional. A few lines of the API you wish existed.
+      render: rust
+
+  - type: input
+    id: version
+    attributes:
+      label: SDK version or commit
+      placeholder: 26.11.3, or a commit hash

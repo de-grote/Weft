@@ -382,7 +382,7 @@ pub async fn neutral_mobs(t: T) -> R {
     t.op(&format!("remove {dark}")).await?;
     t.op("heal").await?;
 
-    let sentry = spawn(&t, "testkit:sentry", add(f, [10, 0, 0])).await?;
+    let sentry = spawn(&t, "testmod:sentry", add(f, [10, 0, 0])).await?;
     t.secs(2.5).await?;
     t.check_eq(health(t.clone()).await?, 20.0, "out of its distance it does nothing");
     let at = pos_of(&t, &format!("{sentry}")).await?;

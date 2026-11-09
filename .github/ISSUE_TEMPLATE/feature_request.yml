@@ -1,0 +1,31 @@
+name: Feature request
+description: Something the game should have or do differently.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you want
+      description: Describe it as a player should see it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Purpose
+      description: What does this add that you can't now, or what annoying feature it changes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: vanilla
+    attributes:
+      label: How others do it
+      description: How vanilla or a mod you know does it, if they do. Screenshots welcome.
+
+  - type: textarea
+    id: else
+    attributes:
+      label: Anything else
+      description: Ideas you thought about and dropped, etc.

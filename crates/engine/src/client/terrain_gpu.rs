@@ -153,11 +153,15 @@ pub fn describe_lod(c: &Content, dim: u32, seed: u64) -> Option<Vec<i32>> {
     let biomes = c.biomes.len().max(1);
     let mut buf = vec![weft_abi::ScatterBlock { offset: [0; 3].into(), state: 0, force: 0 }; 4096];
     for sc in &def.scatters {
+        // Far away only what a mod's callback grows by a biome's density shows (trees).
+        let (density, grown) = match (&sc.chance, &sc.shape) {
+            (crate::content::Chance::Density(d), crate::content::SiteShape::Callback(owner, shape)) => (*d, Some((*owner, *shape))),
+            _ => (None, None),
+        };
         let key = seed ^ sc.salt;
         w.extend_from_slice(&[sc.cell, sc.reach, key as u32 as i32, (key >> 32) as u32 as i32, biomes as i32]);
         for b in 0..biomes as u32 {
-            let density = sc
-                .density
+            let density = density
                 .and_then(|d| c.components.get::<f32>(crate::components::BIOME, b, d))
                 .unwrap_or(0.0);
             let threshold = (density as f64 * (1u64 << 53) as f64).ceil() as u64;
@@ -173,7 +177,7 @@ pub fn describe_lod(c: &Content, dim: u32, seed: u64) -> Option<Vec<i32>> {
                     cap: buf.len() as u32,
                     len: 0,
                 };
-                if threshold == 0 || !crate::host::invoke(sc.owner, sc.shape, &mut args) {
+                if threshold == 0 || !grown.is_some_and(|(owner, shape)| crate::host::invoke(owner, shape, &mut args)) {
                     continue;
                 }
                 let blocks = &buf[..(args.len as usize).min(buf.len())];
@@ -475,15 +479,8 @@ impl GpuTerrain {
 }
 
 fn unpacking() -> &'static rayon::ThreadPool {
-    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
-    POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
-            .thread_name(|i| format!("terrain unpack {i}"))
-            .start_handler(|_| crate::lower_priority())
-            .build()
-            .expect("terrain unpack pool")
-    })
+    static POOL: crate::Pool = crate::Pool::new();
+    crate::pool(&POOL, "terrain unpack", 4, true)
 }
 
 fn enabled() -> bool {

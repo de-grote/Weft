@@ -463,24 +463,10 @@ impl UiRenderer {
         }
     }
 
-    /// Share `v` of a picture in `r`: its nearest state, or cut off toward `dir` (`ui::meter`).
+    /// Share `v` of a picture in `r`, tinted `color`: its nearest state, or cut off toward `dir`
+    /// (`ui::meter`).
     #[allow(clippy::too_many_arguments)]
-    fn meter_picture(&mut self, gpu: &mut dyn Backend, assets: &Assets, name: &str, v: f32, dir: u32, r: Rect, scale: f32) {
-        self.meter_picture_tinted(gpu, assets, name, v, dir, r, scale, 0xFFFFFFFF)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn meter_picture_tinted(
-        &mut self,
-        gpu: &mut dyn Backend,
-        assets: &Assets,
-        name: &str,
-        v: f32,
-        dir: u32,
-        r: Rect,
-        scale: f32,
-        color: u32,
-    ) {
+    fn meter_picture(&mut self, gpu: &mut dyn Backend, assets: &Assets, name: &str, v: f32, dir: u32, r: Rect, scale: f32, color: u32) {
         let Some((picture, crop)) = super::meter::part(name, v, dir) else { return };
         match self.texture(gpu, assets, &picture) {
             Some((idx, _, _)) => self.image(cropped(r, crop), idx, crop, color),
@@ -1080,7 +1066,7 @@ impl UiRenderer {
                 background(self, class, "");
                 let v = value.clamp(0.0, 1.0);
                 match look.texture(class, "fill") {
-                    Some(fill) => self.meter_picture(gpu, assets, &fill, v, *dir, r, scale),
+                    Some(fill) => self.meter_picture(gpu, assets, &fill, v, *dir, r, scale, !0),
                     None => self.checker(cropped(r, super::meter::crop(v, *dir)), scale),
                 }
             }
@@ -1152,13 +1138,13 @@ impl UiRenderer {
                         if pv > 0.0 && pv > v {
                             let a = (alpha * 255.0) as u32;
                             if let Some(full) = &full {
-                                self.meter_picture_tinted(gpu, assets, full, pv.min(1.0), *dir, rr, scale, 0xFFFFFF00 | a);
+                                self.meter_picture(gpu, assets, full, pv.min(1.0), *dir, rr, scale, 0xFFFFFF00 | a);
                             }
                         }
                     }
                     if v > 0.0 {
                         match &full {
-                            Some(full) => self.meter_picture(gpu, assets, full, v.min(1.0), *dir, rr, scale),
+                            Some(full) => self.meter_picture(gpu, assets, full, v.min(1.0), *dir, rr, scale, !0),
                             None => self.checker(rr, scale),
                         }
                     }
@@ -1170,7 +1156,7 @@ impl UiRenderer {
                         if ov > 0.0
                             && let Some(o) = &overlay
                         {
-                            self.meter_picture(gpu, assets, o, ov.min(1.0), *dir, rr, scale);
+                            self.meter_picture(gpu, assets, o, ov.min(1.0), *dir, rr, scale, !0);
                         }
                     }
                 }
@@ -1229,7 +1215,7 @@ impl UiRenderer {
             }
             Kind::Custom { tag, data } => {
                 // What engine-drawn nodes use, loaded for `draw_loaded`.
-                for class in ["slot", "hotbar", "hotbar_selected", "slot_highlight", "well", "crosshair"] {
+                for class in ["slot", "hotbar", "hotbar_selected", "slot_highlight", "well", "crosshair", "effect"] {
                     if let Some(name) = look.texture(class, "") {
                         if let Some(t) = self.texture(gpu, assets, &name) {
                             self.declared_slicing(assets, &name, [t.1 as f32, t.2 as f32]);

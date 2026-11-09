@@ -517,7 +517,7 @@ gpu_struct! {
         pub params: [f32; 4],
         /// x the dimension's ambient light 0..1, y the Brightness setting 0 (moody) .. 1
         /// (bright), z game ticks with the fraction of the current one (animated textures;
-        /// wraps every 2^20).
+        /// wraps every 2^20), w how much the player sees as if all were lit (night vision).
         pub light: [f32; 4],
         /// xyz toward the sun (unit), w how far it is above the horizon (0 under it or in a
         /// dimension without sky light). For shader packs' shadows; follows the day, whatever

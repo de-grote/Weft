@@ -4,7 +4,7 @@ use super::*;
 
 impl Server {
     pub(super) fn sync_players(&mut self, c: &'static Content) {
-        let mining_now = self.mining_now(c);
+        let mining_now = self.mining_now();
         let settled: Vec<Vec<IVec3>> = self.dims.iter_mut().map(|d| d.take_settled()).collect();
         let moved = self.collect_moves(c);
 
@@ -28,11 +28,9 @@ impl Server {
                 .map_or((DVec3::ZERO, GameMode::SURVIVAL), |e| (e.pos, e.mode));
             send_entities(c, p, dim, &moved[d], *tick, view.radius, viewer);
             send_own_state(c, p, dim);
-            if !p.gizmos.is_empty() {
-                let shapes = gizmos_for(p, dim, *tick, viewer.0);
-                if !shapes.is_empty() {
-                    p.conn.send(ToClient::Gizmos(shapes));
-                }
+            let shapes = gizmos_for(p, dim, *tick, viewer.0);
+            if !shapes.is_empty() {
+                p.conn.send(ToClient::Gizmos(shapes));
             }
             unsent += send_cubes(p, dim, &c.dims[d], view, full, &settled[d]);
         }
@@ -43,27 +41,23 @@ impl Server {
         self.unload_unused(c);
     }
 
-    /// Mining goes on by what each one holds and where it is this tick. Returns who is breaking
-    /// what, in tenths as crack pictures go, so most ticks nothing is sent.
-    fn mining_now(&mut self, c: &'static Content) -> Vec<Vec<crate::net::Crack>> {
-        // This also runs between ticks, where nothing goes on.
-        let ticked = std::mem::replace(&mut self.mining_tick, self.tick) != self.tick;
-        let mut mining_now: Vec<Vec<crate::net::Crack>> = vec![Vec::new(); self.dims.len()];
-        for pi in 0..self.players.len() {
-            let Some(m) = self.players[pi].mining.filter(|_| self.players[pi].joined) else { continue };
-            let Some((r, id)) = self.region(pi) else { continue };
-            let rate = if ticked { r.mining_rate_of(c, id, m.frame, m.pos, m.part) } else { 0.0 };
-            let progress = (m.progress + rate).min(1.0);
-            let p = &mut self.players[pi];
-            p.mining = Some(Mining { progress, ..m });
-            if m.frame == 0 {
-                mining_now[p.dim as usize].push((p.entity, m.pos, m.part, (progress.min(0.99) * 10.0).floor() / 10.0));
-            }
-        }
-        mining_now
+    /// Who is breaking what in each dimension, in tenths as crack pictures go, so most ticks
+    /// nothing is sent.
+    fn mining_now(&self) -> Vec<Vec<crate::net::Crack>> {
+        self.dims
+            .iter()
+            .map(|d| {
+                d.regions
+                    .iter()
+                    .flat_map(|r| &r.entities.list)
+                    .filter(|e| !e.removed)
+                    .filter_map(|e| e.mining.filter(|m| m.frame == 0).map(|m| (e.id, m)))
+                    .map(|(id, m)| (id, m.pos, m.part, (m.progress.min(0.99) * 10.0).floor() / 10.0))
+                    .collect()
+            })
+            .collect()
     }
 
-    /// Entities that moved since last tick, per dimension (all regions).
     fn collect_moves(&mut self, c: &'static Content) -> Vec<Vec<crate::net::Move>> {
         let mut moved: Vec<Vec<crate::net::Move>> = Vec::with_capacity(self.dims.len());
         for d in &mut self.dims {
@@ -222,16 +216,10 @@ fn send_mining(p: &mut Player, cracks: &[crate::net::Crack], tick: u64) {
 }
 
 fn send_clock(p: &mut Player, dim: &DimSet, tick: u64, rate: u32) {
-    if p.first_sync || p.sent_rate != rate {
+    if p.first_sync || p.sent_rate != rate || dim.weather_moved || dim.day_moved || tick % TPS as u64 == 0 {
         p.sent_rate = rate;
-        p.conn.send(ToClient::TickRate(rate));
-    }
-    if dim.weather_moved || p.first_sync {
-        p.conn.send(ToClient::Weather(dim.weather as u32));
-    }
-    if tick % TPS as u64 == 0 || dim.day_moved {
         p.conn
-            .send(ToClient::Time { dim: p.dim, time: dim.day_time() });
+            .send(ToClient::Clock { dim: p.dim, time: dim.day_time(), ticks: dim.time, weather: dim.weather as u32, rate });
     }
 }
 
@@ -258,7 +246,7 @@ fn send_entities(
             .entities
             .list
             .iter()
-            .filter(|e| e.in_world() && e.id != p.entity && (!e.player || e.alive()))
+            .filter(|e| e.seen(c) && e.id != p.entity && (!e.player || e.alive()))
             .filter(shown)
         {
             if (e.pos - me).length_squared() > range2 {
@@ -392,20 +380,6 @@ fn send_own_state(c: &'static Content, p: &mut Player, dim: &mut DimSet) {
             entity::Told::Flying(on) => ToClient::Flying(on),
             entity::Told::Selected(slot) => ToClient::Selected(slot),
         });
-    }
-    // The client moves its player and times its mining: it needs them all.
-    if p.sent_attributes.is_empty() {
-        p.sent_attributes = vec![f32::NAN; c.game.attributes.len()];
-    }
-    let attributes: Vec<(u32, f32)> = (0..c.game.attributes.len() as u32)
-        .map(|a| (a, reg.attribute(c, p.entity, a, false) as f32))
-        .filter(|&(a, v)| p.sent_attributes[a as usize] != v)
-        .collect();
-    if !attributes.is_empty() {
-        for &(a, v) in &attributes {
-            p.sent_attributes[a as usize] = v;
-        }
-        p.conn.send(ToClient::Attributes(attributes));
     }
     // Own inventory and synced components.
     if p.first_sync || reg.entities.dirty_inv.contains(&p.entity) {
@@ -542,8 +516,11 @@ pub(super) fn gizmos_for(p: &Player, dim: &DimSet, tick: u64, me: DVec3) -> Vec<
         out.extend(
             r.gizmos
                 .iter()
-                .filter(|g| p.gizmos.contains(&g.group))
-                .cloned(),
+                .filter(|(who, g)| {
+                    (g.group.is_empty() || p.gizmos.contains(&g.group))
+                        && super::reaches(*who, p.entity, p.dim, || Some(me), dim.id, |_| true)
+                })
+                .map(|(_, g)| g.clone()),
         );
     }
     if tick % TPS as u64 != 0 {

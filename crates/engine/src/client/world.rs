@@ -56,6 +56,8 @@ pub struct ClientWorld {
     pub dim: u32,
     cubes: FxHashMap<IVec3, Slot>,
     pub time: u64,
+    /// Ticks the dimension ran, what entity effects end by (`net::ToClient::Clock`).
+    pub ticks: u64,
     /// Dirty cubes whose six neighbors are all known: meshable now. Kept up to date as cubes
     /// come and go, so a frame never walks every dirty cube (tens of thousands while loading).
     ready: FxHashSet<IVec3>,
@@ -87,6 +89,8 @@ pub struct ClientWorld {
     pub bounded: bool,
     /// What moving bodies' lights give cells of the world, for working out light as the server does.
     body_glow: FxHashMap<IVec3, [u8; 3]>,
+    /// Light that moves with entities, the client's own (`glow`).
+    pub(super) glow: super::glow::Glow,
     pub bounds: Option<(IVec3, IVec3)>,
     /// Updates that came together, shown together once all their cubes are meshed: new meshes
     /// next to old ones open holes for a few frames otherwise (a crater showing the caves
@@ -186,6 +190,7 @@ impl ClientWorld {
             dim,
             cubes: FxHashMap::default(),
             time: 0,
+            ticks: 0,
             ready: FxHashSet::default(),
             order: Vec::new(),
             order_center: IVec3::ZERO,
@@ -208,6 +213,7 @@ impl ClientWorld {
             tints_dirty: FxHashSet::default(),
             bounded: false,
             body_glow: FxHashMap::default(),
+            glow: Default::default(),
             bounds: None,
             batches: Vec::new(),
             open: None,
@@ -350,6 +356,7 @@ impl ClientWorld {
         self.tints_dirty.clear();
         self.batches.clear();
         self.body_glow.clear();
+        self.glow = Default::default();
     }
 
     /// Starts collecting what arrives into one batch; `whole`: shown once all of it is meshed
@@ -454,6 +461,7 @@ impl ClientWorld {
 
     /// `around`: the cubes around it not to wait for.
     pub fn insert(&mut self, pos: IVec3, cube: Arc<Cube>, around: super::terrain::Around) {
+        self.glow.changed(pos);
         let wired = self.has_wire(&cube);
         self.wire_seen |= wired;
         if wired || self.wire_around(pos) {
@@ -560,6 +568,7 @@ impl ClientWorld {
 
     pub fn set_block(&mut self, p: IVec3, state: u32) {
         let cp = cube_of(p);
+        self.glow.changed(cp);
         let Some(slot) = self.cubes.get_mut(&cp) else { return };
         // The shape of wire near it may depend on it, if it is more than a gate going on or off.
         let c = crate::content::content();
@@ -583,13 +592,14 @@ impl ClientWorld {
         // structure's light is its own.
         if !self.bounded {
             let sky = c.dims[self.dim as usize].sky_light;
-            let changed = crate::world::light::block_changed(&mut LitCubes(&mut self.cubes), c, sky, &self.body_glow, p, was);
+            let changed =
+                crate::world::light::relight(&mut LitCubes(&mut self.cubes), c, sky, &self.body_glow, |l| l.block_changed(p, was));
             self.relit(changed);
         }
     }
 
     /// Cubes whose light the client changed, to draw again.
-    fn relit(&mut self, changed: Vec<IVec3>) {
+    pub(super) fn relit(&mut self, changed: Vec<IVec3>) {
         for n in changed {
             self.next_rev += 1;
             if let Some(slot) = self.cubes.get_mut(&n) {
@@ -609,6 +619,7 @@ impl ClientWorld {
     /// What else is in the cell at `p` is now `extras`.
     pub fn set_extras(&mut self, p: IVec3, extras: Vec<u32>) {
         let cp = cube_of(p);
+        self.glow.changed(cp);
         let Some(slot) = self.cubes.get_mut(&cp) else { return };
         if slot.cube.extras(local_index(p)) == extras {
             return;
@@ -623,7 +634,7 @@ impl ClientWorld {
         self.touch(cp, around_mask(l.x, l.y, l.z));
         if relight && !self.bounded {
             let sky = c.dims[self.dim as usize].sky_light;
-            let changed = crate::world::light::parts_changed(&mut LitCubes(&mut self.cubes), c, sky, &self.body_glow, p);
+            let changed = crate::world::light::relight(&mut LitCubes(&mut self.cubes), c, sky, &self.body_glow, |l| l.source_changed(p));
             self.relit(changed);
         }
     }
@@ -843,8 +854,8 @@ impl ClientWorld {
         }
         // What each job takes from the world, gathered on every core: thousands start a frame
         // while loading.
-        let cubes = &self.cubes;
-        let jobs: Vec<(IVec3, [Option<Arc<Cube>>; 27], u32, u32)> = start
+        let (cubes, glow) = (&self.cubes, &self.glow);
+        let jobs: Vec<(IVec3, [Option<Arc<Cube>>; 27], u32, u32, Vec<(usize, [u8; 3])>)> = start
             .par_iter()
             .map(|&pos| {
                 let around = std::array::from_fn(|i| {
@@ -853,10 +864,10 @@ impl ClientWorld {
                         .map(|s| s.cube.clone())
                 });
                 let s = &cubes[&pos];
-                (pos, around, s.version, s.hidden)
+                (pos, around, s.version, s.hidden, glow_around(glow, pos))
             })
             .collect();
-        for (pos, around, version, hidden) in jobs {
+        for (pos, around, version, hidden, glow) in jobs {
             let tx = self.tx.clone();
             let filler = self.filler;
             let ctm = super::ctm::current();
@@ -870,7 +881,7 @@ impl ClientWorld {
                 let mesh = if empty {
                     mesher::Mesh::default()
                 } else {
-                    mesher::build(content(), &neighborhood(&around, hidden, filler, pos), &ctm)
+                    mesher::build(content(), &neighborhood(&around, hidden, filler, pos, &glow), &ctm)
                 };
                 crate::diag::MESHED.add(1);
                 crate::diag::MESH_NS.add(t.elapsed().as_nanos() as u64);
@@ -947,7 +958,27 @@ fn around(pos: IVec3, mask: u32) -> impl Iterator<Item = IVec3> {
 
 const BORDER_ROW: [i32; 18] = [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 
-fn neighborhood(around: &[Option<Arc<Cube>>; 27], hidden: u32, filler: u32, pos: IVec3) -> Neighborhood {
+/// The entities' light (`glow`) in a cube and the blocks around it, by padded index.
+fn glow_around(glow: &super::glow::Glow, pos: IVec3) -> Vec<(usize, [u8; 3])> {
+    if !(0..27).any(|i| glow.cubes.contains(&(pos + crate::world::cube::around(i)))) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for y in -1..17 {
+        for z in -1..17 {
+            for x in -1..17 {
+                if let Some(l) = glow.cells.get(&(pos * 16 + IVec3::new(x, y, z))) {
+                    out.push((pidx(x, y, z), *l));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What meshing reads around a cube: its blocks and the border's, their light with the
+/// entities' (`glow`) taken where it is brighter.
+fn neighborhood(around: &[Option<Arc<Cube>>; 27], hidden: u32, filler: u32, pos: IVec3, glow: &[(usize, [u8; 3])]) -> Neighborhood {
     let mut states = Box::new([AIR; PAD_VOLUME]);
     let mut light = Box::new([15u32; PAD_VOLUME]);
     let mut biomes = [0u16; 256];
@@ -1020,6 +1051,11 @@ fn neighborhood(around: &[Option<Arc<Cube>>; 27], hidden: u32, filler: u32, pos:
                     extras.insert(pi, cube.extras(li).to_vec());
                 }
             }
+        }
+    }
+    for &(i, g) in glow {
+        if light[i] != mesher::ABSENT {
+            light[i] = super::glow::with_glow(light[i], g);
         }
     }
     Neighborhood { states, extras, light, biomes, origin: (pos * 16).to_array() }
@@ -1111,7 +1147,7 @@ mod tests {
             *slot = Some(Arc::new(cube));
         }
         let hidden = 1 << 4 | 1 << 22;
-        let n = neighborhood(&around, hidden, 9, IVec3::ZERO);
+        let n = neighborhood(&around, hidden, 9, IVec3::ZERO, &[]);
         for y in -1..17i32 {
             for z in -1..17i32 {
                 for x in -1..17i32 {

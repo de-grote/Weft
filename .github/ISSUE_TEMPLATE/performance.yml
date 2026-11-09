@@ -1,0 +1,64 @@
+name: Performance
+description: Low frame rate, stutters, slow loading, too much memory/CPU/GPU usage.
+labels: [performance]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Numbers, please. "It feels slow" can't be fixed.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What is slow
+      description: What you were doing when it happened, and how long it lasts.
+    validations:
+      required: true
+
+  - type: textarea
+    id: numbers
+    attributes:
+      label: Numbers
+      description: Frame rate, frame time, load time, memory. A screenshot with F3 open while it happens is the best.
+    validations:
+      required: true
+
+  - type: input
+    id: settings
+    attributes:
+      label: View distance and other settings you changed
+      placeholder: view 32, vsync off, shader pack X
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: OS, CPU, GPU, RAM
+      placeholder: Windows 11, Ryzen 5 5600, RTX 3060, 16 GB
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: 26.11.3, or a commit hash
+    validations:
+      required: true
+
+  - type: dropdown
+    id: renderer
+    attributes:
+      label: Renderer
+      options:
+        - Vulkan
+        - WGPU
+        - Both
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: "`logs/latest.log` from that session. Starting with `--log load=debug,frame=debug` says where the time goes."
+      render: text

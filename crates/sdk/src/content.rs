@@ -2,7 +2,7 @@ use crate::abi::BlockPos;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::abi::{self, BlockModel, RenderLayer, Slice, Str, block_flags as bf};
+use crate::abi::{self, BlockModel, RenderLayer, Slice, Str};
 use crate::component::{self as c, Component, Data, Value};
 use crate::comps::block as bc;
 use crate::{World, callback, host, qualify};
@@ -395,6 +395,8 @@ pub mod entity_effects {
     pub static HURT: EntityEffect = EntityEffect::named("core:hurt");
     /// Lit up whatever the light around it.
     pub static GLOW: EntityEffect = EntityEffect::named("core:glow");
+    /// Not drawn: the light every burning entity gives (`r.edit(&BURNING).light_rgb(..)`).
+    pub static BURNING: EntityEffect = EntityEffect::named("core:burning");
 }
 
 /// An entity effect being registered: drawn by `shaders/entity_effect/<its name>.wgsl` unless
@@ -422,6 +424,62 @@ impl EntityEffectBuilder<'_> {
     pub fn shader(self, shader: &crate::Shader) -> Self {
         let name = shader.name().to_string();
         self.set_text(&crate::comps::entity_effect::SHADER, &name)
+    }
+    /// Nothing drawn: an effect only of hazards and modifiers.
+    pub fn unseen(self) -> Self {
+        self.set_text(&crate::comps::entity_effect::SHADER, "")
+    }
+    /// What it does to its entity while on (`Hazard::own(1.0, &MAGIC).every(25)`: poison), its
+    /// damage times the level (negative heals); once when given if it is `instant`.
+    pub fn hazard(self, h: crate::Hazard) -> Self {
+        self.push(&crate::comps::entity_effect::HAZARDS, h.0)
+    }
+    /// `hazard` for `level` only, as it is: at that level the others don't count.
+    pub fn hazard_at(self, level: u32, mut h: crate::Hazard) -> Self {
+        h.0.level = level.max(1);
+        self.push(&crate::comps::entity_effect::HAZARDS, h.0)
+    }
+    /// A modifier its entity has while it is on (`Modifier::add(&attribute::MOVEMENT_SPEED, 0.2)`),
+    /// its amount times the level; a `attr_op::SET` one sets what it says at every level.
+    pub fn modifier(self, m: crate::Modifier) -> Self {
+        self.push(&crate::comps::entity_effect::MODIFIERS, m.0)
+    }
+    /// `modifier` for `level` only, as it is: at that level the others of its attribute don't
+    /// count (mining fatigue's steep steps).
+    pub fn modifier_at(self, level: u32, mut m: crate::Modifier) -> Self {
+        m.0.level = level.max(1);
+        self.push(&crate::comps::entity_effect::MODIFIERS, m.0)
+    }
+    /// A status effect: its player sees it, by this icon (`textures/<icon>.png`, 18 pixels square
+    /// like vanilla's), on the HUD and beside the inventory, named `effect.<namespace>.<name>`
+    /// in lang.
+    pub fn icon(self, texture: &str) -> Self {
+        let tex = crate::asset("", texture);
+        self.set_text(&crate::comps::entity_effect::ICON, &tex)
+    }
+    /// Swirls of this color (`0xRRGGBB`) around who has it, as vanilla's potion effects.
+    pub fn color(self, rgb: u32) -> Self {
+        self.set(&crate::comps::entity_effect::COLOR, rgb)
+    }
+    pub fn beneficial(self) -> Self {
+        self.tag(abi::comp::ENTITY_EFFECT_BENEFICIAL)
+    }
+    pub fn harmful(self) -> Self {
+        self.tag(abi::comp::ENTITY_EFFECT_HARMFUL)
+    }
+    /// It acts once when given, its hazards times the level (healing), and doesn't stay.
+    pub fn instant(self) -> Self {
+        self.tag(abi::comp::ENTITY_EFFECT_INSTANT)
+    }
+    /// What its player sees goes through this screen shader while it has it
+    /// (`shaders/post/<name>.wgsl`, `PostPixel`): night vision, blindness.
+    pub fn screen(self, shader: &crate::Shader) -> Self {
+        let name = shader.name().to_string();
+        self.set_text(&crate::comps::entity_effect::SCREEN, &name)
+    }
+    /// Its entity isn't drawn for anyone else while it has it (invisibility).
+    pub fn hides(self) -> Self {
+        self.tag(abi::comp::ENTITY_EFFECT_HIDES)
     }
 }
 
@@ -684,9 +742,9 @@ impl GameModeBuilder<'_> {
     pub fn no_costs(self) -> Self {
         self.tag(abi::comp::game_mode::NO_COSTS)
     }
-    /// No damage, hunger or air.
+    /// No damage, hunger or air (`attribute::INVULNERABLE` 1).
     pub fn invulnerable(self) -> Self {
-        self.tag(abi::comp::game_mode::INVULNERABLE)
+        self.modifier(&crate::attribute::INVULNERABLE, abi::attr_op::SET, 1.0)
     }
     /// Through blocks.
     pub fn noclip(self) -> Self {
@@ -769,6 +827,10 @@ impl DamageCauseBuilder<'_> {
     /// No hurt sound.
     pub fn silent(self) -> Self {
         self.tag(abi::comp::damage_cause::SILENT)
+    }
+    /// Never kills: it leaves half a heart (poison).
+    pub fn not_lethal(self) -> Self {
+        self.tag(abi::comp::damage_cause::NOT_LETHAL)
     }
     /// Translation key said when a player dies of it, `{0}` their name.
     pub fn death_message(self, key: &str) -> Self {
@@ -922,6 +984,24 @@ pub trait Holds: WithComponents {
 }
 impl Holds for ItemBuilder<'_> {}
 impl Holds for crate::EntityBuilder<'_> {}
+
+/// Light that moves with an entity: an item's (held, worn, shown or dropped), an entity kind's or an
+/// entity effect's, drawn by clients alone. Blocks set `light` per state; an item that places a
+/// block gives that block's light. One entity's own changes while it lives: its kind attaches
+/// `LIGHT` (starting as the kind's) and `w.set_component(e, &LIGHT, [r, g, b])` sets it.
+pub trait Glows: WithComponents {
+    /// White light. 15 is full strength; more is allowed and reaches further.
+    fn light(self, level: u8) -> Self {
+        self.light_rgb(level, level, level)
+    }
+    /// Colored light, per channel.
+    fn light_rgb(self, r: u8, g: u8, b: u8) -> Self {
+        self.set(&c::LIGHT, [r, g, b])
+    }
+}
+impl Glows for ItemBuilder<'_> {}
+impl Glows for crate::EntityBuilder<'_> {}
+impl Glows for EntityEffectBuilder<'_> {}
 
 /// On some states only, on top of the block's.
 impl WithComponents for State<'_> {
@@ -1559,6 +1639,13 @@ macro_rules! state_setters {
         pub fn piece(self, min: [f32; 3], max: [f32; 3], left: &str, alone: &str) -> Self {
             self.push(&bc::PIECES, abi::Piece { min, max, left: left.into(), alone: alone.into() })
         }
+        /// More cells than its own, as its model is written (facing north, its top up): a door
+        /// `&[[0, 1, 0]]`, a 3x3x3 machine every cell around. It is one block in all of them: what
+        /// is done to any is done to it, and it is placed and gone whole. Its model and boxes span
+        /// them from its own cell. The cells touch each other by faces.
+        pub fn cells(self, cells: &[[i32; 3]]) -> Self {
+            self.set(&bc::CELLS, cells.to_vec())
+        }
         /// The sides a liquid in its cell can't pass (`.shares_cell_with("#water")`): without
         /// this, the ones its hitbox covers whole (a stair's back holds water, a hollow log's open
         /// ends don't). `&[]` lets it out everywhere.
@@ -1862,16 +1949,20 @@ impl<'a> BlockBuilder<'a> {
     pub fn spreads(self, to: &str, mean_seconds: f32, min_light: u32) -> Self {
         self.set_text(&c::SPREADS_TO, to)
             .set(&c::SPREAD_TIME, mean_seconds)
-            .set(&c::SPREAD_LIGHT, min_light)
+            .spread_when(crate::Cond::new(&format!("light({min_light}.., up) & !covered")))
+    }
+
+    /// What has to hold for a target of `spreads` instead (moss up a wall:
+    /// `Cond::new("light(9.., any)")`, covered or not).
+    pub fn spread_when(self, when: impl Into<crate::Cond>) -> Self {
+        self.set(&c::SPREAD_WHEN, vec![when.into().0])
     }
 
     /// Where `spreads` reaches, from this block to the target: min and max offsets, at most 4
-    /// each way (grass: `[-1, -3, -1]` to `[1, 1, 1]`, the default). With `covered`, targets
-    /// with something opaque on top count too, lit by their brightest side (moss up a wall).
-    pub fn spread_reach(self, min: impl Into<BlockPos>, max: impl Into<BlockPos>, covered: bool) -> Self {
+    /// each way (grass: `[-1, -3, -1]` to `[1, 1, 1]`, the default).
+    pub fn spread_reach(self, min: impl Into<BlockPos>, max: impl Into<BlockPos>) -> Self {
         let (min, max) = (min.into(), max.into());
-        let b = self.set(&c::SPREAD_REACH, [min.x, min.y, min.z, max.x, max.y, max.z]);
-        if covered { b.tag(abi::comp::SPREADS_COVERED) } else { b }
+        self.set(&c::SPREAD_REACH, [min.x, min.y, min.z, max.x, max.y, max.z])
     }
 
     /// Turns into `block` in `mean_seconds` on average once something opaque covers it (grass
@@ -1945,20 +2036,21 @@ impl<'a> BlockBuilder<'a> {
     /// by `p.is("north", "true")`.
     pub fn joins(mut self, sides: crate::Facings, to: &str) -> Self {
         for d in sides.dirs() {
-            self = self.prop(d.name(), ["false", "true"]);
+            let there = crate::Cond::new(&format!("side({}, {to})", d.name()));
+            self = self
+                .prop(d.name(), ["false", "true"])
+                .rule(
+                    crate::Rule::neighbor()
+                        .when(there.clone())
+                        .becomes(&format!("{}=true", d.name())),
+                )
+                .rule(
+                    crate::Rule::neighbor()
+                        .when(!there)
+                        .becomes(&format!("{}=false", d.name())),
+                );
         }
-        self = self.set_text(&c::JOINS, to);
-        self.derive_each(move |n, e| {
-            let to = c::JOINS.on_block(e.state());
-            for d in sides.dirs() {
-                let there = n.at(d);
-                let joins = there != 0 && to.is_some_and(|m| m.has(there));
-                let want = if joins { "true" } else { "false" };
-                if n.world().prop(n.pos(), d.name()) != Some(want) {
-                    n.world().prop_set(n.pos(), d.name(), want);
-                }
-            }
-        })
+        self
     }
 
     /// Property `prop` worked out from the blocks around, kept up to date by the engine as they
@@ -1987,47 +2079,6 @@ impl<'a> BlockBuilder<'a> {
     }
     pub fn on_scheduled(self, f: impl Fn(&mut BlockEvent) + Send + Sync + 'static) -> Self {
         self.set(&bc::ON_SCHEDULED, block_event_cb(f))
-    }
-
-    /// Two cells long, told apart by a property `prop` of it: it is placed as `parts[0]`, and
-    /// `parts[1]` goes where `way` says from there (given the state), which needs room. Breaking
-    /// one takes the other, whatever took the one (an explosion doesn't break it): `drops` and
-    /// the like are for the two together.
-    pub fn two_part(
-        self,
-        prop: &'static str,
-        parts: [&'static str; 2],
-        way: impl Fn(u32) -> crate::Dir + Copy + Send + Sync + 'static,
-    ) -> Self {
-        let block = self.handle;
-        let other = move |pos: BlockPos, state: u32| crate::other_part(pos, state, prop, parts[1], way);
-        self.reg
-            .before_event(&crate::actions::PLACE_BLOCK, move |q| {
-                if !block.is(q.state()) {
-                    return crate::Verdict::Abstain;
-                }
-                let there = q.world().block(other(q.pos(), q.state()));
-                if there == 0 || crate::state_flags(there) & bf::REPLACEABLE != 0 { crate::Verdict::Abstain } else { crate::Verdict::Deny }
-            });
-        self.prop(prop, parts)
-            .on_neighbor(|e| e.world().schedule_tick(e.pos(), 1))
-            .on_scheduled(move |e| {
-                let w = e.world();
-                if block.is(e.state()) && !block.is(w.block(other(e.pos(), e.state()))) {
-                    w.set_block(e.pos(), 0);
-                }
-            })
-            .on_place(move |w, c| {
-                if let Some(s) = crate::state_with(c.state, prop, parts[1]) {
-                    w.set_block(other(c.pos, c.state), s);
-                }
-            })
-            .on_break(move |w, c| {
-                let there = other(c.pos, c.state);
-                if block.is(w.block(there)) {
-                    w.set_block(there, 0);
-                }
-            })
     }
 
     /// Falls like sand when nothing holds it up: a block next to it changing checks two ticks
@@ -2173,15 +2224,17 @@ impl<'a> BlockBuilder<'a> {
         self.signal = Some(SignalBuild { flags, ..SignalBuild::default() });
         self.signal_props(abi::signal_kind::FLOATER, 3, false, false)
     }
-    /// Pushes blocks at its `facing` with power from any other side, the `power` property saying
-    /// it is out (after `facing`). `head`: the block it pushes out, with a `facing` property.
-    /// `sticky` brings a block back.
+    /// Pushes blocks at its `facing` with power from any other side (after `facing`). Its `power`
+    /// property: `off` in, `moving` while its head is on the way, `on` out, the head being the
+    /// state's own cell in front (`.cells`). `head`: what the head looks like on the way, a block
+    /// with a `facing` property that is never in the world. `sticky` brings a block back.
     pub fn signal_piston(mut self, head: &'static str, sticky: bool) -> Self {
         let flags = if sticky { abi::signal_flags::STICKY } else { 0 };
         self.signal = Some(SignalBuild { head, flags, ..SignalBuild::default() });
-        self.signal_props(abi::signal_kind::PISTON, 2, false, false)
+        self.signal_props(abi::signal_kind::PISTON, 0, false, false)
+            .prop("power", ["off", "moving", "on"])
     }
-    /// The moving part of a piston (after `facing`): it goes when the piston does.
+    /// A piston's head on its way (after `facing`), drawn by the body moving it.
     pub fn signal_piston_head(self) -> Self {
         self.tag(abi::comp::block::NOT_STOOD_ON)
             .signal_props(abi::signal_kind::PISTON_HEAD, 0, false, false)
@@ -2492,6 +2545,18 @@ impl ItemBuilder<'_> {
     pub fn use_ticks(self, ticks: u32) -> Self {
         self.set(&c::USE_TICKS, ticks)
     }
+    /// What is left of it when it is used up (a potion's bottle, fuel's bucket).
+    pub fn remainder(self, item: &crate::Item) -> Self {
+        self.set_text(&c::REMAINDER, item.name())
+    }
+    /// Used, it gives `effect` at `level` for `secs` (`f32::INFINITY` for good; a potion: with `.use_ticks(32)` and
+    /// `.remainder(&GLASS_BOTTLE)` that is all of it); several for several effects. It turns into
+    /// its remainder, or one fewer; with an `on_use` of its own (eating) that does the rest and
+    /// these come when it goes through.
+    pub fn gives_effect(self, effect: &crate::EntityEffect, level: u32, secs: f32) -> Self {
+        let gift = abi::EffectGift { effect: effect.name().to_string(), level: level.max(1), ticks: (secs * 20.0) as u32 };
+        self.push(&c::GIVES_EFFECTS, gift)
+    }
     /// Full swings per second: hitting sooner does less (a sword 1.6, an empty hand 4).
     pub fn attack_speed(self, per_second: f32) -> Self {
         self.set(&c::ATTACK_SPEED, per_second)
@@ -2540,7 +2605,7 @@ impl ItemBuilder<'_> {
             let Some((p, face)) = u.target_block() else { return false };
             let (w, side) = (u.world(), crate::Dir::from_face(face).offset());
             w.spawn(entity, [(p.x + side.x) as f64 + 0.5, (p.y + side.y) as f64, (p.z + side.z) as f64 + 0.5]);
-            if !w.creative(u.player()) {
+            if !w.creative(u.entity()) {
                 u.set_stack(crate::StackData::shrink(u.stack(), 1));
             }
             true
@@ -2652,6 +2717,11 @@ pub struct DimensionBuilder<'a> {
 }
 
 impl DimensionBuilder<'_> {
+    /// What it does to whoever is in it (`Hazard::own(..).when(..)`), besides its void 64 blocks
+    /// under its floor.
+    pub fn hazard(self, h: crate::Hazard) -> Self {
+        self.push(&crate::comps::dimension::HAZARDS, h.0)
+    }
     /// Must be a pure function of its input: it runs in parallel and must give the same cube for the
     /// same seed and position on every machine.
     pub fn generator(self, f: impl Fn(&mut Gen) + Send + Sync + 'static) -> Self {
@@ -2779,6 +2849,10 @@ impl StructureBuilder<'_> {
     pub fn buried(self, blocks: i32) -> Self {
         self.set(&crate::comps::structure::BURIED, blocks)
     }
+    /// Each one turned a random quarter about the vertical, its blocks with it.
+    pub fn turns(self) -> Self {
+        self.tag(abi::comp::structure::TURNS)
+    }
 }
 
 /// Layers from the bottom up, each a list of rows along z, each character one block along x:
@@ -2881,29 +2955,34 @@ impl Height {
 
 /// What an ore vein looks like (`OreBuilder::shape`). Every shape stays within 16 blocks of
 /// where it starts.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Vein {
     kind: u32,
     radius: f32,
     thickness: f32,
     blocks: u32,
+    steps: Vec<abi::ShapeStep>,
 }
 
 impl Vein {
     /// A random walk of `blocks` steps, the default.
     pub fn walk(blocks: u32) -> Vein {
-        Vein { kind: abi::vein_shape::WALK, radius: 0.0, thickness: 0.0, blocks }
+        Vein { kind: abi::vein_shape::WALK, radius: 0.0, thickness: 0.0, blocks, steps: Vec::new() }
     }
     /// A lump of about `blocks`, like modern vanilla's.
     pub fn blob(blocks: u32) -> Vein {
-        Vein { kind: abi::vein_shape::BLOB, radius: 0.0, thickness: 0.0, blocks }
+        Vein { kind: abi::vein_shape::BLOB, radius: 0.0, thickness: 0.0, blocks, steps: Vec::new() }
     }
     pub fn sphere(radius: f32) -> Vein {
-        Vein { kind: abi::vein_shape::SPHERE, radius, thickness: 0.0, blocks: 0 }
+        Vein { kind: abi::vein_shape::SPHERE, radius, thickness: 0.0, blocks: 0, steps: Vec::new() }
     }
     /// Flat and round (clay, gravel and sand under water).
     pub fn disk(radius: f32, thickness: f32) -> Vein {
-        Vein { kind: abi::vein_shape::DISK, radius, thickness, blocks: 0 }
+        Vein { kind: abi::vein_shape::DISK, radius, thickness, blocks: 0, steps: Vec::new() }
+    }
+    /// Any shape about its start, as a fill takes (`Shape::ball(..).subtract(..)`: a geode's shell).
+    pub fn shape(shape: &crate::Shape) -> Vein {
+        Vein { kind: abi::vein_shape::STEPS, radius: 0.0, thickness: 0.0, blocks: 0, steps: shape.steps().to_vec() }
     }
 }
 
@@ -2924,6 +3003,7 @@ impl OreBuilder<'_> {
     /// What a vein looks like (a random walk of `size` blocks unless this says otherwise).
     pub fn shape(self, v: Vein) -> Self {
         let b = self.set(&crate::comps::ore::SHAPE, abi::VeinShape { kind: v.kind, radius: v.radius, thickness: v.thickness });
+        let b = if v.steps.is_empty() { b } else { b.set(&crate::comps::ore::STEPS, v.steps) };
         if v.blocks > 0 { b.vein_size(v.blocks) } else { b }
     }
     /// Veins started per cube (4 unless said).
@@ -3298,8 +3378,9 @@ impl ItemUse {
     pub fn world(&self) -> World {
         World::from_raw(self.args.world)
     }
-    pub fn player(&self) -> u64 {
-        self.args.player
+    /// Who uses it: a player, or a mob (`World::use_item`).
+    pub fn entity(&self) -> u64 {
+        self.args.entity
     }
     pub fn target_block(&self) -> Option<(BlockPos, u32)> {
         (self.args.has_target != 0).then_some((self.args.pos, self.args.face))
@@ -3307,13 +3388,13 @@ impl ItemUse {
     pub fn stack(&self) -> crate::ItemStack {
         self.args.stack
     }
-    /// The slot of the player's inventory the stack is in.
+    /// The slot of its inventory the stack is in.
     pub fn slot(&self) -> u32 {
         self.args.slot
     }
     /// The used stack as a holder: what a backpack opens its menu on.
     pub fn holder(&self) -> crate::Holder {
-        crate::Holder::held(self.args.player, self.args.slot)
+        crate::Holder::held(self.args.entity, self.args.slot)
     }
     /// Replaces the held stack (use count 0 to consume it entirely).
     pub fn set_stack(&mut self, s: crate::ItemStack) {

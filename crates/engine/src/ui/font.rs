@@ -43,10 +43,6 @@ pub struct Font {
 }
 
 impl Font {
-    pub fn parse_hex(src: &str) -> Font {
-        Self::new(src, None)
-    }
-
     /// Unifont for everything, with the glyphs of a bitmap atlas (`.font` description and its
     /// image) drawn over it. Atlas pixels become `pixel` font pixels so both fill the 16 pixel cell.
     pub fn new(hex: &str, bitmap: Option<(&str, &crate::assets::Image)>) -> Font {

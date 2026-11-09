@@ -249,7 +249,7 @@ pub fn register(r: &mut Registry) {
         .max_health(20.0)
         .walk_speed(2.6)
         .hostile()
-        .tag(abi::comp::entity::BURNS_IN_SUN)
+        .burns_in_sun()
         .model(humanoid(true))
         .attack_damage(3.0)
         .reach(1.3)
@@ -291,7 +291,7 @@ pub fn register(r: &mut Registry) {
         .max_health(20.0)
         .walk_speed(2.5)
         .hostile()
-        .tag(abi::comp::entity::BURNS_IN_SUN)
+        .burns_in_sun()
         .model(skeleton_model())
         .attach(&FUSE)
         .goals(skeleton());

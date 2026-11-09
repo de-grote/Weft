@@ -6,6 +6,8 @@ mod beds;
 mod block_entities;
 mod blocks;
 mod commands;
+mod doors;
+mod effects;
 mod items;
 mod mobs;
 mod player;
@@ -47,6 +49,8 @@ fn init(r: &mut Registry) {
     worldgen::register(r);
     advancements::register(r);
     beds::register(r);
+    doors::register(r);
+    effects::register(r);
     redstone::register(r);
     woodcutter::register(r);
     // Its terrain is described in `worldgen`.

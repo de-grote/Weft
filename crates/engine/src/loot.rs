@@ -82,14 +82,16 @@ impl Resolve<'_> {
         Pool { rolls: (p.rolls_min, p.rolls_max.max(p.rolls_min)), when: self.conds.all(&p.when), entries }
     }
 
+    pub fn pools(&mut self, pools: &[abi::LootPool], errors: &mut Vec<String>, table: &str) -> Table {
+        Table { pools: pools.iter().map(|p| self.pool(p, errors, table)).collect() }
+    }
+
     /// A table from its entry: the pools, then the swaps in order.
     pub fn table(&mut self, e: &crate::entries::Entry, errors: &mut Vec<String>) -> Table {
         use abi::comp::loot as l;
-        let mut pools: Vec<Pool> = e
-            .or::<Vec<abi::LootPool>>(l::POOLS, Vec::new())
-            .iter()
-            .map(|p| self.pool(p, errors, &e.name))
-            .collect();
+        let mut pools = self
+            .pools(&e.or::<Vec<abi::LootPool>>(l::POOLS, Vec::new()), errors, &e.name)
+            .pools;
         for s in e.or::<Vec<abi::LootSwap>>(l::SWAPS, Vec::new()) {
             let from = self.item(&s.name, errors, &e.name);
             let to = (!s.to.is_empty()).then(|| self.item(&s.to, errors, &e.name));

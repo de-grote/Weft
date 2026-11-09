@@ -420,7 +420,7 @@ fn push_icons(spec: &str, cx: &Ctx, out: &mut Vec<Span>, st: &State) {
             _ => {}
         }
     }
-    let Some((w, h)) = size.or_else(|| texture_size(&name).map(|(w, h)| (w as f32, h as f32))) else { return };
+    let Some((w, h)) = size.or_else(|| crate::assets::texture_size(&name).map(|(w, h)| (w as f32, h as f32))) else { return };
     // At most a line's worth, whatever a value says.
     let whole = (n.floor() as u32).min(64);
     let mut pictures: Vec<(String, [f32; 4])> = (0..whole)
@@ -499,10 +499,6 @@ fn gui_texture(name: &str) -> String {
         return String::new();
     }
     format!("{ns}:gui/{path}")
-}
-
-fn texture_size(name: &str) -> Option<(u32, u32)> {
-    crate::assets::texture_size(name)
 }
 
 fn push_text(out: &mut Vec<Span>, s: &str, st: &State) {
@@ -594,7 +590,7 @@ fn format_depth(template: &str, args: &[Arg], cx: &Ctx, out: &mut Vec<Span>, st:
                 .next()
                 .and_then(|s| s.split_once('x'))
                 .and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)));
-            if let Some((w, h)) = size.or_else(|| texture_size(name).map(|(w, h)| (w as f32, h as f32))) {
+            if let Some((w, h)) = size.or_else(|| crate::assets::texture_size(name).map(|(w, h)| (w as f32, h as f32))) {
                 out.push(st.span(Piece::Image(image_id(name), w * FONT_PER_GUI, h * FONT_PER_GUI, [0.0, 0.0, 1.0, 1.0]), None));
             }
         } else if let Some(spec) = tag.strip_prefix("icons:") {
@@ -1009,7 +1005,7 @@ mod tests {
         assert_eq!(spans.iter().map(text).collect::<Vec<_>>(), ["a", "b", "c", "d", "e"]);
         assert_eq!((spans[2].when.len(), spans[3].fx, spans[4].fx), (2, fx_id("core:wave"), 0));
         // Sneak held, not creative: only the unconditional parts and the effect remain.
-        let font = Font::parse_hex(include_str!("../../assets/fonts/unifont.hex"));
+        let font = Font::new(include_str!("../../assets/fonts/unifont.hex"), None);
         assert!(refresh(&mut spans, &|t| matches!(t, Test::Keys(_))));
         let shown: String = layout(&spans, &font, None)
             .items
@@ -1035,7 +1031,7 @@ ab",
             &cx,
             &mut spans,
         );
-        let font = Font::parse_hex(include_str!("../../assets/fonts/unifont.hex"));
+        let font = Font::new(include_str!("../../assets/fonts/unifont.hex"), None);
         let l = layout(&spans, &font, Some(100.0));
         let (ix, iw, ih) = l
             .items
@@ -1059,7 +1055,7 @@ ab",
 
     #[test]
     fn wrapping_never_loses_or_panics() {
-        let font = Font::parse_hex(include_str!("../../assets/fonts/unifont.hex"));
+        let font = Font::new(include_str!("../../assets/fonts/unifont.hex"), None);
         let text = "Cubes: 5583 loaded, 0 meshing, 725 draws  double  spaces and a_very_long_word_without_breaks";
         let inked = text.chars().filter(|c| *c != ' ').count();
         for width in [0.0, 8.0, 13.0, 40.0, 100.0, 1000.0] {

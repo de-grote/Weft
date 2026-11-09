@@ -27,6 +27,9 @@ pub struct ConfigDef {
     pub scope: u32,
     /// The default of a `TEXT` setting.
     pub text: String,
+    /// The settings page it shows on, empty for its mod's; and its place there.
+    pub page: String,
+    pub order: i32,
 }
 
 impl ConfigDef {
@@ -369,7 +372,7 @@ pub fn engine_configs(keys: &[(String, String)]) -> Vec<RawEntry> {
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "Player".into());
     let mut out = vec![
-        volume("core:volume_master"),
+        volume("core:volume_master").set(c::ORDER, -1),
         string("core:language", &crate::settings::system_language()),
         number("core:gui_scale", ck::INT, 0.0, 0.0, 16.0, 1.0),
         number("core:view_distance", ck::INT, 12.0, 2.0, 64.0, 1.0),
@@ -423,7 +426,43 @@ pub fn engine_configs(keys: &[(String, String)]) -> Vec<RawEntry> {
         keys.iter()
             .map(|(action, key)| string(&format!("core:key.{action}"), key)),
     );
-    out
+    // The settings pages, in the order they show.
+    let pages: [(&str, &[&str]); 2] = [
+        (
+            "core:settings",
+            &[
+                "view_distance",
+                "lod_distance",
+                "cloud_height",
+                "fov",
+                "sensitivity",
+                "brightness",
+                "gui_scale",
+                "vsync",
+                "renderer",
+                "fov_effects",
+                "first_person_model",
+                "show_avatars",
+            ],
+        ),
+        ("core:chat_settings", &["chat_width", "chat_height", "chat_height_closed", "chat_opacity", "chat_visibility"]),
+    ];
+    let percent = ["core:sensitivity", "core:brightness", "core:fov_effects"];
+    out.into_iter()
+        .map(|e| {
+            let at = pages.iter().find_map(|(page, names)| {
+                names
+                    .iter()
+                    .position(|n| e.name.strip_prefix("core:") == Some(*n))
+                    .map(|i| (*page, i as i32))
+            });
+            let e = if percent.contains(&e.name.as_str()) { e.tag(c::PERCENT) } else { e };
+            match at {
+                Some((page, order)) => e.set(c::PAGE, page.to_string()).set(c::ORDER, order),
+                None => e,
+            }
+        })
+        .collect()
 }
 
 /// A world rule (`/rule`).
@@ -432,9 +471,9 @@ pub fn rule(name: &str, kind: u32, default: f64, min: f64, max: f64) -> RawEntry
     number(name, kind, default, min, max, step).set(weft_abi::comp::config::SCOPE, scope::WORLD)
 }
 
-/// A volume setting in percent.
+/// A volume setting in percent, on the sound page.
 pub fn volume(name: &str) -> RawEntry {
-    number(name, ck::INT, 100.0, 0.0, 100.0, 1.0)
+    number(name, ck::INT, 100.0, 0.0, 100.0, 1.0).set(weft_abi::comp::config::PAGE, "core:sound".to_string())
 }
 
 fn number(name: &str, kind: u32, default: f64, min: f64, max: f64, step: f64) -> RawEntry {
@@ -465,6 +504,8 @@ pub fn bake(e: &Entry, errors: &mut Vec<String>) -> ConfigDef {
         flags: e.flags(crate::tag_bits::config::TAGS),
         scope: e.or(c::SCOPE, scope::CLIENT),
         text: e.text(c::TEXT).unwrap_or_default().to_string(),
+        page: e.text(c::PAGE).unwrap_or_default().to_string(),
+        order: e.or(c::ORDER, 0),
     };
     if d.kind == ck::TEXT && d.scope != scope::CLIENT {
         errors.push(format!("setting {}: text settings are the client's own", d.name));

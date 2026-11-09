@@ -214,7 +214,7 @@ impl Screen for DebugOptions {
 
     fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
         let lines = hud::debug_lines();
-        let groups = cx.settings.debug_groups();
+        let groups = crate::settings::debug_groups();
         frame(ui, cx, "hud.options.title", |ui| {
             let list = ui.panel(
                 "panel",
@@ -250,8 +250,8 @@ impl Screen for DebugOptions {
                             let n = ui.text(cx.t(title, &[]), "default");
                             ui.nodes[n].style.grow = 1.0;
                             let b = button(ui, cx, "hud.options.group", &[Arg::Int(i as i64 + 1), Arg::Key(key.into())], 90.0, move |c| {
-                                let groups = c.settings.debug_groups();
-                                c.settings.set("debug_groups", (groups ^ (1 << i)) as f64);
+                                let groups = crate::settings::debug_groups();
+                                crate::settings::set("debug_groups", (groups ^ (1 << i)) as f64);
                                 c.requests.push(Request::Rebuild);
                             });
                             ui.set_id(b, &format!("group:{i}"));

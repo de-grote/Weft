@@ -254,17 +254,6 @@ impl Matchers {
     }
 }
 
-/// The blocks (definition index) a reference stands for.
-pub fn blocks(text: &str, names: &FxHashMap<String, u32>, blocks: &[BlockDef], c: &Components) -> Result<Vec<u32>, String> {
-    let set = compile(text, names, blocks, c)?;
-    Ok(blocks
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| (b.first_state..b.first_state + b.states).any(|s| has(&set, s)))
-        .map(|(i, _)| i as u32)
-        .collect())
-}
-
 /// One block state: a name with properties picks that state, the rest at their defaults.
 pub fn state(text: &str, names: &FxHashMap<String, u32>, blocks: &[BlockDef]) -> Result<u32, String> {
     match Ref::parse(text)? {

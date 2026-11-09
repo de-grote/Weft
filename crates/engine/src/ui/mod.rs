@@ -5,7 +5,6 @@
 //! and multiplied by the GUI scale when drawn. Text never overflows its box: it wraps, or shrinks
 //! when wrapping is off.
 
-pub mod desc;
 pub mod edit;
 pub mod font;
 pub mod lang;
@@ -350,10 +349,6 @@ pub struct Ui {
     pub text_unit: f32,
     /// When it opened (`shaders::clock`), for `open` animations.
     pub shown: f32,
-    /// Closures the engine's own descriptor-built screens point their callbacks at; kept one
-    /// rebuild longer, for clicks queued before it.
-    pub owned: Vec<Box<dyn std::any::Any>>,
-    retired: Vec<Box<dyn std::any::Any>>,
 }
 
 impl Default for Ui {
@@ -396,15 +391,13 @@ impl Ui {
             size: Vec2::ZERO,
             text_unit: 0.5,
             shown: crate::shaders::clock(),
-            owned: Vec::new(),
-            retired: Vec::new(),
         }
     }
 
     pub fn clear(&mut self) {
-        let (scroll, shown, size, owned) = (std::mem::take(&mut self.scroll), self.shown, self.size, std::mem::take(&mut self.owned));
+        let (scroll, shown, size) = (std::mem::take(&mut self.scroll), self.shown, self.size);
         *self = Ui::new();
-        (self.scroll, self.shown, self.size, self.retired) = (scroll, shown, size, owned);
+        (self.scroll, self.shown, self.size) = (scroll, shown, size);
     }
 
     fn scroll_key(&self, id: NodeId) -> String {

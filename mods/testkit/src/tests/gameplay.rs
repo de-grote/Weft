@@ -180,8 +180,15 @@ pub async fn armor(t: T) -> R {
         .op(&format!("spawn zombie {}", at(add(f, [3, 0, -2]))))
         .await?;
     t.check_eq(t.op(&format!("group {z} core:equipment")).await?, "4 0".to_string(), "a zombie's equipment");
-    t.op(&format!("put {z} 0 diamond_helmet 1")).await?;
+    // Slot 0 is its hand, its equipment after it.
+    t.op(&format!("put {z} 1 diamond_helmet 1")).await?;
     t.check_eq(t.op(&format!("group {z} base:head")).await?, "1 1".to_string(), "the zombie's head slot");
+    // What is in its hand shows there, as a player's does.
+    t.op(&format!("put {z} 0 iron_sword 1")).await?;
+    let id: u64 = z.trim().parse().map_err(|_| format!("spawn zombie: {z}"))?;
+    let sword = Item::named("base:iron_sword").id();
+    t.until("the zombie holds the sword", Duration::from_secs(3), |t| t.c().view().component_of(id, &HELD) == Some(sword))
+        .await?;
     t.c().set_look((-3f32).atan2(2.0).to_degrees(), -10.0);
     t.secs(0.5).await?;
     t.shot("zombie_helmet").await?;
@@ -584,8 +591,8 @@ pub async fn beds(t: T) -> R {
     let f = t.feet();
     let foot = place_bed(&t).await?;
     let head = add(foot, [0, 0, -1]);
-    t.check(t.block(foot).await?.contains("part=foot"), format!("the foot where it was placed: {}", t.block(foot).await?));
-    t.check(t.block(head).await?.contains("part=head"), format!("the head beyond it: {}", t.block(head).await?));
+    let (a, b) = (t.block(foot).await?, t.block(head).await?);
+    t.check(a.starts_with("base:bed") && a == b, format!("one bed where it was placed and beyond: {a}, {b}"));
 
     // By day only the respawn point.
     t.look_at(foot);
@@ -682,8 +689,7 @@ pub async fn beds(t: T) -> R {
         t.until(&format!("the {facing} bed"), Duration::from_secs(3), |t| t.c().block(head).is_some_and(|s| s != 0))
             .await?;
         let (a, b) = (t.block(foot).await?, t.block(head).await?);
-        t.check(a.contains("part=foot") && a.contains(&format!("facing={facing}")), format!("the foot: {a}"));
-        t.check(b.contains("part=head") && b.contains(&format!("facing={facing}")), format!("the head: {b}"));
+        t.check(a == b && a.contains(&format!("facing={facing}")), format!("one bed on both cells: {a}, {b}"));
     }
     t.c()
         .teleport([f[0] as f64 + 0.5, f[1] as f64 + 7.0, f[2] as f64 + 0.5]);
@@ -1701,6 +1707,7 @@ pub async fn burning(t: T) -> R {
 }
 
 static ON_FIRE: Component<u8> = Component::named("core:burning");
+static HELD: Component<u32> = Component::named("core:held");
 
 /// Fields the engine keeps on entities reach clients like any synced component: a pig in lava
 /// shows on fire and losing health, and stays for its death animation once the server drops it.
@@ -1990,7 +1997,7 @@ pub async fn base_alone(t: T) -> R {
     std::fs::write(format!("{dir}/config/disabled_mods.txt"), "testkit\ntestmod").map_err(|e| e.to_string())?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut server = std::process::Command::new(exe)
-        .args(["--server", "--world", "w", "--seed", "1", "--view", "4", "--port", &port.to_string(), "--run-dir", &dir])
+        .args(["server", "--world", "w", "--seed", "1", "--view", "4", "--port", &port.to_string(), "--run-dir", &dir])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -2037,7 +2044,7 @@ pub async fn dedicated_server(t: T) -> R {
     let start = || -> Result<Child, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         std::process::Command::new(exe)
-            .args(["--server", "--world", "w", "--seed", "1", "--view", "4", "--port", &port.to_string(), "--run-dir", &dir])
+            .args(["server", "--world", "w", "--seed", "1", "--view", "4", "--port", &port.to_string(), "--run-dir", &dir])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

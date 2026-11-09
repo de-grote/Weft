@@ -345,6 +345,7 @@ pub fn register(r: &mut Registry) {
     r.block(&SUGAR_CANE)
         .sound_group("grass")
         .texture("reeds")
+        .item_texture("reeds")
         .plant()
         .needs_below("#sugar_cane_soil")
         .needs_near("#water")

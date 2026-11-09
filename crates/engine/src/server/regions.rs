@@ -37,6 +37,7 @@ pub struct DimSet {
     /// Area edits made in this dimension, in order (`server::area`); saved with the world.
     /// Shared with the workers that make cubes, which apply them (`dim::prepare`).
     pub edits: Arc<Vec<super::area::AreaFill>>,
+    pub timers: Vec<super::dim::DimTimer>,
 }
 
 impl DimSet {
@@ -60,6 +61,7 @@ impl DimSet {
             owner: FxHashMap::default(),
             dirty: false,
             edits: Arc::default(),
+            timers: Vec::new(),
         }
     }
 
@@ -230,13 +232,14 @@ impl DimSet {
             d.space.modified.insert(pos);
         }
         // What the save held may need writing again once it is gone from here.
-        let ticks = super::persist::read_ticks(entities);
-        d.restore_ticks(pos, &ticks);
-        if !ticks.is_empty() || entities.len() > 12 {
+        let timers = super::persist::read_timers(c, entities);
+        if !timers.is_empty() || entities.len() > 12 {
             d.on_disk.insert(pos);
         }
+        d.restore_timers(timers);
         let mut bodies = Vec::new();
-        for (e, inv, comps, blocks) in super::persist::read(c, entities) {
+        let now = d.time;
+        for (e, inv, comps, blocks) in super::persist::read(c, entities, now) {
             let id = e.id;
             if d.entities.get(id).is_some() {
                 continue;
@@ -366,6 +369,22 @@ impl DimSet {
         }
     }
 
+    /// Fires the dimension's timers that are due, in its first region; with none loaded they wait.
+    pub fn tick_timers(&mut self, c: &Content) {
+        for r in &mut self.regions {
+            self.timers.append(&mut r.dim_timers);
+        }
+        let Some(r) = self.regions.first_mut() else { return };
+        let time = self.time;
+        self.timers.retain(|(at, event, data)| {
+            let due = *at <= time;
+            if due {
+                r.emit(c, *event, data);
+            }
+            !due
+        });
+    }
+
     /// After clear weather one of the others by their weights, after any other clear again, each
     /// for as long as its `duration` says.
     pub fn tick_weather(&mut self, c: &Content) {
@@ -407,6 +426,10 @@ impl DimSet {
     /// parts. Data moves in parcels; each region keeps the part it holds most of.
     pub fn regionize(&mut self, c: &Content) {
         self.dirty = false;
+        // Timers set on the dimension stay with it whatever happens to the regions.
+        for r in &mut self.regions {
+            self.timers.append(&mut r.dim_timers);
+        }
         self.regions
             .retain(|r| !r.space.cubes.is_empty() || !r.entities.list.is_empty());
         let per_region: Vec<FxHashSet<IVec3>> = self.regions.iter().map(|r| r.sections()).collect();

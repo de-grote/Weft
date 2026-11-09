@@ -3,7 +3,8 @@
 //! `[name:type]` optional parameters, alternatives separated by `|`, for example
 //! `<pos:pos> | <target:player>` or `<item:item> [count:int]`.
 //!
-//! Types: int, float, word (`word(a,b)`: any word, completing a and b; `word(#set)` completes
+//! Types: int (`int(a,b)`: a whole number or one of those words, completing them, like
+//! `int(infinite)`), float, word (`word(a,b)`: any word, completing a and b; `word(#set)` completes
 //! from a word set mods add to, like `#core:rules`), text (rest of the line), item, block,
 //! entity, dim, attribute, player, time
 //! (`day`, `noon`, `night`, `midnight` or ticks), pos (three coordinates; `~` relative to the player,
@@ -20,7 +21,8 @@ use crate::content::Content;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
     Literal(String),
-    Int,
+    /// A whole number, or one of the listed words (taken as text).
+    Int(Vec<String>),
     Float,
     /// Any word; the listed ones are suggested.
     Word(Vec<String>),
@@ -66,17 +68,11 @@ pub fn parse_usage(usage: &str) -> Result<Vec<Alt>, String> {
                 .split_once(':')
                 .ok_or_else(|| format!("parameter {tok} needs a type"))?;
             let kind = match ty {
-                "int" => Kind::Int,
+                "int" => Kind::Int(Vec::new()),
                 "float" => Kind::Float,
                 "word" => Kind::Word(Vec::new()),
-                w if w.starts_with("word(") && w.ends_with(')') => Kind::Word(
-                    w[5..w.len() - 1]
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(String::from)
-                        .collect(),
-                ),
+                w if w.starts_with("int(") && w.ends_with(')') => Kind::Int(words(&w[4..w.len() - 1])),
+                w if w.starts_with("word(") && w.ends_with(')') => Kind::Word(words(&w[5..w.len() - 1])),
                 "text" => Kind::Text,
                 "item" => Kind::Item,
                 "block" => Kind::Block,
@@ -94,6 +90,14 @@ pub fn parse_usage(usage: &str) -> Result<Vec<Alt>, String> {
         alts.push(params);
     }
     Ok(alts)
+}
+
+fn words(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 /// Parameter names (and literal words) in order of first appearance across alternatives: the
@@ -307,7 +311,8 @@ fn parse_alt(c: &Content, alt: &Alt, tokens: &[&str], here: Origin, players: &[S
                 }
                 Value::Text(l.clone())
             }
-            Kind::Int => Value::Int(tok.parse().map_err(|_| err("whole_number", &p.name))?),
+            Kind::Int(named) if named.iter().any(|n| n == tok) => Value::Text(tok.to_string()),
+            Kind::Int(_) => Value::Int(tok.parse().map_err(|_| err("whole_number", &p.name))?),
             Kind::Float => Value::Float(tok.parse().map_err(|_| err("number", &p.name))?),
             Kind::Word(_) => Value::Text(tok.to_string()),
             Kind::Text => {
@@ -442,7 +447,8 @@ impl CommandDef {
 fn type_name(k: &Kind) -> String {
     match k {
         Kind::Literal(l) => l.clone(),
-        Kind::Int => "int".into(),
+        Kind::Int(list) if list.is_empty() => "int".into(),
+        Kind::Int(list) => format!("int({})", list.join(",")),
         Kind::Float => "float".into(),
         Kind::Word(list) if list.is_empty() => "word".into(),
         Kind::Word(list) => format!("word({})", list.join(",")),
@@ -645,6 +651,11 @@ pub fn complete(c: &Content, line: &str, players: &[String], permission: u32) ->
                 .map(|s| s.to_string())
                 .chain(players.iter().cloned())
                 .filter(|n| n.starts_with(partial))
+                .collect(),
+            Kind::Int(named) => named
+                .iter()
+                .filter(|n| n.starts_with(partial))
+                .cloned()
                 .collect(),
             Kind::Time => TIMES
                 .iter()

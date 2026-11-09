@@ -73,6 +73,32 @@ pub mod attribute {
     pub static FOV: Attribute = Attribute::named(crate::abi::attribute::FOV);
     /// 1 or more: may fly, jumping twice (0; 1 in creative).
     pub static CAN_FLY: Attribute = Attribute::named(crate::abi::attribute::CAN_FLY);
+    /// 1: no damage, hunger or air but from what pierces it (creative, a shield effect).
+    pub static INVULNERABLE: Attribute = Attribute::named(crate::abi::attribute::INVULNERABLE);
+    /// Blocks it falls without harm (3).
+    pub static SAFE_FALL: Attribute = Attribute::named(crate::abi::attribute::SAFE_FALL);
+    /// Damage per block fallen past `SAFE_FALL` (1).
+    pub static FALL_DAMAGE_MULTIPLIER: Attribute = Attribute::named(crate::abi::attribute::FALL_DAMAGE_MULTIPLIER);
+    /// Blocks it walks up without jumping (0.6).
+    pub static STEP_HEIGHT: Attribute = Attribute::named(crate::abi::attribute::STEP_HEIGHT);
+    /// Multiplier on its dimension's gravity (1; below 0 floats up).
+    pub static GRAVITY: Attribute = Attribute::named(crate::abi::attribute::GRAVITY);
+    /// Share of knockback shrugged off (0..1).
+    pub static KNOCKBACK_RESISTANCE: Attribute = Attribute::named(crate::abi::attribute::KNOCKBACK_RESISTANCE);
+    /// Added to each melee hit (0).
+    pub static ATTACK_DAMAGE: Attribute = Attribute::named(crate::abi::attribute::ATTACK_DAMAGE);
+    /// Share of damage taken off after armor (0..1).
+    pub static DAMAGE_RESISTANCE: Attribute = Attribute::named(crate::abi::attribute::DAMAGE_RESISTANCE);
+    /// Share of burning damage taken off (0..1).
+    pub static FIRE_RESISTANCE: Attribute = Attribute::named(crate::abi::attribute::FIRE_RESISTANCE);
+    /// Multiplier on how long fire keeps it burning (1).
+    pub static BURNING_TIME: Attribute = Attribute::named(crate::abi::attribute::BURNING_TIME);
+    /// Multiplier on mining speed with its head in a liquid (0.2).
+    pub static SUBMERGED_MINING_SPEED: Attribute = Attribute::named(crate::abi::attribute::SUBMERGED_MINING_SPEED);
+    /// Multiplier on mining speed off the ground (0.2).
+    pub static AIRBORNE_MINING_SPEED: Attribute = Attribute::named(crate::abi::attribute::AIRBORNE_MINING_SPEED);
+    /// How much its player sees as if everything were lit (0..1).
+    pub static NIGHT_VISION: Attribute = Attribute::named(crate::abi::attribute::NIGHT_VISION);
 }
 
 /// An attribute modifier that comes with something (`.modifier(..)` on an item, a pose, an
@@ -153,6 +179,8 @@ schema_values!(
 );
 
 /// The engine's events with no question before them; the others are `actions`.
+/// A block's own tick, by a timer on it (`schedule_tick`).
+pub static BLOCK_TICK: Event<[i32; 3]> = Event::named(abi::event::BLOCK_TICK);
 pub static PLAYER_JOINED: Event<abi::PlayerEvent> = Event::named(abi::event::PLAYER_JOINED);
 /// A dead player came back at the spawn point, components reset but the `KEEP_ON_RESPAWN` ones;
 /// moving them on from here (a bed) happens before anyone saw them there.
@@ -489,6 +517,11 @@ impl Rule {
         self.0.then = abi::rule_then::GROW;
         self
     }
+    /// A piece comes off: it becomes `into` (`north=false`), dropping what the piece drops.
+    pub fn sheds(mut self, into: &str) -> Rule {
+        (self.0.then, self.0.into) = (abi::rule_then::SHED, into.to_string());
+        self
+    }
     /// Breaks off, dropping what it drops.
     pub fn breaks(mut self) -> Rule {
         self.0.then = abi::rule_then::BREAK;
@@ -500,15 +533,17 @@ impl Rule {
     }
 }
 
-/// What a block does to an entity meeting it (`.hazard(..)`): `Hazard::touch(1.0, &CACTUS)` a
-/// cactus, `Hazard::on(1.0, &HOT_FLOOR)` magma, `Hazard::inside(1.0, &damage_causes::FIRE).fire(160)`
-/// fire; `.every(ticks)` between hits, `.when(..)` conditions about the entity there.
+/// What a block, an entity kind or a dimension does to an entity meeting it (`.hazard(..)`):
+/// `Hazard::touch(1.0, &CACTUS)` a cactus, `Hazard::on(1.0, &HOT_FLOOR)` magma,
+/// `Hazard::inside(1.0, &damage_causes::FIRE).fire(160)` fire, `Hazard::own(..)` a kind's to
+/// itself or a dimension's to whoever is in it, `Hazard::crushed(..)` a body's to what it
+/// squeezes; `.every(ticks)` between hits, `.when(..)` conditions about the entity there.
 #[derive(Clone)]
 pub struct Hazard(pub(crate) abi::Hazard);
 
 impl Hazard {
     fn of(at: u32, damage: f32, cause: &crate::DamageCause) -> Hazard {
-        Hazard(abi::Hazard { at, damage, cause: cause.name().to_string(), fire: 0, every: 0, when: Vec::new() })
+        Hazard(abi::Hazard { at, damage, cause: cause.name().to_string(), fire: 0, every: 0, when: Vec::new(), level: 0 })
     }
     /// Its box in the block's shape.
     pub fn inside(damage: f32, cause: &crate::DamageCause) -> Hazard {
@@ -526,9 +561,23 @@ impl Hazard {
     pub fn touch(damage: f32, cause: &crate::DamageCause) -> Hazard {
         Hazard::of(abi::hazard_at::TOUCH, damage, cause)
     }
+    /// Wherever it is, asked at its eyes: an entity kind's to itself, a dimension's to everyone
+    /// in it (`.when(..)` says where: `height(..0)`).
+    pub fn own(damage: f32, cause: &crate::DamageCause) -> Hazard {
+        Hazard::of(abi::hazard_at::SELF, damage, cause)
+    }
+    /// A body of this kind squeezes it into something solid; the body crushes instead of pushing.
+    pub fn crushed(damage: f32, cause: &crate::DamageCause) -> Hazard {
+        Hazard::of(abi::hazard_at::CRUSHED, damage, cause)
+    }
     /// Sets it burning for that many ticks too.
     pub fn fire(mut self, ticks: u32) -> Hazard {
         self.0.fire = ticks;
+        self
+    }
+    /// No damage of its own: only `fire`.
+    pub fn harmless(mut self) -> Hazard {
+        self.0.cause.clear();
         self
     }
     pub fn every(mut self, ticks: u32) -> Hazard {
@@ -612,7 +661,7 @@ impl Pool {
     pub fn items(self, name: &str, min: u32, max: u32) -> Pool {
         self.entry(Entry::item(name).count(min, max))
     }
-    fn raw(&self, ns: &str) -> abi::LootPool {
+    pub(crate) fn raw(&self, ns: &str) -> abi::LootPool {
         let conds = |c: &[Cond]| c.iter().map(|c| c.0.clone()).collect();
         let entries = self
             .entries
@@ -712,8 +761,8 @@ crate::entry::entry_builder!(
 );
 
 impl AttributeBuilder<'_> {
-    /// Players' base of it is a world rule named like it (`/rule`), with its default and range;
-    /// `/attribute` sets one player's apart.
+    /// The base of it for kinds that don't set their own (the player) is a world rule named like
+    /// it (`/rule`), with its default and range; `/attribute` sets one entity's apart.
     pub fn rule(self) -> Self {
         use crate::WithComponents;
         self.tag(abi::comp::attribute::RULE)
@@ -813,16 +862,23 @@ impl Registry {
 }
 
 impl World {
-    /// In `ticks` ticks `event` fires with `value` (a calm-down, a hunger pulse). The timer is
-    /// saved with `entity` and goes with it when it is removed; one per entity and event, so
-    /// setting it again moves it.
-    pub fn emit_after<T: Value>(&self, entity: u64, ticks: u32, event: &Event<T>, value: T) {
+    /// In `ticks` ticks `event` fires with `value` (a calm-down, a fuse, a hunger pulse). The
+    /// timer is saved with `holder`: an entity (and goes with it), a block (`BLOCK_TICK` is its
+    /// own tick, `schedule_tick`), `Holder::NONE` for the dimension. Time away counts: a timer due
+    /// while its holder wasn't loaded fires when it is.
+    pub fn timer<T: Value>(&self, holder: impl Into<abi::Holder>, ticks: u32, event: &Event<T>, value: T) {
         let id = event.id();
         if id == u32::MAX {
             return;
         }
         let b = unsafe { std::slice::from_raw_parts(&value as *const T as *const u8, size_of::<T>()) };
-        unsafe { (host().emit_after)(self.raw(), entity, ticks, id, Slice::new(b)) }
+        unsafe { (host().timer)(self.raw(), &holder.into(), ticks, id, Slice::new(b)) }
+    }
+
+    /// The block's own tick (`block.on_scheduled`, a liquid's flow) in `ticks` ticks.
+    pub fn schedule_tick(&self, pos: impl Into<abi::BlockPos>, ticks: u32) {
+        let pos = pos.into();
+        self.timer(abi::Holder::block(pos), ticks, &BLOCK_TICK, [pos.x, pos.y, pos.z]);
     }
 
     pub fn emit<T: Value>(&self, event: &impl AsRef<Event<T>>, value: T) {

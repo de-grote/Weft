@@ -15,6 +15,8 @@ use crate::ui::{Kind, Style, Ui};
 
 pub struct MenuScreen {
     pub kind: u32,
+    /// The status effects (effect, level) its list was built with.
+    effects: Vec<(u32, u32)>,
     /// Creative inventory filter and open tab.
     search: Rc<RefCell<String>>,
     tab: Rc<std::cell::Cell<usize>>,
@@ -22,7 +24,7 @@ pub struct MenuScreen {
 
 impl MenuScreen {
     pub fn new(kind: u32) -> MenuScreen {
-        MenuScreen { kind, search: Default::default(), tab: Default::default() }
+        MenuScreen { kind, effects: Vec::new(), search: Default::default(), tab: Default::default() }
     }
 }
 
@@ -104,9 +106,78 @@ fn creative_panel(ui: &mut Ui, cx: &BuildCx, search: &Rc<RefCell<String>>, tab: 
     });
 }
 
+/// The status effects shown and their levels.
+fn effects_now(client: &crate::client::Client) -> Vec<(u32, u32)> {
+    crate::hud::shown_effects(client)
+        .iter()
+        .map(|f| (f.0, f.1))
+        .collect()
+}
+
+/// The player's status effects beside its inventory: icons with the time left under them, four
+/// a column, the name and level in a tooltip.
+fn effects_panel(ui: &mut Ui, cx: &BuildCx) {
+    let Some(client) = cx.client else { return };
+    let all = crate::hud::shown_effects(client);
+    if all.is_empty() {
+        return;
+    }
+    ui.panel(
+        "panel",
+        Style::row()
+            .pad(4.0)
+            .gap(3.0)
+            .align(crate::ui::Align::Start),
+        |ui| {
+            for column in all.chunks(4) {
+                ui.container(Style::default().gap(3.0), |ui| {
+                    for &(effect, level, _) in column {
+                        let name = crate::hud::effect_name(cx.lang, effect, level);
+                        let cell = ui.container(Style::default().gap(1.0).align(crate::ui::Align::Center), |ui| {
+                            let icon = crate::hud::effect_icon(ui, effect);
+                            ui.nodes[icon].tooltip = Some(name.clone());
+                            // Counted down as it shows, without building the screen again.
+                            ui.text_bound(
+                                "label",
+                                Box::new(move |c: &Ctx| {
+                                    let left = c
+                                        .client
+                                        .as_deref()
+                                        .and_then(|cl| {
+                                            crate::hud::shown_effects(cl)
+                                                .into_iter()
+                                                .find(|f| f.0 == effect)
+                                        })
+                                        .map_or(0, |f| f.2);
+                                    ("effect.time".into(), vec![crate::hud::effect_time(left)])
+                                }),
+                            );
+                        });
+                        ui.nodes[cell].tooltip = Some(name);
+                    }
+                });
+            }
+        },
+    );
+}
+
 impl Screen for MenuScreen {
     fn name(&self) -> &str {
         "core:menu"
+    }
+
+    /// Built again when an effect comes, goes or changes level while it is open.
+    fn pointer(&mut self, _cursor: glam::Vec2, _ui: &mut Ui, ctx: &mut Ctx, _hud: &mut crate::hud::Hud) -> bool {
+        let c = content();
+        let shows = c.game.player_menu == Some(self.kind)
+            && !ctx
+                .client
+                .as_deref()
+                .is_some_and(|cl| cl.mode.has(crate::tag_bits::game_mode::CREATIVE_INVENTORY));
+        if shows && ctx.client.as_deref().map_or(Vec::new(), effects_now) != self.effects {
+            ctx.requests.push(Request::Rebuild);
+        }
+        false
     }
 
     fn shows_menu(&self) -> bool {
@@ -124,6 +195,9 @@ impl Screen for MenuScreen {
             ui.container(Style::row().gap(4.0).align(crate::ui::Align::Start), |ui| {
                 if creative {
                     creative_panel(ui, cx, &self.search, &self.tab);
+                } else if c.game.player_menu == Some(self.kind) {
+                    self.effects = cx.client.map_or(Vec::new(), effects_now);
+                    effects_panel(ui, cx);
                 }
                 if let Some(def) = c.game.menus.get(self.kind as usize) {
                     if let Some((by, cb)) = def.screen {
@@ -160,24 +234,13 @@ impl Screen for Death {
         true
     }
 
-    /// Built from node descriptors like a mod's screen, so a replacement can match it.
     fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
-        use crate::ui::desc;
-        use weft_abi as abi;
-        desc::build(ui, cx, |d| {
-            let panel = abi::UiNode {
-                class: abi::Str::new("death"),
-                grow: 1.0,
-                align: abi::ui_align::CENTER,
-                justify: abi::ui_justify::CENTER,
-                gap: 12.0,
-                ..desc::node(abi::ui_kind::PANEL)
-            };
-            d.open(&panel, |d| {
-                d.title("death.title");
-                d.button("death.respawn", &[], 200.0, false, |r| r.handle(vec![Request::Respawn]));
-                d.button("menu.save_quit", &[], 200.0, false, |r| r.handle(vec![Request::LeaveWorld]));
-            });
+        use crate::screens::{button, title};
+        ui.root_style(Style::default().stretch());
+        ui.panel("death", Style::default().grow().center().gap(12.0), |ui| {
+            title(ui, cx, "death.title");
+            button(ui, cx, "death.respawn", &[], 200.0, |c| c.requests.push(Request::Respawn));
+            button(ui, cx, "menu.save_quit", &[], 200.0, |c| c.requests.push(Request::LeaveWorld));
         });
     }
 }

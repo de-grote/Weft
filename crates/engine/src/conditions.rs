@@ -27,6 +27,8 @@ pub enum Arg {
     None,
     /// Inclusive.
     Range(f32, f32),
+    /// A light range on a side of the cell (`FACE_NAMES`; 6 the cell itself, 7 its brightest side).
+    LightAt(f32, f32, u8),
     Num(f32),
     /// A block matcher's states, a bit each (`refs::compile`).
     Blocks(Vec<u64>),
@@ -37,6 +39,8 @@ pub enum Arg {
     Side(u8, Option<Vec<u64>>),
     /// An attribute and its range, inclusive.
     Attr(u32, f32, f32),
+    /// Equipment slots (`PlayerLayout::equipment` order), a bit each.
+    Slots(u32),
 }
 
 /// What a condition is asked about.
@@ -70,20 +74,12 @@ pub struct Body {
 /// Condition texts met while freezing, by id, compiled at its end.
 #[derive(Default)]
 pub struct Texts {
-    pub texts: Vec<String>,
-    ids: FxHashMap<String, u32>,
+    pub texts: crate::content::Interner,
 }
 
 impl Texts {
     pub fn id(&mut self, text: &str) -> u32 {
-        let text = text.trim();
-        if let Some(&id) = self.ids.get(text) {
-            return id;
-        }
-        let id = self.texts.len() as u32;
-        self.texts.push(text.to_string());
-        self.ids.insert(text.to_string(), id);
-        id
+        self.texts.id(text.trim())
     }
 
     /// The conditions of a `[str]` component, all of them; `None` for none.
@@ -144,19 +140,20 @@ impl Parser<'_, '_> {
     }
 
     fn any(&mut self) -> Result<Expr, String> {
-        let mut v = vec![self.all()?];
-        while self.eat(b'|') {
-            v.push(self.all()?);
-        }
-        Ok(if v.len() == 1 { v.pop().unwrap() } else { Expr::Any(v) })
+        self.joined(b'|', Self::all, Expr::Any)
     }
 
     fn all(&mut self) -> Result<Expr, String> {
-        let mut v = vec![self.one()?];
-        while self.eat(b'&') {
-            v.push(self.one()?);
+        self.joined(b'&', Self::one, Expr::All)
+    }
+
+    /// `part`s with `sep` between them, `join`ed when there are several.
+    fn joined(&mut self, sep: u8, part: fn(&mut Self) -> Result<Expr, String>, join: fn(Vec<Expr>) -> Expr) -> Result<Expr, String> {
+        let mut v = vec![part(self)?];
+        while self.eat(sep) {
+            v.push(part(self)?);
         }
-        Ok(if v.len() == 1 { v.pop().unwrap() } else { Expr::All(v) })
+        Ok(if v.len() == 1 { v.pop().unwrap() } else { join(v) })
     }
 
     fn one(&mut self) -> Result<Expr, String> {
@@ -226,7 +223,19 @@ impl Parser<'_, '_> {
         let engine = (id as usize) < k::NAMES.len();
         let Some(text) = arg else {
             return match id {
-                k::LIGHT | k::CHANCE | k::BLOCK | k::STATE | k::TOOL | k::TOOL_LEVEL | k::SIDE | k::BESIDE | k::OPEN | k::ATTRIBUTE
+                k::LIGHT
+                | k::CHANCE
+                | k::BLOCK
+                | k::STATE
+                | k::TOOL
+                | k::TOOL_LEVEL
+                | k::SIDE
+                | k::BESIDE
+                | k::OPEN
+                | k::ATTRIBUTE
+                | k::SKY
+                | k::HEIGHT
+                | k::WEARS
                     if engine =>
                 {
                     Err(format!("condition {name} needs an argument"))
@@ -247,7 +256,23 @@ impl Parser<'_, '_> {
         };
         Ok(match id {
             _ if !engine => Arg::Text(text),
-            k::LIGHT => range(&text)?,
+            k::SKY | k::HEIGHT => range(&text)?,
+            // `light(9.., up)`: on a side of the cell (6: itself, 7: its brightest).
+            k::LIGHT => match text.split_once(',') {
+                Some((r, side)) => {
+                    let Arg::Range(a, b) = range(r)? else { unreachable!() };
+                    let side = side.trim();
+                    let f = match side {
+                        "any" => 7,
+                        _ => abi::FACE_NAMES
+                            .iter()
+                            .position(|n| *n == side)
+                            .ok_or_else(|| format!("condition {name}({text}): no side {side}"))? as u8,
+                    };
+                    Arg::LightAt(a, b, f)
+                }
+                None => range(&text)?,
+            },
             k::ATTRIBUTE => {
                 let (attr, r) = text
                     .split_once(',')
@@ -262,6 +287,22 @@ impl Parser<'_, '_> {
                 Arg::Attr(id, a, b)
             }
             k::CHANCE | k::TOOL_LEVEL => Arg::Num(num(&text)?),
+            k::WEARS => {
+                let what = text.trim();
+                let slots = self
+                    .look
+                    .game
+                    .player_layout
+                    .equipment
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.name == what || e.bones.iter().any(|b| b == what))
+                    .fold(0, |m, (i, _)| m | 1 << i);
+                if slots == 0 {
+                    return Err(format!("condition {name}({text}): no equipment slot is or covers {what}"));
+                }
+                Arg::Slots(slots)
+            }
             k::BLOCK => Arg::Blocks(crate::refs::compile(&text, self.look.block_names, self.look.blocks, self.look.components)?),
             k::TOOL => Arg::Tag(crate::refs::tag(self.look.components, text.trim_start_matches('#'))?),
             k::STATE => Arg::Text(text),
@@ -339,7 +380,32 @@ fn eval(e: &Expr, rec: &mut dyn FnMut(u32, &Arg) -> Option<bool>) -> Option<bool
 }
 
 fn in_range(arg: &Arg, v: f32) -> bool {
-    matches!(arg, Arg::Range(a, b) | Arg::Attr(_, a, b) if (*a..=*b).contains(&v))
+    matches!(arg, Arg::Range(a, b) | Arg::Attr(_, a, b) | Arg::LightAt(a, b, _) if (*a..=*b).contains(&v))
+}
+
+/// The light `light(..)` reads, of the cell or a side of it (`Arg::LightAt`), by `light` at a
+/// cell and `daylight`.
+fn light_for(arg: &Arg, p: glam::IVec3, light: &dyn Fn(glam::IVec3) -> u32, daylight: f32) -> f32 {
+    let at = |q: glam::IVec3| abi::light::effective(light(q), daylight) as f32;
+    match arg {
+        Arg::LightAt(_, _, 7) => crate::world::DIRS
+            .iter()
+            .map(|&d| at(p + d))
+            .fold(0.0, f32::max),
+        Arg::LightAt(_, _, f) if *f < 6 => at(p + crate::world::DIRS[*f as usize]),
+        _ => at(p),
+    }
+}
+
+/// Whether a body of `kind` with `inventory` has something in one of the equipment `slots`.
+fn wears(kind: &crate::registry::EntityKind, inventory: &[abi::ItemStack], slots: u32) -> bool {
+    let worn = &kind.worn;
+    (0..32u32).filter(|i| slots & 1 << i != 0).any(|i| {
+        // The other hand is the slot after the rest.
+        let slot = if i < worn.len() as u32 { Some(worn.start + i) } else { kind.off.filter(|_| i == worn.len() as u32) };
+        slot.and_then(|s| inventory.get(s as usize))
+            .is_some_and(|s| !s.is_empty())
+    })
 }
 
 fn attr(arg: &Arg) -> u32 {
@@ -350,6 +416,7 @@ fn attr(arg: &Arg) -> u32 {
 pub fn compile_all(texts: &Texts, look: &Look, errors: &mut Vec<String>) -> Vec<Expr> {
     texts
         .texts
+        .list
         .iter()
         .map(|t| {
             compile(t, look).unwrap_or_else(|e| {
@@ -385,12 +452,12 @@ fn server(d: &mut Dim, c: &'static Content, e: &Expr, a: &Ask) -> Option<bool> {
             return Some(v);
         }
         let def = c.game.conditions.get(id as usize)?;
-        let changes =
-            matches!(def.answer, Answer::Mod(..)) || matches!(id, k::DAY | k::NIGHT | k::UNDERGROUND | k::SURFACE | k::LIGHT | k::CHANCE);
+        let changes = matches!(def.answer, Answer::Mod(..))
+            || matches!(id, k::DAY | k::NIGHT | k::UNDERGROUND | k::SURFACE | k::LIGHT | k::CHANCE | k::SKY | k::SHELTERED);
         if a.could && changes {
             return None;
         }
-        let sky = || abi::light::sky(d.light(p)) >= 6 || !c.dims[d.id as usize].sky_light;
+        let sky = || !crate::world::light::enclosed(&c.dims[d.id as usize], d.light(p));
         // The cell on a side named, the cell itself for 6.
         let toward = |f: u8| {
             let f = if a.own_frame && f < 6 { c.states[a.state as usize].turn.face(f as usize) } else { f as usize };
@@ -411,12 +478,26 @@ fn server(d: &mut Dim, c: &'static Content, e: &Expr, a: &Ask) -> Option<bool> {
                 (k::NIGHT, _) => d.daylight(c) <= 0.5,
                 (k::UNDERGROUND, _) => !sky(),
                 (k::SURFACE, _) => sky(),
-                (k::LIGHT, _) => in_range(arg, abi::light::effective(d.light(p), a.daylight.unwrap_or_else(|| d.daylight(c))) as f32),
+                (k::LIGHT, _) => {
+                    let daylight = a.daylight.unwrap_or_else(|| d.daylight(c));
+                    in_range(arg, light_for(arg, p, &|q| d.light(q), daylight))
+                }
                 (k::CHANCE, Arg::Num(n)) => d.random_unit() < *n,
+                (k::SKY, _) => in_range(arg, abi::light::sky(d.light(p)) as f32),
+                (k::SHELTERED, _) => c.game.weathers[d.weather as usize].shelters(),
+                (k::HEIGHT, _) => in_range(arg, a.pos.y as f32),
                 (k::ATTRIBUTE, _) => in_range(arg, d.attribute(c, a.entity, attr(arg), false) as f32),
+                (k::WEARS, Arg::Slots(slots)) => {
+                    let Some(e) = d.entities.get(a.entity) else { return Some(false) };
+                    let inv = d
+                        .entities
+                        .inventories
+                        .get(&a.entity)
+                        .map_or(&[][..], |i| &i[..]);
+                    wears(&c.game.entities[e.kind as usize], inv, *slots)
+                }
                 (k::SIDE, Arg::Side(f, m)) => {
-                    let solid = |s: u32| c.states[s as usize].flags & abi::block_flags::SOLID != 0;
-                    return side(d, *f, &|s| m.as_ref().map_or(solid(s), |m| crate::refs::has(m, s)));
+                    return side(d, *f, &|s| m.as_ref().map_or(c.solid(s), |m| crate::refs::has(m, s)));
                 }
                 (k::OPEN, Arg::Side(f, _)) => {
                     return d
@@ -482,10 +563,17 @@ pub fn client_holds(client: Option<&crate::client::Client>, e: &Expr, a: &Ask) -
                 k::UNDERGROUND => enclosed(),
                 k::SURFACE => client.is_some() && !enclosed(),
                 k::LIGHT => client.is_some_and(|cl| {
-                    let l = cl.world.light(a.pos.floor().as_ivec3());
-                    in_range(arg, abi::light::effective(l, a.daylight.unwrap_or_else(|| cl.daylight())) as f32)
+                    let daylight = a.daylight.unwrap_or_else(|| cl.daylight());
+                    in_range(arg, light_for(arg, a.pos.floor().as_ivec3(), &|q| cl.world.light(q), daylight))
                 }),
                 k::ATTRIBUTE => client.is_some_and(|cl| in_range(arg, cl.attribute(attr(arg)))),
+                k::WEARS => client.is_some_and(|cl| {
+                    let Arg::Slots(slots) = arg else { return false };
+                    wears(&c.game.entities[cl.me.kind as usize], &cl.inventory, *slots)
+                }),
+                k::SKY => client.is_some_and(|cl| in_range(arg, abi::light::sky(cl.world.light(a.pos.floor().as_ivec3())) as f32)),
+                k::SHELTERED => client.is_some_and(|cl| c.game.weathers[cl.weather_id as usize].shelters()),
+                k::HEIGHT => in_range(arg, a.pos.y as f32),
                 // Rolled where the world is.
                 _ => false,
             },

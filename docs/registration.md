@@ -104,7 +104,9 @@ Something that goes in an inventory. `r.item(&ITEM)`; a block's item is named li
 | `ON_USE` | callback | none | `.on_use` |
 | `CONDITION` | callback | none | how a stack looks by its data (`.condition`) |
 
-Shared ones: `MAX_STACK` (64), `DURABILITY`, `TOOL_LEVEL` + `tools/<class>` (`.tool`), `MINING_SPEED` (1), `ATTACK_DAMAGE` (1), `ATTACK_SPEED`, `USE_TICKS`, `USE_PRIORITY`, `INVENTORY_SLOTS` (`.inventory(n)`, a backpack), `WORN`/`WORN_TEXTURE` (`.wearable`), `WORN_MODEL` (`.wearable_model`), `ANIMATIONS`, `REMAINDER`, `LIQUID`, plus what mods read (`FOOD`, `FUEL`). Tags: `handheld`, `tab/<tab>`, anything yours.
+Shared ones: `MAX_STACK` (64), `DURABILITY`, `TOOL_LEVEL` + `tools/<class>` (`.tool`), `MINING_SPEED` (1), `ATTACK_DAMAGE` (1), `ATTACK_SPEED`, `USE_TICKS`, `USE_PRIORITY`, `INVENTORY_SLOTS` (`.inventory(n)`, a backpack), `LIGHT` (`[u8;3]`; `.light`, `.light_rgb`), `WORN`/`WORN_TEXTURE` (`.wearable`), `WORN_MODEL` (`.wearable_model`), `ANIMATIONS`, `REMAINDER`, `LIQUID`, plus what mods read (`FOOD`, `FUEL`). Tags: `handheld`, `tab/<tab>`, anything yours.
+
+Light: `LIGHT` on an item lights what is around whoever holds or wears it, or where it lies dropped. An item that places a block uses the block's light unless it sets its own.
 
 ```rust
 static COAL: Item = Item::named("base:coal");
@@ -130,16 +132,20 @@ A kind of entity: mobs, players, projectiles, moving platforms, block entities. 
 | `TEMPLATE` | `str` | none | a moving body of a template (`.body`) |
 | `BLOCK` | `str` | none | the block it is the block entity of |
 | `SEATS` | `[Seat]` | none | `.seat` |
-| `ATTACH` | `[Attach]` | none | components each one carries (`.attach`, `.attach_with`, `.attach_storage`) |
+| `ATTACH` | `[Attach]` | none | components each one carries, starting as the kind's own value (`.attach`, `.attach_with`, `.attach_storage`) |
+| `LIGHT_AT` | `[f32;3]` | its middle, a block entity's block | where its light comes from, from its feet, +Z ahead, turned with it (`.light_at`) |
+| `SHOWN_SLOTS` | `[u32]` | none | inventory slots everyone around sees, in `core:shown` (`.shown_slots`) |
 | `ON_TICK`, `ON_INTERACT`, `STEER`, `DISMOUNT` | callback | none | `.on_tick`, `.on_interact`, `.steering`, seat exits |
 | `FRAMES` | `[callback]` | none | client frame hooks (`r.client_entity_frame`) |
 | `SLOT_GROUPS`, `INVENTORY_MENU` | `[SlotGroupDef]`, `str` | 9 + 27 | the player's inventory (`r.player_slots`, `r.player_menu`) |
 
-Shared ones: `MODEL`, `ANIMATIONS`, `SOUND`, `SHADER`, `SWIMS_IN`, `INVENTORY_SLOTS`, attributes (`.max_health`, `.reach`). Tags (`abi::comp::entity`): `NO_GRAVITY`, `INVULNERABLE`, `BURNS_IN_SUN`, `SWIMS`, `SOLID`, `KINEMATIC`, `CRUSHES`, `RIDERS_FALL`, `WEARS` (`.equipment()`), and `NO_FALL_DAMAGE`, `UNPUSHABLE` turning off what every kind does; `immune/<cause>` against a damage cause.
+Shared ones: `MODEL`, `ANIMATIONS`, `SOUND`, `SHADER`, `SWIMS_IN`, `INVENTORY_SLOTS`, `LIGHT` (`[u8;3]`; `.light`, `.light_rgb`), `HAZARDS` (`.hazard(..)`, `.burns_in_sun()`, `.crushing()`), attributes (`.max_health`, `.reach`). Tags (`abi::comp::entity`): `NO_GRAVITY`, `SWIMS`, `SOLID`, `KINEMATIC`, `RIDERS_FALL`, `WEARS` (`.equipment()`), and `NO_FALL_DAMAGE`, `UNPUSHABLE` turning off what every kind does; `immune/<cause>` against a damage cause.
+
+Light: `LIGHT` lights what is around each entity of the kind, from its middle (`LIGHT_AT` moves it: a lantern on the head). One entity's own changes while it lives: attach `LIGHT` (it starts as the kind's) and `w.set_component(e, &LIGHT, [r, g, b])`. Everything an entity gives (its own light, both hands, worn items, `SHOWN_SLOTS`, a dropped stack, its effects, fire as `core:burning`'s) is combined per channel by taking the brightest value, not the sum. Light that moves with entities is drawn by each client: it spreads as block light does (walls stop it, colored glass tints it) and follows the entity block by block, but the world doesn't have it, so it keeps no mob from spawning and grows no plant. The 64 sources nearest the camera are drawn.
 
 ```rust
 static ZOMBIE: EntityKind = EntityKind::named("base:zombie");
-r.edit(&ZOMBIE).walk_speed(4.0).untag("entity.burns_in_sun");
+r.edit(&ZOMBIE).walk_speed(4.0).unset(&comps::entity::HAZARDS);
 r.edit(&PLAYER).attach(&MANA).max_health(30.0);
 ```
 
@@ -299,7 +305,7 @@ r.remove(&Decoration::named("base:decoration"));
 ```
 
 ## Structure
-A template placed now and then, named like the template. `r.structure(&TEMPLATE)`, another mod's `r.edit(TEMPLATE.structure())`, placement as for ores.
+A template placed now and then, named like the template: a scatter whose blocks are the template. `r.structure(&TEMPLATE)`, another mod's `r.edit(TEMPLATE.structure())`, placement as for ores; tag `structure.turns` (`.turns()`) turns each a random quarter.
 
 | component (`comps::structure`) | schema | default |
 |---|---|---|
@@ -344,7 +350,7 @@ Named `<mod>:<kind>/<output>`, `/2`.. unless `.named`. `r.shaped(..)`, `r.shapel
 | `PATTERN`, `KEYS` | `[str]`, `[RecipeKey]` | shaped |
 | `INPUTS`, `AMOUNTS` | `[str]`, `[u32]` | shapeless or processing (`.input_amounts`) |
 | `TIME` | `u32` | ticks, 0 |
-| `OUTPUTS` | `[RecipeOutput]` | more results (`.output`, `.output_chance`) |
+| `OUTPUTS` | `[LootPool]` | more results, rolled as loot (`.extra`, `.output`, `.output_chance`) |
 
 Tag `recipe.hidden` (`.hidden()`). Any other component is data it carries (energy per tick).
 
@@ -466,7 +472,7 @@ r.edit(&poses::CROUCH).speed(0.4);
 ```
 
 ## Game mode
-A set of abilities. `r.game_mode(&M)`, the engine's in `game_modes::*`. `comps::game_mode::MODIFIERS` (`[Modifier]`, `.modifier` pushes; flight is `attribute::CAN_FLY`); tags `game_mode.instant_break`, `no_break`, `no_place`, `no_costs`, `invulnerable`, `always_fly`, `noclip`, `no_interact`, `hidden`, `no_hud`, `creative_inventory` (presets `.breaks`, `.flight`, `.no_placing`...).
+A set of abilities. `r.game_mode(&M)`, the engine's in `game_modes::*`. `comps::game_mode::MODIFIERS` (`[Modifier]`, `.modifier` pushes; flight is `attribute::CAN_FLY`, no damage, hunger or air `attribute::INVULNERABLE`, `.invulnerable()`); tags `game_mode.instant_break`, `no_break`, `no_place`, `no_costs`, `always_fly`, `noclip`, `no_interact`, `hidden`, `no_hud`, `creative_inventory` (presets `.breaks`, `.flight`, `.no_placing`...).
 
 ```rust
 r.edit(&game_modes::SURVIVAL).modifier(&attribute::MAX_HEALTH, abi::attr_op::ADD, 4.0);
@@ -480,10 +486,12 @@ r.edit(&damage_causes::FALL).death_message("death.mymod.fell");
 ```
 
 ## Entity effect
-A shader drawn over a mob for a while (`w.entity_effect`). `r.entity_effect(&E)`. `comps::entity_effect::SHADER` (`str`, its own name by default; `.shader`).
+What is on a mob for a while (`w.entity_effect(id, &E, level, ticks)`), several at once: a shader drawn over it, what it does to it and what it gives it, the last two times the level. With an icon it is a status effect its player sees (`docs/modding.md`, Status effects). `r.entity_effect(&E)`. `comps::entity_effect::SHADER` (`str`, its own name by default; `.shader`, `.unseen()` for none), `HAZARDS` (`.hazard(Hazard::own(..))`), `MODIFIERS` (`.modifier(..)`), `LIGHT` (`[u8;3]`, given off while on; `.light`, `.light_rgb`). The engine's `core:burning` draws nothing and is the light of every burning entity (`r.edit(&entity_effects::BURNING).light_rgb(..)` for another fire).
 
 ```rust
 r.edit(&entity_effects::HURT).shader(&Shader::named("mymod:hurt_blue"));
+r.entity_effect(&POISON).unseen().hazard(Hazard::own(1.0, &MAGIC).every(25));
+r.entity_effect(&SWIFTNESS).modifier(Modifier::new(&attribute::MOVEMENT_SPEED, attr_op::MULTIPLY_BASE, 0.2));
 ```
 
 ## Text place

@@ -21,6 +21,7 @@ pub const TAG_HOTBAR: u32 = 1;
 #[derive(Clone, Copy)]
 enum Part {
     Hotbar,
+    Effects,
     HeldName,
     Crosshair,
     PlayerList,
@@ -35,6 +36,69 @@ enum Part {
     Mod(weft_abi::ModId, weft_abi::Callback),
 }
 pub const TAG_CROSSHAIR: u32 = 2;
+/// A status effect's icon in its frame (`data` the effect), fading its last ten seconds.
+pub const TAG_EFFECT: u32 = 3;
+
+/// The status effects the local player has now, beneficial ones first: effect, level, ticks left
+/// (`u64::MAX` for good).
+pub fn shown_effects(client: &Client) -> Vec<(u32, u32, u64)> {
+    let c = content();
+    let now = client.ticks();
+    let mut v: Vec<(u32, u32, u64)> = client
+        .me
+        .effects
+        .iter()
+        .filter(|f| {
+            f.until > now
+                && c.game
+                    .entity_effects
+                    .get(f.id as usize)
+                    .is_some_and(|d| d.shown())
+        })
+        .map(|f| (f.id, f.level, if f.until == crate::world::FOREVER { u64::MAX } else { f.until - now }))
+        .collect();
+    v.sort_by_key(|f| (c.game.entity_effects[f.0 as usize].kind == crate::registry::effect_kind::HARMFUL, f.0));
+    v
+}
+
+/// Effect `effect`'s icon in its frame, 24 GUI pixels square.
+pub fn effect_icon(ui: &mut Ui, effect: u32) -> crate::ui::NodeId {
+    let n = ui.add(Kind::Custom { tag: TAG_EFFECT, data: effect as u64 }, Style::default().size(24.0, 24.0));
+    ui.nodes[n].icon = content()
+        .game
+        .entity_effects
+        .get(effect as usize)
+        .map(|d| d.icon.clone());
+    n
+}
+
+/// `effect.base.speed II`: its name in lang and its level past the first in roman numerals.
+pub fn effect_name(lang: &Lang, effect: u32, level: u32) -> Vec<text::Span> {
+    let c = content();
+    let name = c
+        .game
+        .entity_effects
+        .get(effect as usize)
+        .map_or("", |d| d.name.as_str());
+    let key = format!("effect.{}", name.replace(':', "."));
+    let roman = ["", "", " II", " III", " IV", " V", " VI", " VII", " VIII", " IX", " X"];
+    let level = roman
+        .get(level as usize)
+        .map_or_else(|| format!(" {level}"), |s| s.to_string());
+    text::rich(&format!("{}{level}", text::escape(lang.get(&key))), lang, None)
+}
+
+/// Ticks as `m:ss`, `**:**` past 99:59 and `∞` for good (`INFINITE_TICKS` and up) as vanilla's.
+pub fn effect_time(ticks: u64) -> text::Arg {
+    let secs = ticks / crate::world::TPS as u64;
+    if ticks >= weft_abi::INFINITE_TICKS as u64 {
+        Arg::Key("effect.infinite".into())
+    } else if secs > 99 * 60 + 59 {
+        Arg::Text("**:**".into())
+    } else {
+        Arg::Text(format!("{}:{:02}", secs / 60, secs % 60))
+    }
+}
 
 /// A player's say on one element (`config/hud.txt`): its place in an anchor's flow or a free spot,
 /// and whether it shows.
@@ -326,6 +390,11 @@ impl Hud {
         // Tab, and only over the game: in the chat it completes.
         let list_shown = input.captured && input.held("core:player_list");
         let chat = crate::settings::chat_look();
+        // Which status effects show, at what level, in the same number as the texts.
+        let shown_steps = shown_effects(client).iter().fold(shown_steps, |h, f| {
+            h.wrapping_mul(31)
+                .wrapping_add((f.0 as u64) << 8 | f.1 as u64)
+        });
         let key = (
             debug,
             chat_visible,
@@ -367,6 +436,7 @@ impl Hud {
         // Everything on the overlay, the engine's elements placed like the mods'.
         let mut all: Vec<(String, String, i32, Part)> = vec![
             ("core:hotbar".into(), a::HOTBAR.into(), 0, Part::Hotbar),
+            ("core:effects".into(), a::TOP_RIGHT.into(), 0, Part::Effects),
             ("core:held_name".into(), a::ABOVE_HOTBAR.into(), 0, Part::HeldName),
             ("core:crosshair".into(), CENTER.into(), 0, Part::Crosshair),
             ("core:player_list".into(), CENTER.into(), 2, Part::PlayerList),
@@ -450,6 +520,28 @@ impl Hud {
                 });
             }
             Part::Crosshair => drop(ui.add(Kind::Custom { tag: TAG_CROSSHAIR, data: 0 }, Style::default().size(9.0, 9.0))),
+            Part::Effects => {
+                // Beneficial ones in a row, harmful ones in the row under it, as vanilla's.
+                let all = shown_effects(client);
+                ui.container(Style::default().gap(1.0).align(align), |ui| {
+                    for harmful in [false, true] {
+                        let row: Vec<_> = all
+                            .iter()
+                            .filter(|f| {
+                                (content().game.entity_effects[f.0 as usize].kind == crate::registry::effect_kind::HARMFUL) == harmful
+                            })
+                            .collect();
+                        if row.is_empty() {
+                            continue;
+                        }
+                        ui.container(Style::row().gap(1.0), |ui| {
+                            for f in row {
+                                effect_icon(ui, f.0);
+                            }
+                        });
+                    }
+                });
+            }
             Part::PlayerList if list_shown || editing => {
                 let mut style = Style::default().pad(4.0).gap(1.0);
                 style.at = Some([0.0, 12.0 - ui.size.y / 2.0, 0.5, 0.0]);
@@ -520,27 +612,21 @@ impl Hud {
         let ui = &mut self.ui;
         ui.clear();
         ui.root_style(Style::default().stretch());
+        // The elements of an anchor stacked in a column of `style`, from the bottom when `upwards`.
+        let stack = |ui: &mut Ui, anchors: &[&str], upwards: bool, style: Style, align: Align| {
+            ui.container(style.gap(1.0).align(align), |ui| {
+                for e in anchors.iter().flat_map(|a| at(a, upwards)) {
+                    emit(ui, e, Style::default(), align);
+                }
+            });
+        };
         // Both halves start at zero height and split the rest evenly, so the crosshair sits at the
         // exact screen center whatever they contain.
         ui.container(Style::row().h(0.0).grow().pad(4.0).align(Align::Start), |ui| {
             // Half the screen each, so wide text on one side never pushes the other off screen
             // (the two may overlap on narrow screens, like vanilla's).
-            ui.container(Style::default().w(0.0).grow().gap(1.0).align(Align::Start), |ui| {
-                for e in at(a::DEBUG_LEFT, false)
-                    .into_iter()
-                    .chain(at(a::TOP_LEFT, false))
-                {
-                    emit(ui, e, Style::default(), Align::Start);
-                }
-            });
-            ui.container(Style::default().w(0.0).grow().gap(1.0).align(Align::End), |ui| {
-                for e in at(a::DEBUG_RIGHT, false)
-                    .into_iter()
-                    .chain(at(a::TOP_RIGHT, false))
-                {
-                    emit(ui, e, Style::default(), Align::End);
-                }
-            });
+            stack(ui, &[a::DEBUG_LEFT, a::TOP_LEFT], false, Style::default().w(0.0).grow(), Align::Start);
+            stack(ui, &[a::DEBUG_RIGHT, a::TOP_RIGHT], false, Style::default().w(0.0).grow(), Align::End);
         });
         for e in at(CENTER, false) {
             emit(ui, e, Style::default().self_align(Align::Center), Align::Start);
@@ -554,9 +640,7 @@ impl Hud {
                 .align(Align::Center),
             |ui| {
                 ui.container(Style::default().h(3.0), |_| {});
-                for e in at(a::UNDER_CROSSHAIR, false) {
-                    emit(ui, e, Style::default(), Align::Center);
-                }
+                stack(ui, &[a::UNDER_CROSSHAIR], false, Style::default(), Align::Center);
             },
         );
         ui.container(
@@ -572,39 +656,23 @@ impl Hud {
                     emit(ui, e, Style::default().self_align(Align::Start), Align::Start);
                 }
                 ui.container(Style::row().align(Align::End), |ui| {
-                    ui.container(Style::default().w(0.0).gap(1.0).align(Align::Start), |ui| {
-                        for e in at(a::BOTTOM_LEFT, true) {
-                            emit(ui, e, Style::default(), Align::Start);
-                        }
-                    });
+                    stack(ui, &[a::BOTTOM_LEFT], true, Style::default().w(0.0), Align::Start);
                     ui.container(Style::default().grow(), |_| {});
                     ui.container(Style::default().gap(1.0).align(Align::Center), |ui| {
                         for e in at(a::ABOVE_HOTBAR, true) {
                             emit(ui, e, Style::default(), Align::Center);
                         }
                         ui.container(Style::row().w(182.0).gap(2.0).align(Align::End), |ui| {
-                            ui.container(Style::default().gap(1.0).align(Align::Start), |ui| {
-                                for e in at(a::HOTBAR_LEFT, true) {
-                                    emit(ui, e, Style::default(), Align::Start);
-                                }
-                            });
+                            stack(ui, &[a::HOTBAR_LEFT], true, Style::default(), Align::Start);
                             ui.container(Style::default().grow(), |_| {});
-                            ui.container(Style::default().gap(1.0).align(Align::End), |ui| {
-                                for e in at(a::HOTBAR_RIGHT, true) {
-                                    emit(ui, e, Style::default(), Align::End);
-                                }
-                            });
+                            stack(ui, &[a::HOTBAR_RIGHT], true, Style::default(), Align::End);
                         });
                         for e in at(a::HOTBAR, true) {
                             emit(ui, e, Style::default(), Align::Center);
                         }
                     });
                     ui.container(Style::default().grow(), |_| {});
-                    ui.container(Style::default().w(0.0).gap(1.0).align(Align::End), |ui| {
-                        for e in at(a::BOTTOM_RIGHT, true) {
-                            emit(ui, e, Style::default(), Align::End);
-                        }
-                    });
+                    stack(ui, &[a::BOTTOM_RIGHT], true, Style::default().w(0.0), Align::End);
                 });
             },
         );
@@ -933,6 +1001,24 @@ pub fn draw_custom(
 ) {
     match tag {
         TAG_CROSSHAIR => loaded(ren, look, "crosshair", r, scale),
+        TAG_EFFECT => {
+            loaded(ren, look, "effect", r, scale);
+            let left = client
+                .and_then(|cl| shown_effects(cl).into_iter().find(|f| f.0 as u64 == data))
+                .map_or(0, |f| f.2);
+            // Its last ten seconds it fades in and out, faster as it ends.
+            let alpha = if left > 200 {
+                1.0
+            } else {
+                let t = left as f32 / crate::world::TPS as f32;
+                0.6 + 0.4 * (t * std::f32::consts::PI * (1.0 + (10.0 - t) / 3.0)).cos()
+            };
+            if let Some(t) = icon {
+                let s = 18.0 * scale;
+                let a = (alpha.clamp(0.0, 1.0) * 255.0) as u32;
+                ren.image(Rect { x: r.x + (r.w - s) / 2.0, y: r.y + (r.h - s) / 2.0, w: s, h: s }, t, [0.0, 0.0, 1.0, 1.0], 0xFFFFFF00 | a);
+            }
+        }
         TAG_HOTBAR => {
             let Some(client) = client else { return };
             let selected = client.selected as u64 == data;
@@ -1072,6 +1158,50 @@ pub fn item_tooltip(lang: &Lang, input: &crate::input::Input, stack: weft_abi::I
     for comp in c.components.of(crate::components::ITEM, stack.item) {
         let key = text::lang_key("tagged", &c.components.names[comp as usize]);
         group(&key, Some(comp), &mut out);
+    }
+    // What it gives, worn or in hand, with each attribute's name (`attribute.<name>`).
+    for m in c
+        .source_mods
+        .items
+        .get(&stack.item)
+        .into_iter()
+        .flatten()
+        .filter(|m| m.op == weft_abi::attr_op::ADD)
+    {
+        let name = &c.game.attributes[m.attr as usize].name;
+        let key = text::lang_key("attribute", name);
+        let attr = if lang.has(&key) { text::Arg::Key(key) } else { text::Arg::Text(name.clone()) };
+        let template = lang.get(if m.worn { "tooltip.modifier.worn" } else { "tooltip.modifier" });
+        line(template, &[text::Arg::Text(format!("{:+}", m.amount)), attr], None, &mut out);
+    }
+    // The effects it gives (a potion's), with their level and how long, as vanilla's.
+    let gifts = c
+        .components
+        .id(weft_abi::comp::GIVES_EFFECTS)
+        .and_then(|id| c.components.bytes(crate::components::ITEM, stack.item, id))
+        .and_then(weft_abi::data::from_bytes::<Vec<weft_abi::EffectGift>>)
+        .unwrap_or_default();
+    for g in gifts {
+        let Some(d) = c
+            .game
+            .entity_effect_names
+            .get(&g.effect)
+            .and_then(|&e| c.game.entity_effects.get(e as usize))
+        else {
+            continue;
+        };
+        let kind = match d.kind {
+            crate::registry::effect_kind::BENEFICIAL => "beneficial",
+            crate::registry::effect_kind::HARMFUL => "harmful",
+            _ => "neutral",
+        };
+        let key = format!("tooltip.effect.{kind}{}", if d.instant { ".instant" } else { "" });
+        let roman = ["", "", " II", " III", " IV", " V", " VI", " VII", " VIII", " IX", " X"];
+        let level = roman
+            .get(g.level as usize)
+            .map_or_else(|| format!(" {}", g.level), |s| s.to_string());
+        let name = text::Arg::Key(format!("effect.{}", d.name.replace(':', ".")));
+        line(lang.get(&key), &[name, text::Arg::Text(level), effect_time(g.ticks as u64)], None, &mut out);
     }
     let max = c.durability(&stack);
     if max > 0 {

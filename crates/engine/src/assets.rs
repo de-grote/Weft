@@ -384,6 +384,20 @@ pub fn load_texture(assets: &Assets, name: &str) -> LoadedTexture {
             return missing_texture();
         }
     };
+    let meta = assets
+        .read(name, "textures", "anim")
+        .map(|b| String::from_utf8_lossy(&b).into_owned());
+    // A strip nothing says is an animation is one tall picture, a big block's (a door's), put in
+    // a square from its left: its whole is `[0, 0, 16 * width / height, 16]`.
+    if img.height > img.width && meta.is_none() && assets.read(name, "textures", "png.mcmeta").is_none() {
+        let (w, side) = (img.width as usize, img.height as usize);
+        let mut px = vec![0u8; side * side * 4];
+        for (y, row) in img.rgba.chunks_exact(w * 4).enumerate() {
+            px[y * side * 4..y * side * 4 + w * 4].copy_from_slice(row);
+        }
+        let size = img.height.next_power_of_two();
+        return LoadedTexture { size, frames: vec![mip_chain(scale_nearest(&px, img.height, size), size)], glow: vec![None], anim: None };
+    }
     let size = img.width.next_power_of_two();
     let count = img.height / img.width;
     let (img_width, img_height) = (img.width, img.height);
@@ -395,9 +409,6 @@ pub fn load_texture(assets: &Assets, name: &str) -> LoadedTexture {
     let glow = (0..count)
         .map(|f| mask.as_ref().map(|m| mask_frame(m, f, size)))
         .collect();
-    let meta = assets
-        .read(name, "textures", "anim")
-        .map(|b| String::from_utf8_lossy(&b).into_owned());
     let anim = (count > 1 || meta.is_some()).then(|| {
         let a = parse_anim(meta.as_deref().unwrap_or(""), [img_width, img_height], 0);
         if a.frame_height == img_width {

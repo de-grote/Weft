@@ -70,8 +70,7 @@ impl Dim {
     }
 
     fn solid(&self, c: &Content, p: IVec3) -> bool {
-        let solid = |s: u32| c.states[s as usize].flags & bf::SOLID != 0;
-        self.get(p).is_none_or(solid) || self.space.extras(p).iter().any(|&s| solid(s))
+        self.get(p).is_none_or(|s| c.solid(s)) || self.space.extras(p).iter().any(|&s| c.solid(s))
     }
 
     /// What liquid `l` would make of `p` from its neighbors: a state, or `None` for nothing.
@@ -108,32 +107,14 @@ impl Dim {
         !self.fluid(c, p).is_some_and(|f| f.id == l && f.source) && self.has_room(c, p)
     }
 
-    /// Whether `l` may flow into `p` from direction `dir`: into empty room, or down into another
-    /// liquid it reacts with.
-    fn can_spread_to(&self, c: &Content, p: IVec3, l: u16, falling_in: bool) -> bool {
-        match self.fluid(c, p) {
-            Some(f) if f.id == l => false,
-            Some(_) => falling_in && self.falls_into(c, l, p).is_some(),
-            None => self.has_room(c, p),
-        }
+    /// Whether a liquid may flow into `p`: into empty room (what it meets there reacts by its
+    /// rules).
+    fn can_spread_to(&self, c: &Content, p: IVec3) -> bool {
+        self.fluid(c, p).is_none() && self.has_room(c, p)
     }
 
-    fn falls_into(&self, c: &Content, l: u16, p: IVec3) -> Option<u32> {
-        let state = self.space.liquid(c, p)?;
-        let mine = c.liquids[l as usize].first_state;
-        c.reactions
-            .iter()
-            .find(|r| r.falls_into.is_some() && c.matchers.has(r.liquid, mine) && c.matchers.has(r.touching, state))
-            .and_then(|r| r.falls_into)
-    }
-
-    fn spread_to(&mut self, c: &'static Content, p: IVec3, state: u32, falling_in: bool, l: u16) {
+    fn spread_to(&mut self, c: &'static Content, p: IVec3, state: u32) {
         if self.fluid(c, p).is_some() {
-            if falling_in && self.space.extras(p).is_empty() {
-                if let Some(b) = self.falls_into(c, l, p) {
-                    self.set(c, p, b);
-                }
-            }
             return;
         }
         let was = self.parts(p);
@@ -192,8 +173,8 @@ impl Dim {
             return;
         }
         for (d, state) in self.spread_dirs(c, p, f.id, down) {
-            if !self.sealed(c, p, d) && self.can_spread_to(c, p + d, f.id, false) {
-                self.spread_to(c, p + d, state, false, f.id);
+            if !self.sealed(c, p, d) && self.can_spread_to(c, p + d) {
+                self.spread_to(c, p + d, state);
             }
         }
     }
@@ -217,11 +198,11 @@ impl Dim {
             }
         }
         let below = p + down;
-        if !self.sealed(c, p, down) && self.can_spread_to(c, below, f.id, true) {
+        if !self.sealed(c, p, down) && self.can_spread_to(c, below) {
             let state = self
                 .new_liquid(c, below, f.id, down)
                 .unwrap_or(encode(def, 8, true));
-            self.spread_to(c, below, state, true, f.id);
+            self.spread_to(c, below, state);
             let sources = HORIZONTAL
                 .iter()
                 .filter(|&&d| {
@@ -241,27 +222,6 @@ impl Dim {
     pub(super) fn liquid_neighbor(&mut self, c: &'static Content, p: IVec3, state: u32) {
         let Some(f) = decode(c, state) else { return };
         let def = &c.liquids[f.id as usize];
-        let down = if def.rises { IVec3::Y } else { IVec3::NEG_Y };
-        for d in DIRS {
-            // What lies in the direction it flows does not react with it (lava over water).
-            if d == down {
-                continue;
-            }
-            let Some(n) = self.get(p + d) else { continue };
-            let hit = c
-                .reactions
-                .iter()
-                .find(|r| c.matchers.has(r.liquid, state) && c.matchers.has(r.touching, n));
-            if let Some(b) = hit.and_then(|r| if f.source { r.source } else { r.flowing }) {
-                // In with a block it just goes: what it would turn into has no room.
-                if self.space.extras(p).is_empty() && self.get(p) == Some(state) {
-                    self.set(c, p, b);
-                } else {
-                    self.replace_part(c, p, state, AIR);
-                }
-                return;
-            }
-        }
         self.schedule(p, def.delay);
     }
 
@@ -317,7 +277,7 @@ impl Dim {
             if c.states[old as usize].liquid.is_some() {
                 self.set(c, target, source);
             } else {
-                self.spread_to(c, target, source, false, l);
+                self.spread_to(c, target, source);
             }
             return Some(if creative || empty == 0 { held } else { ItemStack::new(empty, 1) });
         }

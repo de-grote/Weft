@@ -156,15 +156,8 @@ fn band_of(def: &crate::content::DimensionDef, seed: u64, col: IVec2) -> Option<
 /// meshing while loading, and the terrain thread waits for this. Below normal priority like the
 /// other bulk work: the frame's culling comes first.
 pub fn pool() -> &'static rayon::ThreadPool {
-    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
-    POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(crate::workers())
-            .thread_name(|i| format!("terrain light {i}"))
-            .start_handler(|_| crate::lower_priority())
-            .build()
-            .expect("terrain light pool")
-    })
+    static POOL: crate::Pool = crate::Pool::new();
+    crate::pool(&POOL, "terrain light", crate::workers(), true)
 }
 
 /// The terrain as the visibility fill sees it.
@@ -784,17 +777,12 @@ impl Terrain {
         while self.generating.len() + self.waiting.len() < budget {
             let Some(pos) = self.wanted.pop() else { break };
             if self.missing(pos) {
-                self.ask(pos);
+                self.ask_column(vec![pos]);
             }
         }
     }
 
-    /// Has cube `pos` made: on the GPU when it can, else on a worker.
-    fn ask(&mut self, pos: IVec3) {
-        self.ask_column(vec![pos]);
-    }
-
-    /// Has the cubes `list` of one cube column made.
+    /// Has the cubes `list` of one cube column made: on the GPU when it can, else on a worker.
     fn ask_column(&mut self, list: Vec<IVec3>) {
         let c = content();
         let (tx, epoch, dim, seed, edits) = (self.gen_tx.clone(), self.epoch, self.dim, self.seed, self.edits.clone());

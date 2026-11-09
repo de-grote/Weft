@@ -255,8 +255,12 @@ impl BlockBuilder<'_> {
                 .map(|o| format!("{}=false", o.name()))
                 .collect();
             let left = format!("{}=false", d.name());
+            // With nothing solid behind it, it comes off.
+            let off = crate::Rule::neighbor()
+                .when(crate::Cond::new(&format!("!side({})", d.name())))
+                .sheds(&left);
             b = b.state_where(&format!("{}=true", d.name()), move |s| {
-                let s = s.piece(min, max, &left, &alone.join(","));
+                let s = s.piece(min, max, &left, &alone.join(",")).rule(off.clone());
                 if plates { s.model_box(min, max) } else { s.hitbox(min, max) }
             });
         }

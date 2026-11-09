@@ -114,7 +114,7 @@ impl Dim {
             self.entities.unanchor((self.frame, p), id);
         }
         let signal = self.space.signals.carry_out(p);
-        self.write_block(c, p, AIR, true);
+        self.carry_block(c, p, AIR);
         Some((state, entity, signal))
     }
 
@@ -123,7 +123,7 @@ impl Dim {
         if !signal.is_empty() {
             self.space.signals.arriving.insert(p, signal);
         }
-        self.write_block(c, p, state, true);
+        self.carry_block(c, p, state);
         if let Some(id) = entity {
             self.entities
                 .attach(id, self.frame, p, self.place.to_world(p.as_dvec3() + DVec3::splat(0.5)));
@@ -144,8 +144,16 @@ impl Dim {
         let mut blocks: Vec<(IVec3, u32)> = also.to_vec();
         let mut arriving = FxHashMap::default();
         let mut extras: Vec<(IVec3, Vec<u32>)> = Vec::new();
-        for l in cells {
-            let whole = self.get(l.from);
+        // Read first: taking a big block's own cell takes its other cells along.
+        let cells: Vec<Lifted> = cells.into_iter().collect();
+        let wholes: Vec<Option<u32>> = cells.iter().map(|l| self.get(l.from)).collect();
+        for (l, whole) in cells.into_iter().zip(wholes) {
+            // A big block's other cells come as they were read.
+            if let Some(s) = whole.filter(|&s| c.covered_step(s).is_some()) {
+                blocks.push((l.local, s));
+                carried.push(Carried { local: l.local, to: l.to, state: s, entity: None });
+                continue;
+            }
             if !self.space.extras(l.from).is_empty() {
                 extras.push((l.local, self.space.extras(l.from).to_vec()));
             }
@@ -155,7 +163,7 @@ impl Dim {
             if let (Some(part), Some(whole)) = (l.part, whole) {
                 if part != whole {
                     let first = c.block_of(whole).first_state;
-                    self.write_block(c, l.from, first + ((whole - first) & !(part - first)), true);
+                    self.carry_block(c, l.from, first + ((whole - first) & !(part - first)));
                 }
             }
             blocks.push((l.local, state));
@@ -338,7 +346,7 @@ impl Dim {
             if s == AIR || info.liquid.is_some() {
                 continue;
             }
-            if info.flags & abi::block_flags::SOLID != 0 && (!breaks || info.hardness < 0.0) {
+            if info.solid() && (!breaks || info.hardness < 0.0) {
                 return None;
             }
             out.push(n);
@@ -415,10 +423,7 @@ impl Dim {
         let sign = IVec3::from_array([0, 1, 2].map(|a| if v[a].abs() > 1e-9 { v[a].signum() as i32 } else { 0 }));
         // What it has that can't be moved now, with more of it pushing that along: it stops as it
         // would have stayed. What nothing pushes rides on, a body doesn't come apart on its way.
-        let solid = |p: IVec3| {
-            b.get(p)
-                .is_some_and(|s| c.states[s as usize].flags & abi::block_flags::SOLID != 0)
-        };
+        let solid = |p: IVec3| b.get(p).is_some_and(|s| c.solid(s));
         if b.signals
             .fixed(c)
             .any(|p| ways(sign).any(|step| solid(p - step)))
@@ -430,10 +435,9 @@ impl Dim {
         if b.looked_from != Some((cell, sign)) {
             let all = b.all_blocks();
             let own: FxHashSet<IVec3> = all.iter().map(|(p, _)| *p + cell).collect();
-            let solid = |s: u32| c.states[s as usize].flags & abi::block_flags::SOLID != 0;
             let at: Vec<IVec3> = all
                 .iter()
-                .filter(|(_, s)| solid(*s))
+                .filter(|(_, s)| c.solid(*s))
                 .map(|(p, _)| *p + cell)
                 .collect();
             let Some(mut broken) = self.ahead_every_way(c, at.iter().copied(), &own, sign, breaks) else {
@@ -443,7 +447,7 @@ impl Dim {
             };
             // What it carries that isn't solid doesn't hold it up.
             let mut off = Vec::new();
-            for (p, _) in all.iter().filter(|(_, s)| !solid(*s)) {
+            for (p, _) in all.iter().filter(|(_, s)| !c.solid(*s)) {
                 for to in ways(sign)
                     .map(|step| *p + cell + step)
                     .filter(|to| !own.contains(to))
@@ -614,7 +618,7 @@ impl Dim {
             // Sides join the sides there, each holding on by itself.
             Some(there) if c.states[there as usize].block == c.states[state as usize].block && c.states[state as usize].sides != 0 => {
                 let sides = c.states[there as usize].sides | c.states[state as usize].sides;
-                self.write_block(c, at, c.block_of(state).with_sides(state, sides), true);
+                self.carry_block(c, at, c.block_of(state).with_sides(state, sides));
             }
             Some(there) if there == AIR || c.states[there as usize].flags & abi::block_flags::REPLACEABLE != 0 => {
                 if c.states[state as usize].signal.kind == abi::signal_kind::OBSERVER {
@@ -927,7 +931,7 @@ impl Dim {
 
     pub(super) fn set_in_body(&mut self, c: &'static Content, body: u64, at: IVec3, state: u32) {
         self.in_frame(body, |d| {
-            d.write_block(c, at, state, true);
+            d.carry_block(c, at, state);
             d.space.relight();
         });
     }
@@ -949,7 +953,7 @@ impl Dim {
         if !gone.is_empty() {
             self.in_frame(s.body, |d| {
                 for at in gone {
-                    d.write_block(c, at, AIR, true);
+                    d.carry_block(c, at, AIR);
                 }
                 d.space.relight();
             });

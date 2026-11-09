@@ -4,14 +4,12 @@
 
 use std::rc::Rc;
 
-use crate::app::Running;
 use crate::app::{Ctx, Request};
 use crate::input::{Binding, Input, Key, Trigger};
 use crate::settings::Settings;
 use crate::ui::lang::Lang;
 use crate::ui::text::{self, Arg, Span};
-use crate::ui::{Justify, Kind, NodeId, Style, Ui, desc};
-use weft_abi as abi;
+use crate::ui::{Justify, Kind, NodeId, Style, Ui};
 
 pub struct BuildCx<'a> {
     pub lang: &'a Lang,
@@ -105,7 +103,7 @@ pub fn named(name: &str) -> Option<Box<dyn Screen>> {
     Some(match name.as_str() {
         "core:title" => Box::new(Title),
         "core:pause" => Box::new(Pause),
-        "core:settings" => Box::new(SettingsScreen),
+        "core:settings" | "core:chat_settings" | "core:sound" => Box::new(ConfigScreen { shown: Shown::Page(name) }),
         "core:language" => Box::new(LanguageScreen),
         "core:controls" => Box::new(Controls::default()),
         "core:mod_settings" => Box::new(ModSettings),
@@ -116,9 +114,7 @@ pub fn named(name: &str) -> Option<Box<dyn Screen>> {
         "core:multiplayer" => Box::new(crate::net::screens::Multiplayer::default()),
         "core:resource_packs" => Box::new(crate::packs::ResourcePacks::default()),
         "core:shader_packs" => Box::new(crate::packs::ShaderPacks),
-        "core:sound" => Box::new(ConfigScreen { shown: Shown::Sound }),
         "core:world_rules" => Box::new(ConfigScreen { shown: Shown::World }),
-        "core:chat_settings" => Box::new(ChatSettings),
         "core:hud_editor" => Box::new(crate::hud_editor::HudEditor::default()),
         "core:debug_options" => Box::new(crate::hud_editor::DebugOptions),
         "core:tags" => Box::new(crate::game_screens::TagList::default()),
@@ -328,10 +324,10 @@ impl Screen for Profile {
                 label(ui, cx, "profile.name", &[], "default");
                 let input = ui.add(
                     Kind::Input {
-                        value: cx.settings.name().clone(),
-                        caret: cx.settings.name().chars().count(),
+                        value: crate::settings::name(),
+                        caret: crate::settings::name().chars().count(),
                         max: 16,
-                        on_change: Some(Rc::new(|c: &mut Ctx, v: &str| c.settings.set_text("name", v))),
+                        on_change: Some(Rc::new(|_: &mut Ctx, v: &str| crate::settings::set_text("name", v))),
                     },
                     Style::default().h(16.0).w(300.0),
                 );
@@ -470,16 +466,21 @@ pub fn face_texture(cx: &BuildCx) -> String {
     format!("{}{}", crate::ui::render::FACE, cx.settings.run_dir.join("skins").join("skin.png").display())
 }
 
+/// A screen's title: large, on one line.
+pub fn title(ui: &mut Ui, cx: &BuildCx, key: &str) {
+    let t = label(ui, cx, key, &[], "title");
+    if let Some(t) = ui.text_mut(t) {
+        t.scale = 2.0;
+        t.wrap = false;
+    }
+}
+
 /// Full-screen dimmed column with a title, used by most menus.
-pub fn frame(ui: &mut Ui, cx: &BuildCx, title: &str, f: impl FnOnce(&mut Ui)) {
+pub fn frame(ui: &mut Ui, cx: &BuildCx, key: &str, f: impl FnOnce(&mut Ui)) {
     let bg = if cx.in_game { "overlay" } else { "background" };
     ui.root_style(Style::default().stretch());
     ui.panel(bg, Style::default().grow().center().pad(12.0).gap(10.0), |ui| {
-        let t = label(ui, cx, title, &[], "title");
-        if let Some(t) = ui.text_mut(t) {
-            t.scale = 2.0;
-            t.wrap = false;
-        }
+        title(ui, cx, key);
         f(ui);
     });
 }
@@ -567,181 +568,21 @@ impl Screen for Pause {
         true
     }
 
-    /// Built from node descriptors like a mod's screen, so a replacement can match it.
     fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
-        desc::build(ui, cx, |d| {
-            desc::frame(d, cx.in_game, "menu.paused", |d| {
-                d.button("menu.resume", &[], 200.0, false, |r| r.handle(vec![Request::Close]));
-                d.button("menu.multiplayer", &[], 200.0, false, |r| r.handle(vec![Request::Screen("core:multiplayer".into())]));
-                d.button("menu.settings", &[], 200.0, false, |r| r.handle(vec![Request::Screen("core:settings".into())]));
-                d.parts("core:pause", "buttons");
-                d.button("menu.save_quit", &[], 200.0, false, |r| r.handle(vec![Request::LeaveWorld]));
-            });
+        frame(ui, cx, "menu.paused", |ui| {
+            button(ui, cx, "menu.resume", &[], 200.0, |c| c.requests.push(Request::Close));
+            button(ui, cx, "menu.multiplayer", &[], 200.0, |c| open(c, "core:multiplayer"));
+            button(ui, cx, "menu.settings", &[], 200.0, |c| open(c, "core:settings"));
+            parts(ui, cx, "core:pause", "buttons");
+            button(ui, cx, "menu.save_quit", &[], 200.0, |c| c.requests.push(Request::LeaveWorld));
         });
     }
 }
 
 // ---------------------------------------------------------------- settings
 
-pub struct SettingsScreen;
-
 pub fn on_off(v: bool) -> Arg {
     Arg::Key(if v { "settings.on".into() } else { "settings.off".into() })
-}
-
-impl Screen for SettingsScreen {
-    fn name(&self) -> &str {
-        "core:settings"
-    }
-
-    fn pauses(&self) -> bool {
-        true
-    }
-
-    /// Built from node descriptors like a mod's screen, so a replacement can match it.
-    fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
-        let s = cx.settings;
-        let screen = |name: &'static str| move |r: &mut Running| r.handle(vec![Request::Screen(name.into())]);
-        desc::build(ui, cx, |d| {
-            desc::frame(d, cx.in_game, "settings.title", |d| {
-                // Fills the space between the title and Done, so a short window scrolls the options
-                // instead of cutting off everything below the fold.
-                let panel = abi::UiNode {
-                    class: abi::Str::new("panel"),
-                    pad: [8.0; 4],
-                    gap: 6.0,
-                    align: abi::ui_align::STRETCH,
-                    width: 320.0,
-                    height: 0.0,
-                    grow: 1.0,
-                    min: [0.0, 40.0],
-                    flags: abi::ui_flags::SCROLL,
-                    ..desc::node(abi::ui_kind::PANEL)
-                };
-                d.open(&panel, |d| {
-                    d.slider("settings.view_distance", "core:view_distance", 1.0);
-                    d.slider("settings.lod_distance", "core:lod_distance", 1.0);
-                    d.slider("settings.cloud_height", "core:cloud_height", 1.0);
-                    d.slider("settings.fov", "core:fov", 1.0);
-                    d.slider("settings.sensitivity", "core:sensitivity", 100.0);
-                    d.slider("settings.brightness", "core:brightness", 100.0);
-                    let scale =
-                        if s.gui_scale() == 0 { Arg::Key("settings.gui_scale.auto".into()) } else { Arg::Int(s.gui_scale() as i64) };
-                    d.button("settings.gui_scale", &[scale], 300.0, false, |r| {
-                        // Auto, then every scale the window can actually show.
-                        let max = crate::settings::max_gui_scale(r.stats.window);
-                        let next = if r.settings.gui_scale() >= max { 0 } else { r.settings.gui_scale() + 1 };
-                        r.settings.set("gui_scale", next as f64);
-                    });
-                    d.button("settings.vsync", &[on_off(s.vsync())], 300.0, false, |r| {
-                        r.settings.set("vsync", !r.settings.vsync() as u8 as f64);
-                        r.handle(vec![Request::Rebuild]);
-                    });
-                    let chosen = s.renderer();
-                    let key = if chosen == cx.renderer { "settings.renderer" } else { "settings.renderer.restart" };
-                    d.button(key, &[Arg::Key(format!("settings.renderer.{chosen}"))], 300.0, false, |r| {
-                        let id = crate::config::by_name("core:renderer").unwrap_or(0);
-                        let count = crate::content::content().game.configs[id as usize]
-                            .choices
-                            .len()
-                            .max(1);
-                        crate::config::set(id, (crate::config::get(id) + 1.0) % count as f64);
-                        r.handle(vec![Request::Rebuild]);
-                    });
-
-                    let row = abi::UiNode {
-                        row: 1,
-                        gap: 6.0,
-                        justify: abi::ui_justify::CENTER,
-                        align: abi::ui_align::CENTER,
-                        self_align: abi::ui_align::STRETCH,
-                        ..desc::node(abi::ui_kind::CONTAINER)
-                    };
-                    for [(a, sa), (b, sb)] in [
-                        [("settings.language", "core:language"), ("settings.controls", "core:controls")],
-                        [("settings.sound", "core:sound"), ("settings.mods", "core:mod_settings")],
-                        [("settings.resource_packs", "core:resource_packs"), ("settings.shader_packs", "core:shader_packs")],
-                    ] {
-                        d.open(&row, |d| {
-                            d.button(a, &[], 147.0, true, screen(sa));
-                            d.button(b, &[], 147.0, true, screen(sb));
-                        });
-                    }
-                    if cx.in_game {
-                        d.open(&row, |d| {
-                            d.button("settings.chat", &[], 147.0, true, screen("core:chat_settings"));
-                            d.button("settings.hud", &[], 147.0, true, screen("core:hud_editor"));
-                        });
-                        // Who may change them with `/rule` may here.
-                        if cx
-                            .client
-                            .is_some_and(|cl| cl.permission >= weft_abi::permission::ADMIN)
-                        {
-                            d.button("world.rules", &[], 300.0, false, screen("core:world_rules"));
-                        }
-                    } else {
-                        d.button("settings.chat", &[], 300.0, false, screen("core:chat_settings"));
-                    }
-                    // Below the screens a short window must show without scrolling.
-                    d.slider("settings.fov_effects", "core:fov_effects", 100.0);
-                    d.button("settings.first_person_model", &[on_off(s.first_person_model())], 300.0, false, |r| {
-                        r.settings
-                            .set("first_person_model", !r.settings.first_person_model() as u8 as f64);
-                        r.handle(vec![Request::Rebuild]);
-                    });
-                    d.button("settings.show_avatars", &[on_off(s.show_avatars())], 300.0, false, |r| {
-                        r.settings
-                            .set("show_avatars", !r.settings.show_avatars() as u8 as f64);
-                        r.handle(vec![Request::Rebuild]);
-                    });
-                    d.parts("core:settings", "buttons");
-                });
-                d.button("menu.done", &[], 200.0, false, |r| r.handle(vec![Request::Close]));
-            });
-        });
-    }
-}
-
-/// How big the chat is and how dark behind it.
-pub struct ChatSettings;
-
-impl Screen for ChatSettings {
-    fn name(&self) -> &str {
-        "core:chat_settings"
-    }
-
-    fn pauses(&self) -> bool {
-        true
-    }
-
-    fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
-        desc::build(ui, cx, |d| {
-            desc::frame(d, cx.in_game, "settings.chat", |d| {
-                let panel = abi::UiNode {
-                    class: abi::Str::new("panel"),
-                    pad: [8.0; 4],
-                    gap: 6.0,
-                    align: abi::ui_align::STRETCH,
-                    width: 320.0,
-                    ..desc::node(abi::ui_kind::PANEL)
-                };
-                d.open(&panel, |d| {
-                    d.slider("settings.chat_width", "core:chat_width", 1.0);
-                    d.slider("settings.chat_height", "core:chat_height", 1.0);
-                    d.slider("settings.chat_height_closed", "core:chat_height_closed", 1.0);
-                    d.slider("settings.chat_opacity", "core:chat_opacity", 1.0);
-                    let id = crate::config::by_name("core:chat_visibility").unwrap_or(0);
-                    let now = ["all", "system", "hidden"][crate::config::get(id) as usize % 3];
-                    let shown = [Arg::Key(format!("settings.chat_visibility.{now}"))];
-                    d.button("settings.chat_visibility", &shown, 304.0, false, move |r| {
-                        crate::config::set(id, (crate::config::get(id) + 1.0) % 3.0);
-                        r.handle(vec![Request::Rebuild]);
-                    });
-                });
-                d.button("menu.done", &[], 200.0, false, |r| r.handle(vec![Request::Close]));
-            });
-        });
-    }
 }
 
 // ---------------------------------------------------------------- settings mods declare
@@ -790,9 +631,10 @@ impl Screen for ModSettings {
     }
 }
 
-/// Which settings a `ConfigScreen` shows: every mod's volumes, a mod's own, the world's rules.
+/// Which settings a `ConfigScreen` shows: a page's (`core:settings`, the volumes), a mod's own
+/// that are on no page, the world's rules.
 pub enum Shown {
-    Sound,
+    Page(String),
     Mod(String),
     World,
 }
@@ -801,13 +643,39 @@ pub enum Shown {
 /// profile), and a mod's rules are with the world's.
 fn on_config_screen(d: &crate::config::ConfigDef, shown: &Shown) -> bool {
     use weft_abi::{config_kind as ck, config_scope as scope};
-    let Some((owner, short)) = d.name.split_once(':') else { return false };
-    let volume = short.starts_with("volume_");
+    let Some((owner, _)) = d.name.split_once(':') else { return false };
     match shown {
-        Shown::Sound => volume,
-        Shown::Mod(ns) => owner == ns && !volume && d.kind != ck::TEXT && d.scope != scope::WORLD,
+        Shown::Page(p) => d.page == *p,
+        Shown::Mod(ns) => owner == ns && d.page.is_empty() && d.kind != ck::TEXT && d.scope != scope::WORLD,
         Shown::World => d.scope == scope::WORLD && d.kind != ck::TEXT,
     }
+}
+
+/// Where in the settings page's order its links to other screens come (`config.order`).
+const LINKS_AT: i32 = 9;
+
+/// Other screens the settings page leads to, two to a row, after its own settings: (label,
+/// screen); some only in a world, the rules only for who may change them.
+fn settings_links(cx: &BuildCx) -> Vec<(&'static str, &'static str)> {
+    let mut v = vec![
+        ("settings.language", "core:language"),
+        ("settings.controls", "core:controls"),
+        ("settings.sound", "core:sound"),
+        ("settings.mods", "core:mod_settings"),
+        ("settings.resource_packs", "core:resource_packs"),
+        ("settings.shader_packs", "core:shader_packs"),
+        ("settings.chat", "core:chat_settings"),
+    ];
+    if cx.in_game {
+        v.push(("settings.hud", "core:hud_editor"));
+        if cx
+            .client
+            .is_some_and(|cl| cl.permission >= weft_abi::permission::ADMIN)
+        {
+            v.push(("world.rules", "core:world_rules"));
+        }
+    }
+    v
 }
 
 /// Settings built from their declarations: toggles, sliders, choices.
@@ -817,8 +685,8 @@ pub struct ConfigScreen {
 
 impl Screen for ConfigScreen {
     fn name(&self) -> &str {
-        match self.shown {
-            Shown::Sound => "core:sound",
+        match &self.shown {
+            Shown::Page(p) => p,
             Shown::Mod(_) => "core:config",
             Shown::World => "core:world_rules",
         }
@@ -832,8 +700,9 @@ impl Screen for ConfigScreen {
         use weft_abi::config_kind as ck;
         let c = crate::content::content();
         let shown = &self.shown;
+        let page = text::lang_key("page", self.name());
         let title = match shown {
-            Shown::Sound => "settings.sound",
+            Shown::Page(_) => page.as_str(),
             Shown::Mod(_) => "settings.mods.title",
             Shown::World => "world.rules",
         };
@@ -862,25 +731,66 @@ impl Screen for ConfigScreen {
                         .enumerate()
                         .filter(|(_, d)| on_config_screen(d, shown))
                         .collect();
-                    // The master volume first, the damage rules together at the end.
-                    listed.sort_by_key(|(_, d)| (d.name != "core:volume_master", d.name.starts_with("core:damage.")));
+                    listed.sort_by(|a, b| (a.1.order, &a.1.name).cmp(&(b.1.order, &b.1.name)));
+                    // The settings page leads on to the other screens where its order is
+                    // `LINKS_AT`: before what a short window may have to scroll to.
+                    let mut linked = !matches!(shown, Shown::Page(p) if p == "core:settings");
+                    let links = |ui: &mut Ui, linked: &mut bool| {
+                        if std::mem::replace(linked, true) {
+                            return;
+                        }
+                        for pair in settings_links(cx).chunks(2) {
+                            ui.container(Style::row().gap(6.0).stretch(), |ui| {
+                                for &(key, screen) in pair {
+                                    let width = if pair.len() == 1 { 300.0 } else { 147.0 };
+                                    button(ui, cx, key, &[], width, move |c| open(c, screen));
+                                }
+                            });
+                        }
+                        parts(ui, cx, "core:settings", "buttons");
+                    };
                     for (id, d) in listed {
+                        if d.order >= LINKS_AT {
+                            links(ui, &mut linked);
+                        }
                         let id = id as u32;
                         let key = text::lang_key("config", &d.name);
                         let locked = (d.synced() && cx.remote) || rules_locked;
-                        let show = |d: &crate::config::ConfigDef, key: &str, v: f64| -> Arg {
-                            match d.kind {
-                                ck::BOOL => on_off(v != 0.0),
-                                ck::CHOICE => {
-                                    let choice = d.choices.get(v as usize).cloned().unwrap_or_default();
-                                    Arg::Key(format!("{key}.{choice}"))
-                                }
-                                _ => Arg::Text(d.show(v)),
+                        // A value's own name where it has one (a choice, gui scale 0), else the
+                        // number through `.value`; looked up now, the bindings run without the language.
+                        let small = d.kind != ck::FLOAT && d.max - d.min <= 64.0;
+                        let names: Rc<Vec<String>> = Rc::new(
+                            d.choices
+                                .iter()
+                                .cloned()
+                                .chain(
+                                    small
+                                        .then(|| (d.min as i64..=d.max as i64).map(|n| n.to_string()))
+                                        .into_iter()
+                                        .flatten(),
+                                )
+                                .filter(|n| cx.lang.has(&format!("{key}.{n}")))
+                                .collect(),
+                        );
+                        let template = cx.lang.has(&format!("{key}.value"));
+                        let show = move |d: &crate::config::ConfigDef, key: &str, v: f64| -> Arg {
+                            let percent = d.flags & crate::tag_bits::config::PERCENT != 0;
+                            let named = match d.kind {
+                                ck::BOOL => return on_off(v != 0.0),
+                                ck::CHOICE => d.choices.get(v as usize).cloned().unwrap_or_default(),
+                                _ => d.show(if percent { (v * 100.0).round() } else { v }),
+                            };
+                            if names.contains(&named) {
+                                Arg::Key(format!("{key}.{named}"))
+                            } else if template {
+                                Arg::Msg(text::Msg::new(&format!("{key}.value"), vec![Arg::Text(named)]))
+                            } else {
+                                Arg::Text(named)
                             }
                         };
                         let row = match d.kind {
                             ck::BOOL | ck::CHOICE => {
-                                let (key2, d2) = (key.clone(), d.clone());
+                                let (key2, d2, show) = (key.clone(), d.clone(), show.clone());
                                 let (kind, count) = (d.kind, d.choices.len().max(1) as f64);
                                 let b = ui.button(
                                     "button",
@@ -891,7 +801,7 @@ impl Screen for ConfigScreen {
                                         crate::config::set(id, next);
                                     }),
                                     |ui| {
-                                        let (k, d3) = (key2.clone(), d2.clone());
+                                        let (k, d3, show) = (key2.clone(), d2.clone(), show.clone());
                                         ui.text_bound(
                                             "button",
                                             Box::new(move |_: &Ctx| {
@@ -909,7 +819,7 @@ impl Screen for ConfigScreen {
                                 b
                             }
                             _ => ui.container(Style::default().gap(2.0).stretch(), |ui| {
-                                let (k, d2) = (key.clone(), d.clone());
+                                let (k, d2, show) = (key.clone(), d.clone(), show.clone());
                                 ui.text_bound(
                                     "default",
                                     Box::new(move |_: &Ctx| {
@@ -948,6 +858,7 @@ impl Screen for ConfigScreen {
                             ui.nodes[row].tooltip = Some(spans);
                         }
                     }
+                    links(ui, &mut linked);
                 },
             );
             ui.set_id(list, "config");
@@ -988,8 +899,8 @@ impl Screen for LanguageScreen {
                     let b = ui.button(
                         "button",
                         Style::default().min_h(20.0).pad_xy(6.0, 4.0).stretch(),
-                        Rc::new(move |c: &mut Ctx| {
-                            c.settings.set_text("language", &code);
+                        Rc::new(move |_: &mut Ctx| {
+                            crate::settings::set_text("language", &code);
                         }),
                         |ui| {
                             ui.text(text::plain(name), "button");
@@ -1145,14 +1056,13 @@ impl Screen for Controls {
                     .min_h(60.0)
                     .scroll(),
                 |ui| {
-                    let s = cx.settings;
-                    let on = s.invert_y();
+                    let on = crate::settings::invert_y();
                     let spans = cx.t("settings.invert_y", &[on_off(on)]);
                     ui.button(
                         "button",
                         Style::default().min_h(20.0).pad_xy(6.0, 4.0).stretch(),
                         Rc::new(move |c: &mut Ctx| {
-                            c.settings.set("invert_y", !on as u8 as f64);
+                            crate::settings::set("invert_y", !on as u8 as f64);
                             c.requests.push(Request::Rebuild);
                         }),
                         |ui| {

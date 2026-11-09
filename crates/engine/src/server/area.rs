@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::dim::Dim;
-use crate::content::Content;
+use crate::content::{AIR, Content};
 use crate::shape::Shape;
 use crate::world::cube::{Cube, VOLUME};
 use crate::world::light::Lighter;
@@ -28,6 +28,8 @@ pub struct AreaFill {
     pub only: String,
     /// A bit per state that stays, from the two.
     kept: std::sync::Arc<[u64]>,
+    /// `Content::covered`: a big block's other cells stay, the block goes whole after.
+    covered: u32,
 }
 
 /// Light work for one cube of an area edit.
@@ -105,7 +107,7 @@ impl AreaFill {
         let kept = c
             .matchers
             .kept(keep, only, &c.block_names, &c.blocks, &c.components)?;
-        Ok(AreaFill { id: 0, shape, state, keep: keep.into(), only: only.into(), kept })
+        Ok(AreaFill { id: 0, shape, state, keep: keep.into(), only: only.into(), kept, covered: c.covered })
     }
 
     /// As saved in `world.txt`: `id block <shape>|<keep>|<only>`.
@@ -164,7 +166,7 @@ impl AreaFill {
     /// The cube with the fill applied, if that changes it, and the blocks outside next to a
     /// changed one (they get a neighbor update: sand on the rim falls).
     pub fn apply(&self, cp: IVec3, cube: &Cube) -> Option<(Cube, Vec<IVec3>)> {
-        let keep = |s: u32| self.keeps(s);
+        let keep = |s: u32| self.keeps(s) || s.wrapping_sub(self.covered) < 6;
         let mut out = if self.covers(cp) && !cube.palette().iter().any(|&s| keep(s)) {
             if cube.palette() == [self.state] {
                 return None;
@@ -272,6 +274,7 @@ impl Dim {
             self.space.light_dirty.insert(cp);
             relight.push(cp);
         }
+        self.fill_big_blocks(c, fill, &targets);
         for &cp in fresh {
             let mut cube = Cube::uniform(fill.state, 0);
             cube.edits = fill.id;
@@ -293,6 +296,44 @@ impl Dim {
             self.settle_down(cp);
         }
         stats
+    }
+}
+
+impl Dim {
+    /// Big blocks go whole: one the fill reached another cell of goes, and so do the other cells
+    /// of one it took. `before`: the cubes as they were.
+    fn fill_big_blocks(&mut self, c: &'static Content, fill: &AreaFill, before: &[(IVec3, Arc<Cube>)]) {
+        let big = |s: u32| !c.states[s as usize].cells.is_empty() || c.covered_step(s).is_some();
+        let (mut reached, mut left) = (Vec::new(), Vec::new());
+        for (cp, cube) in before
+            .iter()
+            .filter(|(_, cube)| cube.palette().iter().any(|&s| big(s)))
+        {
+            for i in 0..VOLUME {
+                let (s, p) = (cube.get(i), cp * 16 + crate::world::cube::offset(i));
+                if !fill.inside(p) {
+                    continue;
+                }
+                if c.covered_step(s).is_some() {
+                    reached.push(p);
+                } else if self.get(p) != Some(s) {
+                    left.extend(c.states[s as usize].cells.iter().map(|(o, _)| p + *o));
+                }
+            }
+        }
+        for p in reached {
+            if let Some((at, _)) = self
+                .block_at(c, p)
+                .filter(|(at, s)| *at != p && *s != AIR && !fill.keeps(*s))
+            {
+                self.set(c, at, if fill.inside(at) { fill.state } else { AIR });
+            }
+        }
+        for p in left {
+            if self.get(p).is_some_and(|s| c.covered_step(s).is_some()) && self.block_at(c, p).is_some_and(|b| b.0 == p) {
+                self.set(c, p, if fill.inside(p) { fill.state } else { AIR });
+            }
+        }
     }
 }
 

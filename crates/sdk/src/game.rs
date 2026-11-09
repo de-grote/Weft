@@ -168,6 +168,11 @@ impl World {
         let target = target.into();
         unsafe { (host().navigate)(self.raw(), id, &target, speed) != 0 }
     }
+    /// A number of its own for each time a world is opened. Entity ids and time start over in
+    /// another world: state a mod keeps by them in its own memory goes by this too.
+    pub fn session(&self) -> u64 {
+        unsafe { (host().world_session)(self.raw()) }
+    }
     /// The world's seed, the one its terrain comes from. The same in every dimension.
     pub fn seed(&self) -> u64 {
         unsafe { (host().world_seed)(self.raw()) }
@@ -202,8 +207,9 @@ impl World {
     pub fn navigating(&self, id: u64) -> bool {
         unsafe { (host().navigating)(self.raw(), id) != 0 }
     }
-    pub fn walk(&self, id: u64, dir: [f32; 2], speed: f32, jump: bool) {
-        unsafe { (host().entity_walk)(self.raw(), id, &dir, speed, jump as u32) }
+    /// Moves `id` this tick as a player's keys would (`Walk`): the same physics and poses.
+    pub fn walk(&self, id: u64, w: Walk) {
+        unsafe { (host().entity_walk)(self.raw(), id, &w.dir, w.speed, w.keys) }
     }
     /// The first block a ray from `from` along `dir` hits within `max` blocks (liquids count if
     /// `liquids`): position, face hit (-X, +X, -Y, +Y, -Z, +Z) and state. A turret's line, a
@@ -231,9 +237,10 @@ impl World {
     pub fn damage(&self, id: u64, amount: f32, source: u64, cause: impl Into<Id<crate::DamageCause>>) -> bool {
         unsafe { (host().entity_damage)(self.raw(), id, amount, source, cause.into().raw()) != 0 }
     }
-    /// `id` hits `target` the way players do: other mods can forbid it (`question::ATTACK`) or
-    /// change it (`chain::ATTACK_DAMAGE`). A player hits with what it holds, which wears; a mob
-    /// with its kind's `.attack_damage(..)`, at its `.attack_speed(..)`. True if it landed.
+    /// `id` hits `target` with what it holds, which wears, or bare handed with its kind's
+    /// `.attack_damage(..)`, as strong as its swing is charged (`swing_strength`, by its
+    /// `.attack_speed(..)` when bare handed). Other mods can forbid it (`question::ATTACK`) or
+    /// change it (`chain::ATTACK_DAMAGE`). True if it landed.
     pub fn attack(&self, id: u64, target: u64) -> bool {
         unsafe { (host().entity_attack)(self.raw(), id, target) != 0 }
     }
@@ -249,9 +256,31 @@ impl World {
         let pos = pos.into();
         unsafe { (host().in_liquid)(self.raw(), &pos) != 0 }
     }
-    /// How charged a player's next swing is, 0..1, with what it holds now.
-    pub fn swing_strength(&self, player: u64) -> f32 {
-        unsafe { (host().entity_swing_strength)(self.raw(), player) }
+    /// `id` uses what is in its main hand (or the other one, `off_hand`), on nothing, as a
+    /// player's right click in the air does: a witch drinking, a skeleton drawing its bow. True if
+    /// it did something or started to; what takes time goes on while it holds the item.
+    pub fn use_item(&self, id: u64, off_hand: bool) -> bool {
+        unsafe { (host().entity_use_item)(self.raw(), id, off_hand as u32, std::ptr::null(), 0) != 0 }
+    }
+    /// `use_item` on the block at `pos`, from `face` (-X, +X, -Y, +Y, -Z, +Z): a bucket filled.
+    pub fn use_item_on(&self, id: u64, off_hand: bool, pos: impl Into<BlockPos>, face: u32) -> bool {
+        let pos = pos.into();
+        unsafe { (host().entity_use_item)(self.raw(), id, off_hand as u32, &pos, face) != 0 }
+    }
+    /// `id` starts breaking the block at `pos` as a player holding the button does: as fast as
+    /// what it holds mines it (`attribute::MINING_SPEED`), cracks showing, broken when done if
+    /// still within its reach, the tool wearing. False when it may not (`actions::BREAK_BLOCK`).
+    pub fn start_mining(&self, id: u64, pos: impl Into<BlockPos>) -> bool {
+        let pos = pos.into();
+        unsafe { (host().entity_mine)(self.raw(), id, &pos) != 0 }
+    }
+    /// `id` stops breaking what it was.
+    pub fn stop_mining(&self, id: u64) {
+        unsafe { (host().entity_mine)(self.raw(), id, std::ptr::null()) };
+    }
+    /// How charged `id`'s next swing is, 0..1, with what it holds now.
+    pub fn swing_strength(&self, id: u64) -> f32 {
+        unsafe { (host().entity_swing_strength)(self.raw(), id) }
     }
     /// The value of `c` on any holder: an entity, a block's entity, a stack in a slot.
     pub fn component<T: Value>(&self, h: impl Into<Holder>, c: &Component<T>) -> Option<T> {
@@ -281,9 +310,9 @@ impl World {
     pub fn creative(&self, id: u64) -> bool {
         self.game_mode(id) == abi::game_mode::CREATIVE
     }
-    /// A player whose mode spares it damage, hunger and air (creative, spectator).
+    /// What is spared damage, hunger and air (creative, spectator, `attribute::INVULNERABLE`).
     pub fn outside_survival(&self, id: u64) -> bool {
-        crate::comps::game_mode::INVULNERABLE.on_id(self.game_mode(id))
+        self.attribute(id, &crate::attribute::INVULNERABLE) >= 1.0
     }
     /// The id of its game mode (`game_modes::CREATIVE.id()`): survival for what isn't a player.
     pub fn game_mode(&self, id: u64) -> u32 {
@@ -334,24 +363,6 @@ impl World {
     pub fn gizmo_shown(&self, group: &GizmoGroup) -> bool {
         unsafe { (host().gizmo_shown)(self.raw(), Str::new(group.name())) != 0 }
     }
-    /// A line seen by players showing `group`, color `0xRRGGBBAA`, for `ticks`.
-    pub fn draw_line(&self, group: &GizmoGroup, a: impl Into<Vec3>, b: impl Into<Vec3>, color: u32, ticks: u32) {
-        let a = a.into();
-        let b = b.into();
-        self.draw(group, abi::gizmo_kind::LINE, a, b, color, ticks);
-    }
-    pub fn draw_box(&self, group: &GizmoGroup, min: impl Into<Vec3>, max: impl Into<Vec3>, color: u32, ticks: u32) {
-        let min = min.into();
-        let max = max.into();
-        self.draw(group, abi::gizmo_kind::BOX, min, max, color, ticks);
-    }
-    /// See-through by `color`'s alpha.
-    pub fn draw_fill(&self, group: &GizmoGroup, min: impl Into<Vec3>, max: impl Into<Vec3>, color: u32, ticks: u32) {
-        let min = min.into();
-        let max = max.into();
-        self.draw(group, abi::gizmo_kind::FILL, min, max, color, ticks);
-    }
-
     /// Moves an entity (players included) at the end of the tick, to `dim` or the same dimension.
     pub fn teleport(&self, id: u64, dim: Option<&crate::Dimension>, pos: impl Into<Vec3>) {
         let pos = pos.into();
@@ -369,16 +380,29 @@ impl World {
         unsafe { (host().weather_now)(self.raw()) }
     }
 
-    /// Shader effect `effect` on an entity for everyone who sees it, at `strength` (0..1) for
-    /// `ticks` (0 ends it): `w.entity_effect(id, &entity_effects::GLOW, 1.0, 200)`, or one of
-    /// your own (`Registry::entity_effect`). A new one replaces the last.
-    pub fn entity_effect(&self, id: u64, effect: impl Into<crate::Id<crate::EntityEffect>>, strength: f32, ticks: u32) {
-        unsafe { (host().entity_effect)(self.raw(), id, effect.into().raw(), strength, ticks) }
+    /// Effect `effect` on an entity at `level` (1 and up) for `ticks` (0 ends it,
+    /// `abi::INFINITE_TICKS` never):
+    /// `w.entity_effect(id, &entity_effects::GLOW, 1, 200)`, or one of your own
+    /// (`Registry::entity_effect`). Several at once, one of each: giving one again replaces it.
+    /// An instant one acts once and doesn't stay.
+    pub fn entity_effect(&self, id: u64, effect: impl Into<crate::Id<crate::EntityEffect>>, level: u32, ticks: u32) {
+        unsafe { (host().entity_effect)(self.raw(), id, effect.into().raw(), level.max(1), ticks) }
+    }
+    /// The effects on `id`: which, at what level, for how many ticks yet.
+    pub fn effects(&self, id: u64) -> Vec<abi::EffectOn> {
+        let mut out = vec![abi::EffectOn::default(); 16];
+        let n = unsafe { (host().entity_effects)(self.raw(), id, out.as_mut_ptr(), out.len() as u32) } as usize;
+        if n > out.len() {
+            out.resize(n, abi::EffectOn::default());
+            unsafe { (host().entity_effects)(self.raw(), id, out.as_mut_ptr(), out.len() as u32) };
+        }
+        out.truncate(n);
+        out
     }
 
     /// A white flash on an entity for everyone who sees it (a creeper about to go off).
     pub fn flash(&self, id: u64) {
-        self.entity_effect(id, &crate::entity_effects::FLASH, 1.0, 2)
+        self.entity_effect(id, &crate::entity_effects::FLASH, 1, 2)
     }
 
     /// A player's `abi::permission` level: ask it before anything only some may do.
@@ -411,23 +435,6 @@ impl World {
     /// `w.set_game_mode(player, &game_modes::CREATIVE)`, or a mod's own mode.
     pub fn set_game_mode(&self, player: u64, mode: impl Into<crate::Id<crate::GameMode>>) {
         unsafe { (host().set_game_mode)(self.raw(), player, mode.into().raw()) }
-    }
-
-    /// The outline of a shape: where a fill or a search will reach, before it does.
-    pub fn draw_shape(&self, group: &GizmoGroup, shape: &crate::Shape, color: u32, ticks: u32) {
-        for (a, b) in shape.outline() {
-            self.draw_line(group, a, b, color, ticks);
-        }
-    }
-    /// The translation `key` with `args` at `pos`, in each viewer's language, `size` times as
-    /// big as menu text.
-    #[allow(clippy::too_many_arguments)]
-    pub fn draw_text(&self, group: &GizmoGroup, pos: impl Into<Vec3>, key: &str, args: &[crate::Arg], color: u32, size: f32, ticks: u32) {
-        let (pos, raw) = (pos.into(), crate::ui::raw_args(args));
-        unsafe { (host().gizmo_text)(self.raw(), Str::new(group.name()), &pos, size, color, ticks, Str::new(key), abi::Slice::new(&raw)) }
-    }
-    fn draw(&self, group: &GizmoGroup, kind: u32, a: Vec3, b: Vec3, color: u32, ticks: u32) {
-        unsafe { (host().gizmo)(self.raw(), Str::new(group.name()), kind, &a, &b, color, ticks) }
     }
 }
 
@@ -857,7 +864,8 @@ impl EntityBuilder<'_> {
         self.push(&crate::component::MODIFIERS, m.0)
     }
     /// Every entity of this kind carries `component` (declared with `r.entity_component`, by any
-    /// mod), starting at its declared value; another mod's kind with `r.edit(&PLAYER).attach(..)`.
+    /// mod), starting at the kind's own value of it (`.set`), else its declared one; another mod's
+    /// kind with `r.edit(&PLAYER).attach(..)`.
     /// Not `.set`: that is one value of the kind itself, `.attach` gives each entity its own,
     /// which changes.
     pub fn attach<T: Value>(self, component: &Component<T>) -> Self {
@@ -881,7 +889,7 @@ impl EntityBuilder<'_> {
     }
     /// Takes no damage (no hurt flash, health stays); `/clear` and the void still remove it.
     pub fn invulnerable(self) -> Self {
-        self.tag(abi::comp::entity::INVULNERABLE)
+        self.modifier(crate::Modifier::new(&crate::attribute::INVULNERABLE, abi::attr_op::SET, 1.0))
     }
     /// Neither pushes nor is pushed by other entities (ghosts, projectiles).
     pub fn unpushable(self) -> Self {
@@ -892,14 +900,38 @@ impl EntityBuilder<'_> {
     pub fn kinematic(self) -> Self {
         self.tag(abi::comp::entity::KINEMATIC)
     }
+    /// What it does to entities: itself (`Hazard::own`) or what it squeezes (`Hazard::crushed`).
+    pub fn hazard(self, h: crate::Hazard) -> Self {
+        self.push(&crate::comps::entity::HAZARDS, h.0)
+    }
     /// A solid body that hurts what it squeezes into blocks instead of only pushing it.
     pub fn crushing(self) -> Self {
-        self.tag(abi::comp::entity::CRUSHES)
+        self.hazard(crate::Hazard::crushed(1.0, &crate::damage_causes::CRUSH))
+    }
+    /// Daylight from an open sky sets it burning for 8 seconds, as the undead in vanilla, unless
+    /// it wears something on its head.
+    pub fn burns_in_sun(self) -> Self {
+        let sun = crate::Hazard::own(0.0, &crate::damage_causes::FIRE)
+            .harmless()
+            .fire(160)
+            .every(20)
+            .when(crate::Cond::new("day & sky(15) & !sheltered & !in_liquid & !wears(head)"));
+        self.hazard(sun)
     }
     /// Riders up to `blocks` above the body (jumping, flying around inside it) keep moving with
     /// it and their own motion stays relative to it, so a jump on a fast ship lands on the ship.
     pub fn carry_height(self, blocks: f32) -> Self {
         self.set(&comps::entity::CARRY_HEIGHT, blocks)
+    }
+    /// Where the light it gives comes from: blocks from its feet, +Z ahead, turned with it (a
+    /// lantern on its head). Its middle when not said, a block entity's block.
+    pub fn light_at(self, x: f32, y: f32, z: f32) -> Self {
+        self.set(&comps::entity::LIGHT_AT, [x, y, z])
+    }
+    /// Slots of its inventory everyone around sees (what a pedestal holds): their items give
+    /// their light, and clients read them as `core:shown` (`[u32]`, 0 empty).
+    pub fn shown_slots(self, slots: &[u32]) -> Self {
+        self.set(&comps::entity::SHOWN_SLOTS, slots.to_vec())
     }
     pub fn size(self, width: f32, height: f32) -> Self {
         self.set(&comps::entity::SIZE, abi::BodySize { width, height })
@@ -933,6 +965,15 @@ impl EntityBuilder<'_> {
     /// slot's name in `w.inventory(id)` reaches them.
     pub fn equipment(self) -> Self {
         self.tag(abi::comp::entity::WEARS)
+    }
+    /// It takes the poses the player does, by the keys its walk holds (`Walk`) and the poses'
+    /// conditions: crouches, swims lying down, crawls where nothing higher fits.
+    pub fn poses(self) -> Self {
+        self.tag(abi::comp::entity::POSES)
+    }
+    /// It picks up the dropped items it touches into its inventory, as the player does.
+    pub fn picks_up_items(self) -> Self {
+        self.tag(abi::comp::entity::PICKS_UP)
     }
     /// Damage of its melee hits (`World::attack`), like an item's.
     pub fn attack_damage(self, damage: f32) -> Self {
@@ -1518,7 +1559,7 @@ impl Registry {
         drop(f(b
             .no_egg()
             .tag(abi::comp::entity::NO_GRAVITY)
-            .tag(abi::comp::entity::INVULNERABLE)
+            .invulnerable()
             .set_text(&comps::entity::BLOCK, block.name())));
     }
 
@@ -1718,12 +1759,20 @@ impl RecipeBuilder<'_> {
     }
     /// Another result (an item, or a liquid by its name and millibuckets).
     pub fn output(self, item: &str, count: u32) -> Self {
-        self.output_chance(item, count, 1.0)
+        self.extra(crate::Pool::new().items(item, count, count))
     }
-    /// A result that comes out with chance `chance` (0..1) each time.
+    /// A result that comes out with chance `chance` (0..1) each time: a pool of it and nothing.
     pub fn output_chance(self, item: &str, count: u32, chance: f32) -> Self {
-        let item = self.reg.ingredient(item);
-        self.push(&comps::recipe::OUTPUTS, abi::RecipeOutput { item, count, chance })
+        let w = (chance.clamp(0.0, 1.0) * 1000.0).round() as u32;
+        let pool = crate::Pool::new()
+            .entry(crate::Entry::item(item).count(count, count).weight(w))
+            .entry(crate::Entry::nothing().weight(1000 - w));
+        self.extra(pool)
+    }
+    /// Rolls of more results, as a loot table's (`r.loot(..).pool(..)`).
+    pub fn extra(self, pool: crate::Pool) -> Self {
+        let pool = pool.raw(self.reg.ns);
+        self.push(&comps::recipe::OUTPUTS, pool)
     }
     /// Works, but the recipe viewer doesn't list it.
     pub fn hidden(self) -> Self {
@@ -1900,6 +1949,13 @@ impl RecipeView {
             })
             .collect()
     }
+    /// What else one run of it gives this time, its pools rolled.
+    pub fn roll(&self, w: &crate::World) -> Vec<ItemStack> {
+        let mut buf = vec![ItemStack::EMPTY; 256];
+        let n = unsafe { (host().recipe_roll)(w.raw(), Str::new(&self.kind), self.index, buf.as_mut_ptr(), buf.len()) };
+        buf.truncate(n.min(buf.len()));
+        buf
+    }
     /// A value the recipe carries (`r.shaped(..).set(&COMP, v)`): its entry's.
     pub fn value<T: Value, K>(&self, comp: &Component<T, K>) -> Option<T> {
         comp.on(abi::entry_kind::RECIPE, self.info().entry)
@@ -2031,4 +2087,36 @@ pub struct LookAt {
     pub face: u32,
     pub state: u32,
     pub body: u64,
+}
+
+/// One tick of a mob's walking for `World::walk`: a direction and the keys a player would hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Walk {
+    dir: [f32; 2],
+    speed: f32,
+    keys: u32,
+}
+
+impl Walk {
+    /// Toward `dir` (x, z, length up to 1) at `speed` times its kind's walking speed.
+    pub fn toward(dir: [f32; 2], speed: f32) -> Walk {
+        Walk { dir, speed, keys: 0 }
+    }
+    /// Jumps; swims and flies up.
+    pub fn jump(self) -> Self {
+        Walk { keys: self.keys | abi::walk::JUMP, ..self }
+    }
+    /// Never steps off an edge, holds on to ladders, crouches; flies down.
+    pub fn sneak(self) -> Self {
+        Walk { keys: self.keys | abi::walk::SNEAK, ..self }
+    }
+    /// Faster, a longer jump, swims lying down in a liquid it swims in.
+    pub fn sprint(self) -> Self {
+        Walk { keys: self.keys | abi::walk::SPRINT, ..self }
+    }
+    /// Takes off and flies, if its `attribute::CAN_FLY` is 1 or more (`.attribute(..)` on its
+    /// kind, a modifier); it comes down when it lands without `jump`, as a player does.
+    pub fn fly(self) -> Self {
+        Walk { keys: self.keys | abi::walk::FLY, ..self }
+    }
 }

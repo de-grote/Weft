@@ -49,6 +49,42 @@ pub async fn events_batched(t: T) -> R {
     Ok(())
 }
 
+/// Status effects: modifiers times the level, a level given its own replacing those of that
+/// attribute only, gone with the effect; a potion drunk gives its effect and leaves its bottle.
+pub async fn status_effects(t: T) -> R {
+    t.flat().await?;
+    let attr = |t: &T, a: &str| {
+        let t = t.clone();
+        let a = a.to_string();
+        async move {
+            let v = t.op(&format!("attr me {a}")).await?;
+            Ok::<f64, String>(
+                v.split(' ')
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(f64::NAN),
+            )
+        }
+    };
+    t.cmd("/effect give @s base:speed 30 2").await?;
+    t.cmd("/effect give @s base:mining_fatigue 30 1").await?;
+    t.secs(0.3).await?;
+    t.check((attr(&t, "core:movement_speed").await? - 1.4).abs() < 1e-6, "speed II: 20% a level");
+    t.check((attr(&t, "core:mining_speed").await? - 0.3).abs() < 1e-6, "mining fatigue I: its own level's");
+    t.check((attr(&t, "core:attack_speed").await? - 0.9).abs() < 1e-6, "and its attack speed times the level beside it");
+    t.cmd("/effect clear @s").await?;
+    t.secs(0.3).await?;
+    t.check((attr(&t, "core:movement_speed").await? - 1.0).abs() < 1e-6, "cleared, back to normal");
+    t.op("put me 0 potion_strength 1").await?;
+    t.c().select_slot(0);
+    t.hold("core:use", 2.5);
+    t.until("drank", Duration::from_secs(5), |t| t.c().inventory_slot(0).item == weft_sdk::Item::named("base:glass_bottle").id())
+        .await?;
+    t.secs(0.3).await?;
+    t.check((attr(&t, "core:attack_damage").await? - 3.0).abs() < 1e-6, "the potion's strength");
+    Ok(())
+}
+
 /// The questions before things happen and timers: a denied `HURT` keeps a player alive, a
 /// denied `USE_ITEM` keeps the bread, a timer fires its event once, when due.
 pub async fn vetoes_and_timers(t: T) -> R {
@@ -76,7 +112,7 @@ pub async fn vetoes_and_timers(t: T) -> R {
     t.secs(0.5).await?;
     t.check_eq(t.op("rings").await?, before.to_string(), "not before it is due");
     t.secs(1.5).await?;
-    t.check_eq(t.op("rings").await?, (before + 1).to_string(), "one timer per entity and event: the second moved the first");
+    t.check_eq(t.op("rings").await?, (before + 2).to_string(), "both timers fired");
     Ok(())
 }
 

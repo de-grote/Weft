@@ -89,7 +89,7 @@ fn cut(m: &MenuCtx) {
     }
     input.set(0, stacks[0]);
     let w = m.world();
-    for (extra, _) in recipe.outputs().into_iter().skip(1) {
+    for extra in recipe.roll(&w) {
         let left = w.inventory(m.player()).insert(extra);
         if !left.is_empty()
             && let Some(e) = w.entity(m.player())

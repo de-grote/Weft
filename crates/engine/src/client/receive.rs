@@ -70,9 +70,14 @@ impl Client {
             ToClient::Edits { dim, specs, all } if dim == self.world.dim => fwd.push(terrain::In::Edits { specs, all }),
             ToClient::Signals { dim, frame, changes } if dim == self.world.dim => self.wires.power_changed(frame, &changes),
             ToClient::BodyGlow { dim, cells } if dim == self.world.dim => self.world.body_glow_changed(cells),
-            ToClient::Time { dim, time } if dim == self.world.dim => {
-                self.world.time = time;
-                self.since_time = 0.0;
+            ToClient::Clock { dim, time, ticks, weather, rate } => {
+                if dim == self.world.dim {
+                    self.world.time = time;
+                    self.world.ticks = ticks;
+                    self.since_time = 0.0;
+                }
+                self.weather_id = (weather as usize).min(content().game.weathers.len() - 1) as u16;
+                self.tick_rate = rate.max(1) as f64;
             }
             ToClient::Teleport { dim, pos, frame } => self.teleported(dim, pos, frame, fwd),
             ToClient::Spawn(list) => self.spawn_entities(list),
@@ -100,6 +105,7 @@ impl Client {
                 self.entity_components
                     .retain(|(e, _), _| !ids.iter().any(|g| g.0 == *e));
                 for (id, killed) in ids {
+                    self.showing_blocks.remove(&id);
                     // Killed mobs stay a moment for the death animation, taken items until
                     // they reach the taker.
                     match self.entities.get_mut(&id) {
@@ -112,12 +118,6 @@ impl Client {
                 }
             }
             ToClient::Players(names) => self.players = names,
-            ToClient::GameMode(mode) => {
-                self.mode = mode;
-                self.player.flying = mode.has(crate::tag_bits::game_mode::ALWAYS_FLY) || (self.can_fly() && self.player.flying);
-                self.player.noclip = mode.has(crate::tag_bits::game_mode::NOCLIP);
-                self.player.fly_speed = 1.0;
-            }
             ToClient::Inventory(slots) => {
                 for (i, s) in slots {
                     if let Some(dst) = self.inventory.get_mut(i as usize) {
@@ -162,30 +162,13 @@ impl Client {
                 self.drag = None;
                 self.events.push(ClientEvent::CloseMenu);
             }
-            ToClient::Attributes(list) => {
-                use crate::server::extend as a;
-                for (id, v) in list {
-                    if let Some(dst) = self.attributes.get_mut(id as usize) {
-                        *dst = v;
-                    }
-                }
-                self.player.speed_mul = self.attributes[a::MOVEMENT_SPEED as usize] as f64;
-                self.player.jump_mul = self.attributes[a::JUMP_STRENGTH as usize] as f64;
-                self.player.can_sprint = self.attributes[a::CAN_SPRINT as usize] >= 1.0;
-                // Flight goes with what allowed it (a mode, a ring), which comes a tick after the mode.
-                self.player.flying &= self.can_fly() || self.mode.has(crate::tag_bits::game_mode::ALWAYS_FLY);
-            }
             ToClient::BreakRefused { frame, pos } => {
                 self.refused_break = Some((frame, pos));
                 self.breaking = None;
             }
-            ToClient::Permission(level) => self.permission = level,
             ToClient::Using(ticks) => {
                 self.using = ticks.map(|(t, _)| (t as f32, t as f32));
                 self.using_off = ticks.is_some_and(|(_, off)| off);
-            }
-            ToClient::Weather(w) => {
-                self.weather_id = (w as usize).min(content().game.weathers.len() - 1) as u16;
             }
 
             ToClient::EntitySwing { id, off } => {
@@ -200,14 +183,14 @@ impl Client {
             ToClient::Camera { mode, locked, transition, easing } => self.camera_from_server(mode, locked, transition, easing),
             ToClient::Knock { away } => {
                 let away = Vec3::from_array(away).as_dvec3();
-                self.player.vel = physics::knock(self.player.vel, away, self.player.on_ground);
+                let resist = self.attribute(crate::registry::attr::KNOCKBACK_RESISTANCE) as f64;
+                self.player.vel = physics::knock(self.player.vel, away, self.player.on_ground, resist);
             }
             ToClient::Velocity { add } => self.player.vel += Vec3::from_array(add).as_dvec3(),
             ToClient::SetVelocity(v) => self.player.vel = Vec3::from_array(v).as_dvec3(),
             ToClient::Look([yaw, pitch]) => (self.player.yaw, self.player.pitch) = (yaw, pitch),
             ToClient::Flying(on) => self.player.flying = on,
             ToClient::Selected(slot) => self.selected = (slot as usize).min(content().game.player_layout.hotbar.saturating_sub(1) as usize),
-            ToClient::TickRate(rate) => self.tick_rate = rate.max(1) as f64,
             ToClient::Died => {
                 self.dead = true;
                 self.events.push(ClientEvent::Died);
@@ -262,7 +245,7 @@ impl Client {
             ToClient::Sounds(list) => {
                 self.sounds.extend(
                     list.into_iter()
-                        .map(|(sound, pos, volume, pitch)| crate::audio::Play { sound, pos: Some(pos), volume, pitch }),
+                        .map(|(sound, pos, volume, pitch)| crate::audio::Play { sound, pos, volume, pitch }),
                 );
             }
             ToClient::Particles(list) => {
@@ -278,6 +261,7 @@ impl Client {
         if dim != self.world.dim {
             self.reset_terrain(dim, fwd);
             self.entities.clear();
+            self.showing_blocks.clear();
             self.particles.clear();
             self.entity_components.clear();
         }
@@ -294,8 +278,8 @@ impl Client {
 
     fn spawn_entities(&mut self, list: Vec<crate::net::EntityView>) {
         for e in list {
-            self.entities
-                .insert(e.id, ClientEntity::new(e.kind, e.pos, e.yaw, e.pitch, e.item));
+            let to = if content().game.is_block_entity(e.kind) { &mut self.showing_blocks } else { &mut self.entities };
+            to.insert(e.id, ClientEntity::new(e.kind, e.pos, e.yaw, e.pitch, e.item));
         }
     }
 

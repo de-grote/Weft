@@ -117,10 +117,24 @@ pub struct EntityKind {
     /// Its equipment slots in that inventory (`entity_flags::WEARS`, the player's): never filled
     /// by pickups, worn on the model. Laid out at freeze.
     pub worn: std::ops::Range<u32>,
+    /// The slot of its second hand, after its equipment (the player's, and kinds that wear).
+    pub off: Option<u32>,
+    /// How many of its first slots its main hand may be on (`Entity::selected`): the player's
+    /// hotbar, a wearing kind's own slots (one at least); 0 for a kind without hands.
+    pub hand_slots: u32,
     /// What its events sound and show (`entity_event`).
     pub effects: [crate::content::Fx; 4],
     /// Solid bodies: riders up to this high above it move with it.
     pub carry_height: f32,
+    /// Where its light comes from, from its position turned with it: its middle unless said, a
+    /// block entity's block's.
+    pub light_at: glam::DVec3,
+    /// Inventory slots everyone around sees (`SHOWN`).
+    pub shown_slots: Vec<u32>,
+    /// What it does to entities, itself among them (`abi::comp::entity::HAZARDS`): as
+    /// registered, then resolved at freeze.
+    pub raw_hazards: Vec<abi::Hazard>,
+    pub hazards: Vec<crate::content::Hazard>,
     /// A moving structure: its template (`Content::templates`), by name until the freeze.
     pub template_name: String,
     pub template: Option<u32>,
@@ -272,8 +286,10 @@ pub struct Recipe {
     pub inputs: Vec<Ingredient>,
     /// How many of each input (millibuckets for fluids).
     pub input_counts: Vec<u32>,
-    /// The main result first.
+    /// The main result, then each its pools can give (`extras`) with the most of it and its chance.
     pub outputs: Vec<RecipeOutput>,
+    /// What else one run gives, rolled as loot.
+    pub extras: crate::loot::Table,
     pub time: u32,
     /// Its entry, whose component table row has what else it carries (`comp::recipe::HIDDEN`, a
     /// mod's values).
@@ -384,15 +400,15 @@ pub struct Game {
     pub modifiers_comp: u32,
     /// `TIMERS` as an entity component.
     pub timers_comp: u32,
+    /// `abi::event::BLOCK_TICK`.
+    pub block_tick: u32,
     /// (owner, callback) run once per tick in every region, in mod order.
     pub world_ticks: Vec<(ModId, Callback)>,
     /// `abi::comp::NAME` as an entity component.
     pub name_comp: u32,
     /// Components with `component_flags::CARRIED`: between a block's item and its block entity.
     pub carried: Vec<u32>,
-    /// `HEALTH`, `BURNING`, `WORN`, `SHAPE`, `HELD`, `OFF_HELD`, `USING`, `SWAPS`, `LOOPING_ACTION`,
-    /// `EFFECT`, `FORCED_POSE`, `RIDING`.
-    pub field_comps: [u32; 12],
+    pub fields: FieldComps,
     /// `SIMULATED`.
     pub simulated_comp: u32,
     /// Entity components with `SYNC_WATCHERS` / `SYNC_MENU`.
@@ -643,7 +659,9 @@ fn engine_components() -> Vec<RawEntry> {
     let mut shape = vec![0u8; 12];
     shape.extend(u32::MAX.to_le_bytes());
     let energy = (<abi::Energy as abi::Schema>::SCHEMA, cf::SAVE | cf::SYNC_MENU, vec![0; size_of::<abi::Energy>()]);
-    let mut all = vec![decl(abi::comp::CONTENTS, "bytes"), decl(abi::comp::LAYERS, "bytes")];
+    // What items, entity kinds, poses and entity effects give (`content::SourceMods`).
+    let modifiers = <Vec<abi::Modifier> as abi::data::Data>::schema();
+    let mut all = vec![decl(abi::comp::CONTENTS, "bytes"), decl(abi::comp::LAYERS, "bytes"), decl(abi::comp::MODIFIERS, &modifiers)];
     // Variable length (no bytes): attribute modifiers, timers, a block entity's own name (a
     // renamed chest).
     for (name, schema, flags, default) in [
@@ -653,6 +671,8 @@ fn engine_components() -> Vec<RawEntry> {
         (abi::comp::NAME, "bytes", cf::SAVE | cf::CARRIED, Vec::new()),
         (HEALTH, "[f32;2]", own, vec![0; 8]),
         (BURNING, "u8", shown, vec![0]),
+        (abi::comp::LIGHT, "[u8;3]", own, vec![0; 3]),
+        (SHOWN, "bytes", shown, Vec::new()),
         (WORN, "bytes", shown, Vec::new()),
         (SHAPE, "bytes", own, shape),
         (HELD, "u32", shown, vec![0; 4]),
@@ -660,9 +680,12 @@ fn engine_components() -> Vec<RawEntry> {
         (USING, "u32", shown, vec![0; 4]),
         (SWAPS, "bytes", own | shown, Vec::new()),
         (LOOPING_ACTION, "bytes", shown, Vec::new()),
-        (EFFECT, "bytes", shown, Vec::new()),
+        (EFFECT, "bytes", own | cf::SAVE, Vec::new()),
         (FORCED_POSE, "bytes", own | shown, Vec::new()),
         (RIDING, "bytes", own | shown | cf::SAVE, Vec::new()),
+        (GAME_MODE, "u32", cf::SYNC_OWNER, vec![0; 4]),
+        (PERMISSION, "u32", cf::SYNC_OWNER, vec![0; 4]),
+        (ATTRIBUTES, "bytes", cf::SYNC_OWNER, Vec::new()),
         (SIMULATED, "u64", cf::SAVE, vec![0; 8]),
     ] {
         all.push(entity(name, schema, flags, default));
@@ -709,8 +732,8 @@ pub struct RawRecipe {
     pub output: String,
     pub count: u32,
     pub time: u32,
-    /// (item, count, chance) after the main output; a liquid is its item.
-    pub outputs: Vec<(String, u32, f32)>,
+    /// Pools for what else it gives; a liquid is its item.
+    pub outputs: Vec<abi::LootPool>,
     /// Its entry: recipes expanded from one share it.
     pub entry: u32,
 }
@@ -1170,6 +1193,7 @@ fn engine_game_modes() -> Vec<RawEntry> {
             .set(abi::comp::MODIFIERS, modifiers)
     };
     let flies = || modifier(abi::attribute::CAN_FLY, abi::attr_op::ADD, 1.0);
+    let spared = || modifier(abi::attribute::INVULNERABLE, abi::attr_op::SET, 1.0);
     use crate::tag_bits::game_mode as f;
     // Unseen by mobs outside survival; creative reaches further.
     let unseen = || modifier(abi::attribute::VISIBILITY, abi::attr_op::MULTIPLY_TOTAL, -1.0);
@@ -1177,18 +1201,19 @@ fn engine_game_modes() -> Vec<RawEntry> {
         mode("core:survival", &[], Vec::new()),
         mode(
             "core:creative",
-            &[f::INSTANT_BREAK, f::NO_COSTS, f::INVULNERABLE, f::CREATIVE_INVENTORY],
+            &[f::INSTANT_BREAK, f::NO_COSTS, f::CREATIVE_INVENTORY],
             vec![
                 modifier(abi::attribute::BLOCK_REACH, abi::attr_op::ADD, 0.5),
                 modifier(abi::attribute::ENTITY_REACH, abi::attr_op::ADD, 2.0),
                 unseen(),
                 flies(),
+                spared(),
             ],
         ),
         mode(
             "core:spectator",
-            &[f::INVULNERABLE, f::ALWAYS_FLY, f::NOCLIP, f::NO_INTERACT, f::HIDDEN, f::NO_HUD, f::NO_COSTS],
-            vec![unseen(), flies()],
+            &[f::ALWAYS_FLY, f::NOCLIP, f::NO_INTERACT, f::HIDDEN, f::NO_HUD, f::NO_COSTS],
+            vec![unseen(), flies(), spared()],
         ),
     ]
 }
@@ -1226,7 +1251,65 @@ fn bake_precipitation(e: &Entry) -> PrecipitationDef {
 #[derive(Clone, Debug)]
 pub struct EntityEffectDef {
     pub name: String,
+    /// Empty: none.
     pub shader: String,
+    /// Named by its mod, not its own name by default: missing, it is a mistake.
+    pub shader_given: bool,
+    /// A status effect's (its player sees it): the texture of its icon; empty for none.
+    pub icon: String,
+    /// Of the swirls around who has it, `0xRRGGBB`; none without.
+    pub color: Option<u32>,
+    /// `effect_kind`: beneficial, harmful or neither.
+    pub kind: u8,
+    /// Acts once when given and doesn't stay.
+    pub instant: bool,
+    /// A screen shader its player sees through while it has it; empty for none.
+    pub screen: String,
+    /// Its entity isn't drawn for others.
+    pub hides: bool,
+    /// As registered, then resolved at freeze.
+    pub raw_hazards: Vec<abi::Hazard>,
+    pub hazards: Vec<crate::content::Hazard>,
+    /// Given off while it is on.
+    pub light: [u8; 3],
+}
+
+/// Whether an entity effect is good for who has it (`EntityEffectDef::kind`).
+pub mod effect_kind {
+    pub const NEUTRAL: u8 = 0;
+    pub const BENEFICIAL: u8 = 1;
+    pub const HARMFUL: u8 = 2;
+}
+
+impl EntityEffectDef {
+    /// Its hazards at `level`: those given for the highest level up to it, else the others times
+    /// the level.
+    pub fn hazards_at(&self, level: u32) -> Vec<crate::content::Hazard> {
+        if let Some(at) = self
+            .hazards
+            .iter()
+            .map(|h| h.level)
+            .filter(|&l| l > 0 && l <= level)
+            .max()
+        {
+            return self
+                .hazards
+                .iter()
+                .filter(|h| h.level == at)
+                .copied()
+                .collect();
+        }
+        self.hazards
+            .iter()
+            .filter(|h| h.level == 0)
+            .map(|h| crate::content::Hazard { damage: h.damage * level as f32, ..*h })
+            .collect()
+    }
+
+    /// A status effect: its player sees it.
+    pub fn shown(&self) -> bool {
+        !self.icon.is_empty()
+    }
 }
 
 /// What natural spawning and despawning know of entities by category.
@@ -1279,8 +1362,37 @@ pub struct AttrDef {
     pub rule: bool,
 }
 
+/// The engine's attributes by id, first in the registry in `engine_attributes`' order.
+pub mod attr {
+    pub const MAX_HEALTH: u32 = 0;
+    pub const MOVEMENT_SPEED: u32 = 1;
+    pub const VISIBILITY: u32 = 2;
+    pub const JUMP_STRENGTH: u32 = 3;
+    pub const ATTACK_SPEED: u32 = 4;
+    pub const CAN_SPRINT: u32 = 5;
+    pub const BLOCK_REACH: u32 = 6;
+    pub const ENTITY_REACH: u32 = 7;
+    pub const MINING_SPEED: u32 = 8;
+    pub const FOV: u32 = 9;
+    pub const CAN_FLY: u32 = 10;
+    pub const INVULNERABLE: u32 = 11;
+    pub const SAFE_FALL: u32 = 12;
+    pub const FALL_DAMAGE_MULTIPLIER: u32 = 13;
+    pub const STEP_HEIGHT: u32 = 14;
+    pub const GRAVITY: u32 = 15;
+    pub const KNOCKBACK_RESISTANCE: u32 = 16;
+    pub const ATTACK_DAMAGE: u32 = 17;
+    pub const DAMAGE_RESISTANCE: u32 = 18;
+    pub const FIRE_RESISTANCE: u32 = 19;
+    pub const BURNING_TIME: u32 = 20;
+    pub const SUBMERGED_MINING_SPEED: u32 = 21;
+    pub const AIRBORNE_MINING_SPEED: u32 = 22;
+    pub const NIGHT_VISION: u32 = 23;
+}
+
 fn engine_attributes() -> Vec<RawEntry> {
     use abi::attribute as a;
+    // In `attr`'s order.
     [
         (a::MAX_HEALTH, 20.0, 0.5, 1024.0),
         (a::MOVEMENT_SPEED, 1.0, 0.0, 16.0),
@@ -1293,13 +1405,26 @@ fn engine_attributes() -> Vec<RawEntry> {
         (a::MINING_SPEED, 1.0, 0.0, 1024.0),
         (a::FOV, 1.0, 0.05, 8.0),
         (a::CAN_FLY, 0.0, 0.0, 1.0),
+        (a::INVULNERABLE, 0.0, 0.0, 1.0),
+        (a::SAFE_FALL, 3.0, 0.0, 1024.0),
+        (a::FALL_DAMAGE_MULTIPLIER, 1.0, 0.0, 100.0),
+        (a::STEP_HEIGHT, 0.6, 0.0, 10.0),
+        (a::GRAVITY, 1.0, -8.0, 8.0),
+        (a::KNOCKBACK_RESISTANCE, 0.0, 0.0, 1.0),
+        (a::ATTACK_DAMAGE, 0.0, -1024.0, 1024.0),
+        (a::DAMAGE_RESISTANCE, 0.0, 0.0, 1.0),
+        (a::FIRE_RESISTANCE, 0.0, 0.0, 1.0),
+        (a::BURNING_TIME, 1.0, 0.0, 100.0),
+        (a::SUBMERGED_MINING_SPEED, 0.2, 0.0, 20.0),
+        (a::AIRBORNE_MINING_SPEED, 0.2, 0.0, 20.0),
+        (a::NIGHT_VISION, 0.0, 0.0, 1.0),
     ]
     .iter()
     .map(|&(name, default, min, max)| {
         let e = RawEntry::engine(abi::entry_kind::ATTRIBUTE, name)
             .set(abi::comp::attribute::DEFAULT, default)
             .set(abi::comp::attribute::RANGE, [min, max]);
-        // How many hearts players have is the world's to say.
+        // How many hearts players (and kinds that don't say) have is the world's to say.
         if name == a::MAX_HEALTH { e.tag(abi::comp::attribute::RULE) } else { e }
     })
     .collect()
@@ -1309,6 +1434,7 @@ fn engine_attributes() -> Vec<RawEntry> {
 pub const ENGINE_EVENTS: &[(&str, &str, u32)] = {
     use abi::Schema;
     &[
+        (abi::event::BLOCK_TICK, "[i32;3]", 12),
         (abi::action::BREAK_BLOCK, abi::BlockChange::SCHEMA, size_of::<abi::BlockChange>() as u32),
         (abi::action::PLACE_BLOCK, abi::BlockChange::SCHEMA, size_of::<abi::BlockChange>() as u32),
         (abi::action::DIE, abi::Death::SCHEMA, size_of::<abi::Death>() as u32),
@@ -1344,9 +1470,16 @@ pub fn engine_entries(kind: u32) -> Vec<RawEntry> {
         ek::PRECIPITATION => engine_precipitations(),
         ek::TEXT_PLACE => crate::hud::engine_places(),
         ek::WEATHER => engine_weathers(),
+        // Fire's light, without a look of its own.
         ek::ENTITY_EFFECT => abi::entity_effect::NAMES
             .iter()
-            .map(|n| RawEntry::engine(kind, n))
+            .enumerate()
+            .map(|(i, n)| match RawEntry::engine(kind, n) {
+                e if i as u32 == abi::entity_effect::BURNING => e
+                    .set(abi::comp::ENTITY_EFFECT_SHADER, String::new())
+                    .set(abi::comp::LIGHT, [15u8, 12, 6]),
+                e => e,
+            })
             .collect(),
         ek::CONDITION => abi::condition::NAMES
             .iter()
@@ -1482,8 +1615,18 @@ fn bake_entity(e: &Entry) -> EntityKind {
         values: Vec::new(),
         slots: 0,
         worn: 0..0,
+        off: None,
+        hand_slots: 0,
         effects: [crate::content::Fx::NONE; 4],
         carry_height: e.or(k::CARRY_HEIGHT, 0.0),
+        light_at: match e.get::<[f32; 3]>(k::LIGHT_AT) {
+            Some(v) => glam::Vec3::from(v).as_dvec3(),
+            None if e.text(k::BLOCK).is_some() => glam::DVec3::ZERO,
+            None => glam::DVec3::Y * (size.height as f64 * 0.5),
+        },
+        shown_slots: e.or(k::SHOWN_SLOTS, Vec::new()),
+        raw_hazards: e.or(k::HAZARDS, Vec::new()),
+        hazards: Vec::new(),
         template_name: text(k::TEMPLATE),
         template: None,
         seats: e
@@ -1560,14 +1703,25 @@ fn engine_entities() -> Vec<RawEntry> {
     let thing = |name: &str, width: f32, height: f32| {
         kind(name, width, height)
             .set(k::TEXTURE, String::new())
-            .tag(k::INVULNERABLE)
+            .set(
+                abi::comp::MODIFIERS,
+                vec![abi::Modifier {
+                    attribute: abi::attribute::INVULNERABLE.into(),
+                    op: abi::attr_op::SET,
+                    amount: 1.0,
+                    ..Default::default()
+                }],
+            )
             .tag(k::NO_FALL_DAMAGE)
             .tag(k::UNPUSHABLE)
     };
     vec![
         kind(PLAYER, 0.6, 1.8)
             .set(k::EYE, 1.62f32)
-            .set(k::SLOT_GROUPS, groups),
+            .set(k::SLOT_GROUPS, groups)
+            .set(abi::comp::ATTACK_SPEED, 4.0f32)
+            .tag(k::PICKS_UP)
+            .tag(k::POSES),
         thing(ITEM, 0.25, 0.25),
         thing(FALLING, 0.98, 1.0).tag(k::SOLID),
         thing(MOVING, 1.0, 1.0)
@@ -1598,11 +1752,7 @@ fn raw_recipe(e: &Entry) -> RawRecipe {
         output: text(r::OUTPUT),
         count: e.or(r::COUNT, 1u32).max(1),
         time: e.or(r::TIME, 0),
-        outputs: e
-            .or::<Vec<abi::RecipeOutput>>(r::OUTPUTS, Vec::new())
-            .into_iter()
-            .map(|o| (o.item, o.count.max(1), o.chance))
-            .collect(),
+        outputs: e.or(r::OUTPUTS, Vec::new()),
         entry: 0,
     }
 }
@@ -1663,9 +1813,33 @@ pub const EFFECT: &str = "core:effect";
 pub const FORCED_POSE: &str = "core:forced_pose";
 /// What it rides (`u64` id) and its seat (`u32`), empty: nothing. Saved, and seen by everyone.
 pub const RIDING: &str = "core:riding";
+/// Entity component (`[u32]`, synced to watchers): the items in its kind's `SHOWN_SLOTS`, 0 empty.
+pub const SHOWN: &str = "core:shown";
+use abi::comp::{ATTRIBUTES, GAME_MODE, PERMISSION};
 /// Entity component (`u64`, saved): the world time a system last simulated it to, so it can
 /// catch up on what it missed (`Dim::run_systems`).
 pub const SIMULATED: &str = "core:simulated";
+
+/// The components of engine fields clients show (`HEALTH` ...), by id.
+#[derive(Default, Clone, Copy)]
+pub struct FieldComps {
+    pub health: u32,
+    pub burning: u32,
+    pub worn: u32,
+    pub shape: u32,
+    pub held: u32,
+    pub off_held: u32,
+    pub using: u32,
+    pub swaps: u32,
+    pub looping: u32,
+    pub effect: u32,
+    pub forced: u32,
+    pub riding: u32,
+    pub game_mode: u32,
+    pub permission: u32,
+    pub attributes: u32,
+    pub shown: u32,
+}
 
 /// Entity kinds, frozen before components (which attach to them).
 #[derive(Default)]
@@ -1944,6 +2118,28 @@ pub fn freeze(
                 .text(abi::comp::ENTITY_EFFECT_SHADER)
                 .unwrap_or(&e.name)
                 .to_string(),
+            shader_given: e.text(abi::comp::ENTITY_EFFECT_SHADER).is_some(),
+            icon: e
+                .text(abi::comp::ENTITY_EFFECT_ICON)
+                .unwrap_or_default()
+                .to_string(),
+            color: e.get::<u32>(abi::comp::ENTITY_EFFECT_COLOR),
+            kind: if e.has(abi::comp::ENTITY_EFFECT_HARMFUL) {
+                effect_kind::HARMFUL
+            } else if e.has(abi::comp::ENTITY_EFFECT_BENEFICIAL) {
+                effect_kind::BENEFICIAL
+            } else {
+                effect_kind::NEUTRAL
+            },
+            instant: e.has(abi::comp::ENTITY_EFFECT_INSTANT),
+            screen: e
+                .text(abi::comp::ENTITY_EFFECT_SCREEN)
+                .unwrap_or_default()
+                .to_string(),
+            hides: e.has(abi::comp::ENTITY_EFFECT_HIDES),
+            raw_hazards: e.or(abi::comp::ENTITY_EFFECT_HAZARDS, Vec::new()),
+            hazards: Vec::new(),
+            light: e.or(abi::comp::LIGHT, [0; 3]),
         });
     (g.conditions, g.condition_names) = tables.bake(kind(ek::CONDITION), ek::CONDITION, mod_name, errors, |e, _| ConditionDef {
         name: e.name.clone(),
@@ -2007,8 +2203,52 @@ pub fn freeze(
     let (spawns, _) =
         tables.bake(kind(ek::SPAWN), ek::SPAWN, mod_name, errors, |e, errors| bake_spawn(e, &g, c, conds, dim_names, biome_names, errors));
     g.spawns = spawns.into_iter().flatten().collect();
-    // Natural spawning (`spawns`) runs while this is on.
+    link_handlers(&mut g, event_handlers, interceptors, modifiers, packets, order, errors);
 
+    freeze_entity_storage(&mut g, c, decls, systems, entities.attach, order, errors);
+
+    world_ticks.sort_by_key(|h: &(ModId, Callback)| order(h.0));
+    g.world_ticks = world_ticks;
+
+    (g.menus, g.menu_names) = tables.bake_by(kind(ek::MENU), ek::MENU, mod_name, errors, |e| e.name.clone(), |e, _| bake_menu(e));
+    lay_out_slots(&mut g, entities.player_groups, equipment, c, errors);
+    g.player_menu = entities.player_menu.and_then(|n| {
+        let m = g.menu_names.get(&n).copied();
+        if m.is_none() {
+            errors.push(format!("player menu {n} is not registered"));
+        }
+        m
+    });
+
+    for (block, kind) in entities.blocks {
+        match block_names.get(&block) {
+            Some(&b) => {
+                if g.block_entities
+                    .insert(b, kind)
+                    .is_some_and(|old| old != kind)
+                {
+                    errors.push(format!("block {block} has two block entities"));
+                }
+            }
+            None => errors.push(format!("entity {}: the block entity of unknown block {block}", g.entities[kind as usize].name)),
+        }
+    }
+
+    freeze_recipes(&mut g, recipes, items, item_names, c, conds, errors);
+    g
+}
+
+/// Events with their handlers, interceptors, value chain modifiers and packet channels, each in
+/// mod order.
+fn link_handlers(
+    g: &mut Game,
+    mut event_handlers: Vec<(ModId, String, String, Callback)>,
+    mut interceptors: Vec<(ModId, String, Callback)>,
+    mut modifiers: Vec<(ModId, String, u32, Callback)>,
+    mut packets: Vec<(ModId, String, String, u32, Callback)>,
+    order: &dyn Fn(ModId) -> u32,
+    errors: &mut Vec<String>,
+) {
     let mut events: Vec<EventDef> = ENGINE_EVENTS
         .iter()
         .map(|(n, s, size)| EventDef { name: n.to_string(), schema: s.to_string(), size: (*size).into(), handlers: Vec::new() })
@@ -2027,6 +2267,7 @@ pub fn freeze(
         .enumerate()
         .map(|(i, e)| (e.name.clone(), i as u32))
         .collect();
+    g.block_tick = g.event_names[abi::event::BLOCK_TICK];
     g.events = events;
     interceptors.sort_by_key(|h| order(h.0));
     for (owner, name, cb) in interceptors {
@@ -2056,8 +2297,19 @@ pub fn freeze(
         }
         *slot = Some((owner, cb));
     }
+}
 
-    // Entity storage, indexed by component id like everything else.
+/// Entity storage, indexed by component id like everything else: the components' definitions,
+/// the ones the engine reads, who gets them synced, systems over them and what kinds attach.
+fn freeze_entity_storage(
+    g: &mut Game,
+    c: &Components,
+    decls: &[ComponentDecl],
+    mut systems: Vec<(ModId, String, String, Callback)>,
+    attach: Vec<Vec<abi::Attach>>,
+    order: &dyn Fn(ModId) -> u32,
+    errors: &mut Vec<String>,
+) {
     g.components = c
         .names
         .iter()
@@ -2086,8 +2338,25 @@ pub fn freeze(
         .filter(|(_, d)| d.runtime && d.flags & weft_abi::component_flags::CARRIED != 0)
         .map(|(i, _)| i as u32)
         .collect();
-    g.field_comps = [HEALTH, BURNING, WORN, SHAPE, HELD, OFF_HELD, USING, SWAPS, LOOPING_ACTION, EFFECT, FORCED_POSE, RIDING]
-        .map(|n| g.component_names[n]);
+    let id = |n: &str| g.component_names[n];
+    g.fields = FieldComps {
+        health: id(HEALTH),
+        burning: id(BURNING),
+        worn: id(WORN),
+        shape: id(SHAPE),
+        held: id(HELD),
+        off_held: id(OFF_HELD),
+        using: id(USING),
+        swaps: id(SWAPS),
+        looping: id(LOOPING_ACTION),
+        effect: id(EFFECT),
+        forced: id(FORCED_POSE),
+        riding: id(RIDING),
+        game_mode: id(GAME_MODE),
+        permission: id(PERMISSION),
+        attributes: id(ATTRIBUTES),
+        shown: id(SHOWN),
+    };
     g.simulated_comp = g.component_names[SIMULATED];
     let with_flag = |f: u32| {
         g.components
@@ -2113,14 +2382,21 @@ pub fn freeze(
             None => errors.push(format!("system over {name}: no entity component of that name")),
         }
     }
-    for (k, list) in entities.attach.into_iter().enumerate() {
+    for (k, list) in attach.into_iter().enumerate() {
         let kind = &mut g.entities[k];
-        for a in list {
+        for mut a in list {
             let Some(&cid) = g.component_names.get(&a.name) else {
                 errors.push(format!("entity {}: attaches {}, which is no entity component", kind.name, a.name));
                 continue;
             };
             let size = g.components[cid as usize].size as usize;
+            let own = c
+                .bytes(comps::ENTITY, k as u32, cid)
+                .filter(|b| b.len() == size);
+            // Without a start of its own it starts as the kind has it.
+            if a.start.is_empty() {
+                a.start = own.map_or(Vec::new(), <[u8]>::to_vec);
+            }
             if !a.start.is_empty() && a.start.len() != size {
                 errors.push(format!("entity {}: attaches {} with {} bytes, the component has {size}", kind.name, a.name, a.start.len()));
                 continue;
@@ -2134,13 +2410,18 @@ pub fn freeze(
             kind.components.push(cid);
         }
     }
+}
 
-    world_ticks.sort_by_key(|h: &(ModId, Callback)| order(h.0));
-    g.world_ticks = world_ticks;
-
-    (g.menus, g.menu_names) = tables.bake_by(kind(ek::MENU), ek::MENU, mod_name, errors, |e| e.name.clone(), |e, _| bake_menu(e));
-    let groups: Vec<(String, u32, u32, u32)> = entities
-        .player_groups
+/// The player's inventory layout, the slots each kind carries and wears, and a group per
+/// equipment slot in the menus that show equipment.
+fn lay_out_slots(
+    g: &mut Game,
+    player_groups: Vec<abi::SlotGroupDef>,
+    equipment: Vec<EquipmentSlot>,
+    c: &Components,
+    errors: &mut Vec<String>,
+) {
+    let groups: Vec<(String, u32, u32, u32)> = player_groups
         .into_iter()
         .map(|g| (g.name, g.cols.max(1), g.rows.max(1), g.flags))
         .collect();
@@ -2160,14 +2441,18 @@ pub fn freeze(
             .unwrap_or(0)
             .min(1 << 16);
         if k.name == PLAYER {
-            k.worn = g.player_layout.worn.clone();
+            (k.slots, k.worn, k.off, k.hand_slots) =
+                (g.player_layout.slots, g.player_layout.worn.clone(), g.player_layout.off, g.player_layout.hotbar);
         } else if k.flags & crate::tag_bits::entity::WEARS != 0 {
-            k.worn = k.slots..k.slots + g.player_layout.worn.len() as u32;
-            k.slots = k.worn.end;
+            // Its own slots are what its hand holds from, one if it declared none.
+            k.hand_slots = k.slots.max(1);
+            k.worn = k.hand_slots..k.hand_slots + g.player_layout.worn.len() as u32;
+            k.off = g.player_layout.off.map(|_| k.worn.end);
+            k.slots = k.worn.end + k.off.is_some() as u32;
         }
     }
     // Menus showing equipment get a group per slot: what the entity the menu is on wears, or the
-    // player (`menu::slots`). The other hand is always the player's.
+    // player (`menu::slots`). The other hand is the slot after the equipment, theirs too.
     let layout = g.player_layout.clone();
     for m in &mut g.menus {
         let Some(at) = m
@@ -2186,8 +2471,8 @@ pub fn freeze(
                 at,
                 GroupDef {
                     name: e.name.clone(),
-                    owner: if off { weft_abi::slot_owner::PLAYER } else { weft_abi::slot_owner::WORN },
-                    start: if off { layout.worn.start + i as u32 } else { i as u32 },
+                    owner: weft_abi::slot_owner::WORN,
+                    start: i as u32,
                     cols: 1,
                     rows: 1,
                     flags: if off { weft_abi::slot_flags::OFF_HAND } else { 0 },
@@ -2201,28 +2486,18 @@ pub fn freeze(
             );
         }
     }
-    g.player_menu = entities.player_menu.and_then(|n| {
-        let m = g.menu_names.get(&n).copied();
-        if m.is_none() {
-            errors.push(format!("player menu {n} is not registered"));
-        }
-        m
-    });
+}
 
-    for (block, kind) in entities.blocks {
-        match block_names.get(&block) {
-            Some(&b) => {
-                if g.block_entities
-                    .insert(b, kind)
-                    .is_some_and(|old| old != kind)
-                {
-                    errors.push(format!("block {block} has two block entities"));
-                }
-            }
-            None => errors.push(format!("entity {}: the block entity of unknown block {block}", g.entities[kind as usize].name)),
-        }
-    }
-
+/// Recipes with their variables expanded and their ingredients and outputs resolved, by kind.
+fn freeze_recipes(
+    g: &mut Game,
+    recipes: Vec<RawRecipe>,
+    items: &[crate::content::ItemDef],
+    item_names: &FxHashMap<String, u32>,
+    c: &Components,
+    conds: &mut crate::conditions::Texts,
+    errors: &mut Vec<String>,
+) {
     // The tags items carry, what `{m}` in a recipe goes through.
     let tag_names: FxHashMap<&str, u32> = (1..items.len() as u32)
         .flat_map(|i| c.of(comps::ITEM, i))
@@ -2317,19 +2592,37 @@ pub fn freeze(
         let input_counts = (0..inputs.len())
             .map(|i| r.input_counts.get(i).copied().unwrap_or(1).max(1))
             .collect();
-        let mut outputs = vec![RecipeOutput { what: Ingredient::Item(output), count: r.count, chance: 1.0 }];
-        for (name, count, chance) in &r.outputs {
-            match one(name).map(Ingredient::Item) {
-                Ok(w) => outputs.push(RecipeOutput { what: w, count: *count, chance: chance.clamp(0.0, 1.0) }),
-                Err(e) => errors.push(format!("recipe for {}: output: {e}", r.output)),
+        // A tag stands for its first item here as in the main output.
+        let mut pools = r.outputs;
+        for e in pools.iter_mut().flat_map(|p| &mut p.entries) {
+            if e.item.starts_with('#') {
+                match one(&e.item) {
+                    Ok(i) => e.item = items[i as usize].name.clone(),
+                    Err(err) => errors.push(format!("recipe for {}: output: {err}", r.output)),
+                }
             }
+        }
+        let extras = crate::loot::Resolve { items: item_names, conds: &mut *conds }.pools(&pools, errors, &r.output);
+        let mut outputs = vec![RecipeOutput { what: Ingredient::Item(output), count: r.count, chance: 1.0 }];
+        for p in &extras.pools {
+            let total = p.entries.iter().map(|e| e.weight).sum::<u32>().max(1) as f32;
+            let rolls = (p.rolls.0 + p.rolls.1) as f32 / 2.0;
+            outputs.extend(
+                p.entries
+                    .iter()
+                    .filter(|e| e.item != 0)
+                    .map(|e| RecipeOutput {
+                        what: Ingredient::Item(e.item),
+                        count: e.max,
+                        chance: (e.weight as f32 / total * rolls).min(1.0),
+                    }),
+            );
         }
         g.recipes
             .entry(r.kind)
             .or_default()
-            .push(Recipe { shaped, inputs, input_counts, outputs, time: r.time, entry: r.entry });
+            .push(Recipe { shaped, inputs, input_counts, outputs, extras, time: r.time, entry: r.entry });
     }
-    g
 }
 
 impl Game {
@@ -2513,6 +2806,17 @@ fn engine_particles() -> Vec<RawEntry> {
         kind(k::BUBBLE, one("bubble"), [[0.5, 1.5], [0.05, 0.1]], [-4.0, 0.85], white, 0)
             .set(p::RULES, rule(pe::LEAVE_LIQUID, pt::DIE, "")),
         kind(k::SPLASH, one("splash"), [[0.2, 0.5], [0.08, 0.14]], [16.0, 0.98], white, pf::COLLIDE),
+        // Rising swirls around who has an effect, tinted by the effect's color.
+        kind(
+            k::EFFECT,
+            (0..8)
+                .map(|i| format!("core:particle/effect_{}", 7 - i))
+                .collect(),
+            [[0.8, 1.4], [0.08, 0.12]],
+            [-0.6, 0.96],
+            white,
+            0,
+        ),
         // Splashes where it lands, as vanilla's falling drip turns into a landing one.
         kind(k::DRIP, one("drip"), [[0.8, 1.2], [0.04, 0.06]], [16.0, 0.98], white, 0)
             .set(p::RULES, rule(pe::LAND, pt::BECOME_STILL, k::SPLASH)),
@@ -2640,7 +2944,7 @@ fn expand_variables(r: RawRecipe, tags: &FxHashMap<&str, u32>) -> Result<Vec<Raw
         .map(|k| &k.1)
         .chain(&r.inputs)
         .chain(std::iter::once(&r.output))
-        .chain(r.outputs.iter().map(|o| &o.0))
+        .chain(r.outputs.iter().flat_map(|p| &p.entries).map(|e| &e.item))
         .collect();
     let Some(pattern) = names
         .iter()
@@ -2677,7 +2981,18 @@ fn expand_variables(r: RawRecipe, tags: &FxHashMap<&str, u32>) -> Result<Vec<Raw
                 output: sub(&r.output),
                 count: r.count,
                 time: r.time,
-                outputs: r.outputs.iter().map(|o| (sub(&o.0), o.1, o.2)).collect(),
+                outputs: r
+                    .outputs
+                    .iter()
+                    .map(|p| abi::LootPool {
+                        entries: p
+                            .entries
+                            .iter()
+                            .map(|e| abi::LootEntry { item: sub(&e.item), ..e.clone() })
+                            .collect(),
+                        ..p.clone()
+                    })
+                    .collect(),
                 entry: r.entry,
             });
         }

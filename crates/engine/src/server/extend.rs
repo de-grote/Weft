@@ -198,39 +198,43 @@ impl Dim {
     }
 }
 
-/// The engine's attributes come first in the registry (`registry::freeze`).
-pub const MAX_HEALTH: u32 = 0;
-pub const MOVEMENT_SPEED: u32 = 1;
-
-pub const JUMP_STRENGTH: u32 = 3;
-pub const ATTACK_SPEED: u32 = 4;
-pub const CAN_SPRINT: u32 = 5;
-pub const BLOCK_REACH: u32 = 6;
-pub const ENTITY_REACH: u32 = 7;
-pub const MINING_SPEED: u32 = 8;
-pub const FOV: u32 = 9;
-pub const CAN_FLY: u32 = 10;
-
 impl Dim {
-    /// A player's base of an attribute that is a rule is the rule's (`comp::attribute::RULE`).
+    /// Its kind's own base of an attribute, else the world's rule if the attribute is one
+    /// (`comp::attribute::RULE`), else the attribute's default.
     fn base_attribute(&self, c: &Content, entity: u64, attr: u32) -> Option<f64> {
         let e = self.entities.get(entity)?;
-        if let Some(rule) = c.game.attr_rules[attr as usize].filter(|_| e.player) {
-            return Some(crate::config::get(rule));
-        }
         let def = &c.game.attributes[attr as usize];
         let own = def.comp.and_then(|id| {
             c.components
                 .get::<f64>(crate::components::ENTITY, e.kind, id)
         });
-        Some(own.unwrap_or(def.default))
+        let rule = c.game.attr_rules[attr as usize].map(crate::config::get);
+        Some(own.or(rule).unwrap_or(def.default))
     }
 
     fn modifiers_of(&self, c: &Content, entity: u64) -> Vec<AttrMod> {
-        self.entities
+        let mut out = self
+            .entities
             .comps
             .get(&(entity, c.game.modifiers_comp))
-            .map_or_else(Vec::new, |b| decode_mods(b))
+            .map_or_else(Vec::new, |b| decode_mods(b));
+        let kind = self.entities.get(entity).map_or(u32::MAX, |e| e.kind);
+        out.extend(
+            c.source_mods
+                .kinds
+                .get(&kind)
+                .into_iter()
+                .flatten()
+                .filter(|m| m.when.is_none())
+                .map(|m| AttrMod {
+                    attr: c.game.attributes[m.attr as usize].hash,
+                    op: m.op as u8,
+                    amount: m.amount,
+                    until: 0,
+                    id: "core:kind".into(),
+                }),
+        );
+        out
     }
 
     /// Value of attribute `attr` for an entity; with `explain` the steps go to `explanation`.
@@ -239,6 +243,24 @@ impl Dim {
         let Some(base) = self.base_attribute(c, entity, attr) else { return def.default };
         if !explain {
             let (mut add, mut mul_base, mut mul_total, mut set) = (0.0, 0.0, 1.0, None);
+            // A kind's own modifiers hold whatever it is (a dropped stack is invulnerable from
+            // its first tick); `keep_sources` keeps the ones under conditions.
+            let kind = self.entities.get(entity).map_or(u32::MAX, |e| e.kind);
+            for m in c
+                .source_mods
+                .kinds
+                .get(&kind)
+                .into_iter()
+                .flatten()
+                .filter(|m| m.when.is_none() && m.attr == attr)
+            {
+                match m.op {
+                    abi::attr_op::ADD => add += m.amount,
+                    abi::attr_op::MULTIPLY_BASE => mul_base += m.amount,
+                    abi::attr_op::MULTIPLY_TOTAL => mul_total *= 1.0 + m.amount,
+                    _ => set = Some(m.amount),
+                }
+            }
             if let Some(b) = self.entities.comps.get(&(entity, c.game.modifiers_comp)) {
                 each_mod(b, |a, op, amount, until, _| {
                     if a == def.hash && (until == 0 || until > self.time) {
@@ -345,7 +367,39 @@ impl Dim {
         let s = &c.source_mods;
         let Some(e) = self.entities.get(id) else { return };
         let (kind, pose, pos, mode, body) = (e.kind, e.pose, e.pos, e.mode, e.body());
-        let mut from: Vec<SourceMod> = s.kinds.get(&kind).cloned().unwrap_or_default();
+        let mut from: Vec<SourceMod> = s
+            .kinds
+            .get(&kind)
+            .into_iter()
+            .flatten()
+            .filter(|m| m.when.is_some())
+            .cloned()
+            .collect();
+        let comp = c.game.fields.effect;
+        let on: Vec<_> = crate::world::effects_on(self.entities.comps.get(&(id, comp)).map(|b| &b[..]), self.time).collect();
+        if on.len() * 16 != self.entities.comps.get(&(id, comp)).map_or(0, |b| b.len()) {
+            // Emptied, not removed: a removed component never reaches clients.
+            self.entities
+                .comps
+                .insert((id, comp), crate::world::encode_effects(&on));
+            self.entities.dirty_comp.insert((id, comp));
+        }
+        // An effect's at its level: for each attribute those given for the highest level up to
+        // it, else the others times the level (what is set is the value at every level).
+        for f in &on {
+            let all = s.effects.get(&f.id).map_or(&[][..], |v| &v[..]);
+            let given = |attr: u32| {
+                all.iter()
+                    .filter(|o| o.attr == attr && o.level > 0 && o.level <= f.level)
+                    .map(|o| o.level)
+                    .max()
+            };
+            from.extend(all.iter().filter_map(|m| match (m.level, given(m.attr)) {
+                (l, Some(at)) if l == at => Some(*m),
+                (0, None) => Some(SourceMod { amount: if m.op == abi::attr_op::SET { m.amount } else { m.amount * f.level as f64 }, ..*m }),
+                _ => None,
+            }));
+        }
         from.extend(s.modes.get(&(mode.0 as u32)).into_iter().flatten());
         from.extend(s.poses.get(&(pose.0 as u32)).into_iter().flatten());
         let held = self.entities.held(id).item;
@@ -418,7 +472,7 @@ impl Dim {
 
     /// The only maximum health there is: the attribute (the kind's value plus modifiers).
     pub fn max_health(&self, c: &Content, entity: u64) -> f32 {
-        self.attribute(c, entity, MAX_HEALTH, false) as f32
+        self.attribute(c, entity, crate::registry::attr::MAX_HEALTH, false) as f32
     }
 
     /// Attribute by name, the default for unknown entities, NaN for unknown names.
@@ -440,6 +494,17 @@ impl Dim {
         entity: u64,
     ) -> Vec<weft_abi::ItemStack> {
         let Some(t) = c.loot.get(table) else { return Vec::new() };
+        self.roll_table(c, t, ctx, pos, entity)
+    }
+
+    pub fn roll_table(
+        &mut self,
+        c: &'static Content,
+        t: &crate::loot::Table,
+        ctx: &crate::loot::Ctx,
+        pos: glam::DVec3,
+        entity: u64,
+    ) -> Vec<weft_abi::ItemStack> {
         let ask = crate::conditions::Ask { pos, entity, state: ctx.state, loot: Some(ctx), ..Default::default() };
         let me = std::cell::RefCell::new(self);
         let mut rng = || me.borrow_mut().random_unit();

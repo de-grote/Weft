@@ -59,7 +59,6 @@ pub mod game_mode {
     pub static NO_BREAK: Tag<GameMode> = Tag::named(g::NO_BREAK);
     pub static NO_PLACE: Tag<GameMode> = Tag::named(g::NO_PLACE);
     pub static NO_COSTS: Tag<GameMode> = Tag::named(g::NO_COSTS);
-    pub static INVULNERABLE: Tag<GameMode> = Tag::named(g::INVULNERABLE);
     pub static ALWAYS_FLY: Tag<GameMode> = Tag::named(g::ALWAYS_FLY);
     pub static NOCLIP: Tag<GameMode> = Tag::named(g::NOCLIP);
     pub static NO_INTERACT: Tag<GameMode> = Tag::named(g::NO_INTERACT);
@@ -103,6 +102,15 @@ pub mod entity_effect {
     use crate::kind::EntityEffect;
     use crate::{Component, Text};
     pub static SHADER: Component<Text, EntityEffect> = Component::named(crate::abi::comp::ENTITY_EFFECT_SHADER);
+    pub static HAZARDS: Component<Vec<crate::abi::Hazard>, EntityEffect> = Component::named(crate::abi::comp::ENTITY_EFFECT_HAZARDS);
+    pub static MODIFIERS: Component<Vec<crate::abi::Modifier>, EntityEffect> = Component::named(crate::abi::comp::MODIFIERS);
+    pub static ICON: Component<Text, EntityEffect> = Component::named(crate::abi::comp::ENTITY_EFFECT_ICON);
+    pub static COLOR: Component<u32, EntityEffect> = Component::named(crate::abi::comp::ENTITY_EFFECT_COLOR);
+    pub static BENEFICIAL: crate::Tag<EntityEffect> = crate::Tag::named(crate::abi::comp::ENTITY_EFFECT_BENEFICIAL);
+    pub static HARMFUL: crate::Tag<EntityEffect> = crate::Tag::named(crate::abi::comp::ENTITY_EFFECT_HARMFUL);
+    pub static INSTANT: crate::Tag<EntityEffect> = crate::Tag::named(crate::abi::comp::ENTITY_EFFECT_INSTANT);
+    pub static SCREEN: Component<Text, EntityEffect> = Component::named(crate::abi::comp::ENTITY_EFFECT_SCREEN);
+    pub static HIDES: crate::Tag<EntityEffect> = crate::Tag::named(crate::abi::comp::ENTITY_EFFECT_HIDES);
 }
 
 /// What a sound event is made of (`abi::comp::sound`).
@@ -308,7 +316,7 @@ pub mod recipe {
     pub static OUTPUT: Component<Text, Recipe> = Component::named(r::OUTPUT);
     pub static COUNT: Component<u32, Recipe> = Component::named(r::COUNT);
     pub static TIME: Component<u32, Recipe> = Component::named(r::TIME);
-    pub static OUTPUTS: Component<Vec<crate::abi::RecipeOutput>, Recipe> = Component::named(r::OUTPUTS);
+    pub static OUTPUTS: Component<Vec<crate::abi::LootPool>, Recipe> = Component::named(r::OUTPUTS);
 }
 
 /// What a loot table is made of.
@@ -337,6 +345,7 @@ pub mod ore {
     pub static VEINS: Component<u32, Ore> = Component::named(o::VEINS);
     pub static SIZE: Component<u32, Ore> = Component::named(o::SIZE);
     pub static SHAPE: Component<abi::VeinShape, Ore> = Component::named(o::SHAPE);
+    pub static STEPS: Component<Vec<abi::ShapeStep>, Ore> = Component::named(o::STEPS);
     pub static HEIGHT: Component<abi::OreHeight, Ore> = Component::named(o::HEIGHT);
     pub static REPLACES: Component<crate::Matcher, Ore> = Component::named(o::REPLACES);
     pub static REPLACES_WITH: Component<Vec<abi::OreVariant>, Ore> = Component::named(o::REPLACES_WITH);
@@ -399,6 +408,7 @@ pub mod structure {
     pub static SPACING: Component<u32, Structure> = Component::named(s::SPACING);
     pub static CHANCE: Component<f32, Structure> = Component::named(s::CHANCE);
     pub static BURIED: Component<i32, Structure> = Component::named(s::BURIED);
+    pub static TURNS: crate::Tag<Structure> = crate::Tag::named(s::TURNS);
 }
 
 /// A template's blocks.
@@ -476,6 +486,7 @@ pub mod dimension {
     use crate::abi::{self, comp::dimension as d};
     use crate::kind::Dimension;
     pub static GENERATOR: Component<abi::Callback, Dimension> = Component::named(d::GENERATOR);
+    pub static HAZARDS: Component<Vec<abi::Hazard>, Dimension> = Component::named(d::HAZARDS);
     pub static SPAWN: Component<abi::Callback, Dimension> = Component::named(d::SPAWN);
     pub static COLUMN: Component<abi::Callback, Dimension> = Component::named(d::COLUMN);
     pub static CUBES: Component<[i32; 2], Dimension> = Component::named(d::CUBES);
@@ -527,6 +538,7 @@ pub mod block {
     pub static SIGNAL: Component<abi::SignalDesc, Block> = Component::named(b::SIGNAL);
     pub static LIQUID_WALLS: Component<u8, Block> = Component::named(b::LIQUID_WALLS);
     pub static PIECES: Component<Vec<abi::Piece>, Block> = Component::named(b::PIECES);
+    pub static CELLS: Component<Vec<[i32; 3]>, Block> = Component::named(b::CELLS);
     pub static RULES: Component<Vec<abi::BlockRule>, Block> = Component::named(b::RULES);
     pub static HAZARDS: Component<Vec<abi::Hazard>, Block> = Component::named(b::HAZARDS);
 }
@@ -539,6 +551,7 @@ pub mod entity {
     use crate::abi::{self, comp::entity as e};
     use crate::kind::Entity;
     pub static SIZE: Component<abi::BodySize, Entity> = Component::named(e::SIZE);
+    pub static HAZARDS: Component<Vec<abi::Hazard>, Entity> = Component::named(e::HAZARDS);
     pub static EYE: Component<f32, Entity> = Component::named(e::EYE);
     pub static SPEED: Component<f32, Entity> = Component::named(e::SPEED);
     pub static CARRY_HEIGHT: Component<f32, Entity> = Component::named(e::CARRY_HEIGHT);
@@ -551,6 +564,8 @@ pub mod entity {
     pub static TEMPLATE: Component<Text, Entity> = Component::named(e::TEMPLATE);
     pub static BLOCK: Component<Text, Entity> = Component::named(e::BLOCK);
     pub static SEATS: Component<Vec<abi::Seat>, Entity> = Component::named(e::SEATS);
+    pub static LIGHT_AT: Component<[f32; 3], Entity> = Component::named(e::LIGHT_AT);
+    pub static SHOWN_SLOTS: Component<Vec<u32>, Entity> = Component::named(e::SHOWN_SLOTS);
     pub static ATTACH: Component<Vec<abi::Attach>, Entity> = Component::named(e::ATTACH);
     pub static ON_TICK: Component<abi::Callback, Entity> = Component::named(e::ON_TICK);
     pub static ON_INTERACT: Component<abi::Callback, Entity> = Component::named(e::ON_INTERACT);

@@ -316,6 +316,7 @@ macro_rules! schema_data {
     };
 }
 schema_data!(
+    ShapeStep,
     ItemStack,
     Mounting,
     Worn,
