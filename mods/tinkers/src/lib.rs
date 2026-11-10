@@ -11,6 +11,7 @@ static TINKER_MATS_TAB: CreativeTab = CreativeTab::named("tinkers_materials");
 static IRON_PICKAXE: Item = Item::named("base:iron_pickaxe");
 static PICKAXE: Item = Item::named("pickaxe");
 static AXE: Item = Item::named("axe");
+static SHOVEL: Item = Item::named("shovel");
 
 static WORKBENCH: Block = Block::named("workbench");
 static WORKBENCH_RECIPE: RecipeKind = RecipeKind::named("workbench");
@@ -25,7 +26,7 @@ static PART_BUILDER_MENU: Menu = Menu::named("part_builder");
 // static PICKAXE_HEAD: Tag = Tag::named("pickaxe_head");
 
 static GENERATED_ITEMS: OnceLock<HashMap<String, &'static Item>> = OnceLock::new();
-const COMPONENTS: &[&str] = &["rod", "binding", "pickaxe_head", "axe_head"];
+const COMPONENTS: &[&str] = &["rod", "binding", "pickaxe_head", "axe_head", "shovel_head"];
 
 #[derive(Debug, Clone, Copy)]
 struct MaterialInfo {
@@ -54,6 +55,7 @@ fn init(r: &mut Registry) {
     r.recipe_kind(&WORKBENCH_RECIPE).inputs(1, 3).outputs(1, 1);
     r.shaped(&WORKBENCH_RECIPE, PICKAXE.name(), 1, &["h", "b", "r"], &[('h', "#pickaxe_head"), ('b', "#binding"), ('r', "#rod")]);
     r.shaped(&WORKBENCH_RECIPE, AXE.name(), 1, &["h", "b", "r"], &[('h', "#axe_head"), ('b', "#binding"), ('r', "#rod")]);
+    r.shaped(&WORKBENCH_RECIPE, SHOVEL.name(), 1, &["h", "b", "r"], &[('h', "#shovel_head"), ('b', "#binding"), ('r', "#rod")]);
 
     r.block(&WORKBENCH)
         .tab(&TINKER_TAB)
@@ -110,6 +112,12 @@ fn init(r: &mut Registry) {
         .texture("axe")
         .max_stack(1);
 
+    r.item(&SHOVEL)
+        .tool("shovel", 0)
+        .tab(&TINKER_TAB)
+        .texture("shovel")
+        .max_stack(1);
+
     r.menu(&WORKBENCH_MENU)
         .group("head", Slots::single().accepts("tool_head"))
         .group("binding", Slots::single().accepts("binding"))
@@ -139,7 +147,7 @@ fn init(r: &mut Registry) {
 
     r.menu(&PART_BUILDER_MENU)
         .group("input", Slots::single())
-        .group("output", Slots::grid(4, 1).output())
+        .group("output", Slots::grid(3, 2).output())
         .player_inventory()
         .recipes(&PART_BUILDER_RECIPE)
         .on_change(craft_result_part_builder)
@@ -186,6 +194,11 @@ fn craft_result_workbench(m: &MenuCtx) {
             ("rod", Some(rod_mat.color)),
             ("axe_head", Some(head_mat.color)),
             ("axe_binding", Some(binding_mat.color)),
+        ]),
+        "shovel" => with_tool_components(ItemStack::new(SHOVEL.id(), 1), head_mat, binding_mat, rod_mat).with_layers(&[
+            ("small_rod", Some(rod_mat.color)),
+            ("shovel_head", Some(head_mat.color)),
+            ("shovel_binding", Some(binding_mat.color)),
         ]),
         _ => {
             error!("unknown tool");
