@@ -1,5 +1,3 @@
-use std::{collections::HashMap, sync::OnceLock};
-
 use base_api::CRAFTING;
 use weft_sdk::*;
 
@@ -21,11 +19,6 @@ static PART_BUILDER: Block = Block::named("part_builder");
 static PART_BUILDER_RECIPE: RecipeKind = RecipeKind::named("part_builder");
 static PART_BUILDER_MENU: Menu = Menu::named("part_builder");
 
-// static ROD: Tag = Tag::named("rod");
-// static BINDING: Tag = Tag::named("binding");
-// static PICKAXE_HEAD: Tag = Tag::named("pickaxe_head");
-
-static GENERATED_ITEMS: OnceLock<HashMap<String, &'static Item>> = OnceLock::new();
 const COMPONENTS: &[&str] = &["rod", "binding", "pickaxe_head", "axe_head", "shovel_head"];
 
 #[derive(Debug, Clone, Copy)]
@@ -36,6 +29,7 @@ struct MaterialInfo {
     level: u32,
     speed: f32,
 }
+
 static MATERIALS: &[MaterialInfo] = &[
     MaterialInfo { name: "wood", color: 0x8B4513, durability: 20, level: tool_tier::WOOD, speed: 2.0 },
     MaterialInfo { name: "stone", color: 0x708090, durability: 45, level: tool_tier::STONE, speed: 4.0 },
@@ -51,6 +45,10 @@ fn init(r: &mut Registry) {
     r.recipe_kind(&PART_BUILDER_RECIPE)
         .inputs(1, 1)
         .outputs(1, 1);
+
+    for component in COMPONENTS {
+        r.shapeless(&PART_BUILDER_RECIPE, &format!("#{component}/{{m}}"), 1, &["#materials/{m}"], 0);
+    }
 
     r.recipe_kind(&WORKBENCH_RECIPE).inputs(1, 3).outputs(1, 1);
     r.shaped(&WORKBENCH_RECIPE, PICKAXE.name(), 1, &["h", "b", "r"], &[('h', "#pickaxe_head"), ('b', "#binding"), ('r', "#rod")]);
@@ -77,32 +75,28 @@ fn init(r: &mut Registry) {
         .bottom("base:crafting_table_bottom");
     r.shaped(&CRAFTING, PART_BUILDER.name(), 1, &["ppp", "lil", "lll"], &[('p', "#paper"), ('l', "#planks"), ('i', "#ingots/iron")]);
 
-    let mut generated_items = HashMap::new();
     for material in MATERIALS.iter() {
         for &component in COMPONENTS {
             let name = format!("{}_{}", &material.name, component);
             let item = Item::generated(name.clone());
-            generated_items.insert(name.clone(), item);
-            r.shapeless(&PART_BUILDER_RECIPE, &name, 1, &[], 0);
 
             let mut ib = r
                 .item(item)
                 .tab(&TINKER_MATS_TAB)
                 .texture(component)
                 .tint(material.color)
-                .tag(&component)
+                .tag(&format!("{}/{}", component, material.name))
                 .tag(&format!("tinkers/{}", material.name));
             if component.ends_with("head") {
                 ib = ib.tag("tool_head");
+            } else {
+                ib = ib.tag(component);
             }
             if component == "rod" {
                 ib = ib.tag("stick");
             }
         }
     }
-    let Ok(_) = GENERATED_ITEMS.set(generated_items) else {
-        panic!("failed to save generated items");
-    };
 
     r.item(&PICKAXE)
         .tool("pickaxe", 0)
@@ -218,8 +212,7 @@ fn craft_result_workbench(m: &MenuCtx) {
         ),
         _ => {
             error!("unknown tool");
-            m.group("result").set(0, ItemStack::EMPTY);
-            return;
+            ItemStack::EMPTY
         }
     };
 
@@ -260,24 +253,14 @@ fn consume_grid_workbench(m: &MenuCtx) {
 fn craft_result_part_builder(m: &MenuCtx) {
     let input = m.group("input").get(0);
     let output = m.group("output");
-    let tags = [("planks", "wood"), ("stone", "stone"), ("ingots/gold", "gold"), ("ingots/iron", "iron"), ("gems/diamond", "diamond")];
-    for (tag, material) in tags {
-        if item_has_tag(input.item, tag) {
-            for i in 0..COMPONENTS.len() {
-                if let Some(item) = GENERATED_ITEMS
-                    .get()
-                    .unwrap()
-                    .get(&format!("{}_{}", material, COMPONENTS[i]))
-                {
-                    output.set(i as u32, ItemStack::new(item.id(), 1));
-                }
-            }
-            return;
-        }
-    }
-    // clear
+
+    let mut found = recipes_for(&PART_BUILDER_RECIPE, std::slice::from_ref(&input));
     for i in 0..COMPONENTS.len() {
-        output.set(i as u32, ItemStack::EMPTY);
+        let out = found
+            .next()
+            .and_then(|r| r.outputs().first().map(|o| o.0))
+            .unwrap_or_default();
+        output.set(i as u32, out);
     }
 }
 
