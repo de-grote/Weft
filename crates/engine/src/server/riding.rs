@@ -303,7 +303,7 @@ impl Dim {
         let fell = super::entity::track_fall(&mut m.fall, dy, on_ground, m.in_liquid);
         if let Some(f) = fell {
             if let Some(amount) = self.fall_damage(c, mount, f) {
-                self.damage(c, mount, amount, 0, abi::damage_cause::FALL);
+                self.damage(c, mount, &abi::Damage::new(amount, abi::damage_cause::FALL));
             }
             self.riders_fall(c, mount, f);
         }
@@ -327,7 +327,7 @@ impl Dim {
             .collect();
         for r in riders {
             if let Some(amount) = self.fall_damage(c, r, fell) {
-                self.damage(c, r, amount, 0, abi::damage_cause::FALL);
+                self.damage(c, r, &abi::Damage::new(amount, abi::damage_cause::FALL));
             }
         }
     }

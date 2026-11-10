@@ -276,7 +276,7 @@ fn summon(s: &mut Server, x: &Ctx) -> Vec<Msg> {
     }
     let r = s.dims[me.0 as usize].ensure_region(c, pos);
     for _ in 0..count {
-        r.spawn(c, kind, pos);
+        r.spawn_by(c, kind, pos, weft_abi::spawn_cause::COMMAND, |_| {});
     }
     say("summon.done", vec![int(count), text(&kname)])
 }
@@ -289,7 +289,7 @@ fn clear(s: &mut Server, x: &Ctx) -> Vec<Msg> {
         let who = x.targets(s, "who");
         for &(d, id) in &who {
             if let Some(r) = s.dims[d as usize].entity_region(id) {
-                r.damage(c, id, f32::MAX, 0, damage::VOID);
+                r.damage(c, id, &weft_abi::Damage::new(f32::MAX, damage::VOID));
             }
         }
         return say("clear.killed", vec![int(who.len())]);

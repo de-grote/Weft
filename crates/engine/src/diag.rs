@@ -504,7 +504,7 @@ pub fn install_crash_handler(run_dir: &std::path::Path) {
         write_report(&format!("panic{at}: {msg}"));
         previous(info);
     }));
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     native::install();
 }
 
@@ -587,5 +587,53 @@ mod native {
         }
         // Let Windows end the process as it would have.
         0
+    }
+}
+
+/// Linux has no exception filter: these arrive as signals instead. The report is written from
+/// the handler, then the default action is put back and the signal raised again, so the process
+/// still dies with the same signal it would have.
+///
+/// Writing the report is not async-signal-safe (it allocates, takes the log lock and reads the
+/// backtrace), so this is best effort like the Windows filter: a fault taken while one of those
+/// locks is held reports as much as it can and then re-raises.
+#[cfg(target_os = "linux")]
+mod native {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    pub fn install() {
+        // SAFETY: `sa_sigaction` holds a valid handler with the signature `SA_SIGINFO` asks for,
+        // and the struct is zeroed before its fields are set.
+        unsafe {
+            for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE] {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler as *const () as usize;
+                // Back to the default action on the first delivery, so the re-raise below ends
+                // the process instead of running this again.
+                action.sa_flags = libc::SA_SIGINFO | libc::SA_RESETHAND;
+                libc::sigemptyset(&mut action.sa_mask);
+                libc::sigaction(sig, &action, std::ptr::null_mut());
+            }
+        }
+    }
+
+    extern "C" fn handler(sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+        static ONCE: AtomicBool = AtomicBool::new(false);
+        if !ONCE.swap(true, Ordering::Relaxed) {
+            let name = match sig {
+                libc::SIGSEGV => "segmentation fault",
+                libc::SIGBUS => "bus error",
+                libc::SIGILL => "illegal instruction",
+                libc::SIGFPE => "arithmetic exception",
+                _ => "native signal",
+            };
+            super::write_report(&format!("{name} (signal {sig})"));
+        }
+        // SAFETY: restoring the default action and re-raising is the documented way to die from a
+        // handler; async-signal-safe.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
     }
 }

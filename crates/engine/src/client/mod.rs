@@ -66,6 +66,8 @@ pub struct LocalPlayer {
     /// sprinting or flying).
     pub eye: f64,
     pub fov_mul: f32,
+    /// The `fov` attribute (a bow drawn), eased the same way.
+    pub zoom: f32,
     /// Lower box and eyes. Stays on under a low ceiling until there is room for more.
     pub pose: Pose,
     /// A pose a mod holds it in, where it fits, and with a facing it stays put that way (a bed).
@@ -84,12 +86,11 @@ pub struct LocalPlayer {
     /// Riding a body: its id and the position relative to it at the previous and the last
     /// step. Drawn on the body as shown, so a rider and its deck never drift apart.
     pub riding: Option<(u64, DVec3, DVec3)>,
-    /// Walking speed and jump multipliers, step height and gravity multiplier from the server
-    /// (attributes).
+    /// Walking speed and jump multipliers, and what the rest of its attributes say of how it
+    /// moves, from the server.
     pub speed_mul: f64,
     pub jump_mul: f64,
-    pub step_height: f64,
-    pub gravity_mul: f64,
+    pub moves: physics::Moves,
 }
 
 pub struct ClientEntity {
@@ -101,6 +102,7 @@ pub struct ClientEntity {
     pub yaw: f32,
     pub target_yaw: f32,
     pub pitch: f32,
+    pub target_pitch: f32,
     pub item: ItemStack,
     pub health: f32,
     pub hurt: f32,
@@ -109,10 +111,13 @@ pub struct ClientEntity {
     pub held: u32,
     /// And in the other hand.
     pub off_held: u32,
-    /// Into using what it holds, 0..1, and whether with the other hand.
+    /// Into using what it holds, 0..1 (seconds for what is used until let go, `endless_use`),
+    /// and whether with the other hand.
     pub using: Option<(f32, bool)>,
     /// Ticks using it takes.
     pub use_ticks: f32,
+    /// A projectile stuck in an entity (`Client::hold_stuck`).
+    pub stuck: Option<Stuck>,
     /// How far into sneaking, 0..1: the pose fades in and out.
     pub crouched: f32,
     /// Actions a mod has play as another for now: which, as what.
@@ -162,6 +167,19 @@ pub struct ClientEntity {
     pub structure: Option<Box<ClientWorld>>,
     /// The world's light on a moving structure, by its cubes, as the server worked it out.
     pub world_light: rustc_hash::FxHashMap<IVec3, u32>,
+}
+
+/// Where a projectile sits in an entity: its frame as the server has it until it is on the body
+/// this client draws, and then in that body's.
+#[derive(Clone, Copy)]
+pub struct Stuck {
+    pub host: u64,
+    pub at: DVec3,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub on_body: bool,
+    /// The server is done with it as its host died: it stays for the host's death animation.
+    pub leaving: bool,
 }
 
 /// A picked up item reaches the taker's feet in three ticks (vanilla's pickup animation).
@@ -227,6 +245,7 @@ fn ride_step(
             // As a mob walks: this much a tick keeps it at its speed on plain ground.
             ground: target * (1.0 - 0.6 * 0.91),
             air: 0.02,
+            liquid: physics::SWIM,
             jump: if s.jump > 0.0 { s.jump as f64 * tick } else { 0.0 },
             swim: k.is(crate::tag_bits::entity::SWIMS),
             ..Default::default()
@@ -238,8 +257,8 @@ fn ride_step(
         let frame = physics::Frame {
             half_width: d.half_width,
             height: d.height,
-            step: c.game.attributes[crate::registry::attr::STEP_HEIGHT as usize].default,
             gravity: if flies || k.is(crate::tag_bits::entity::NO_GRAVITY) { 0.0 } else { physics::gravity_per_tick(gravity) },
+            moves: physics::Moves::default(),
         };
         let mut pos = m.pos;
         let r = physics::walk(c, block, bodies, mount, &mut pos, &mut drive.vel, drive.on_ground, &ctl, &frame);
@@ -309,6 +328,7 @@ impl ClientEntity {
             effects: Vec::new(),
             shown: Vec::new(),
             pitch,
+            target_pitch: pitch,
             item,
             // Arrives as a component right after: no hurt flash for the first.
             health: f32::NAN,
@@ -318,6 +338,7 @@ impl ClientEntity {
             off_held: 0,
             using: None,
             use_ticks: 0.0,
+            stuck: None,
             crouched: 0.0,
             swaps: Vec::new(),
             swing_off: false,
@@ -348,7 +369,12 @@ impl ClientEntity {
     /// Something that can be bumped into or hit, like the server's `Entity::is_body`: what isn't
     /// a thing to hit never gets here, and the dead lie there only to be seen.
     pub fn is_body(&self) -> bool {
-        self.item.is_empty() && self.dying.is_none()
+        let projectile = content()
+            .game
+            .entities
+            .get(self.kind as usize)
+            .is_some_and(|k| k.projectile.is_some());
+        self.item.is_empty() && self.dying.is_none() && !projectile
     }
 
     /// What its kind's client tick gets (`client` filled in by the caller).
@@ -493,6 +519,8 @@ pub struct Client {
     /// Seconds until holding a button repeats its action. A new press never waits.
     break_delay: f32,
     use_delay: f32,
+    /// Each action as the server last heard of it (`send_keys`).
+    keys_down: Vec<bool>,
     pub view_radius: i32,
     /// Makes the world in view from the seed (`terrain`); the server's cubes go through it.
     pub terrain: terrain::TerrainHandle,
@@ -573,6 +601,9 @@ pub struct Client {
     pub drag: Option<(u8, Vec<u32>)>,
     /// Slots shift-clicked by sweeping over them with shift and the left button held.
     pub sweep: Vec<u32>,
+    /// Slots swept over with the left button still held after picking a stack up: what they
+    /// have of it joins the cursor.
+    pub picking: Vec<u32>,
     /// The last slot pressed and when, for double clicks.
     pub last_click: Option<(u32, u8, Instant)>,
     pub particles: particles::Particles,
@@ -601,7 +632,7 @@ pub struct Client {
     frame_dt: f32,
     /// Seconds left of a lightning's flash.
     lightning: f32,
-    /// Holding the use button on an item that takes time: ticks left, ticks in all.
+    /// Holding the use button on an item that takes time: ticks held, ticks in all.
     using: Option<(f32, f32)>,
     /// Who else is mining what, and how far along.
     others_mining: Vec<crate::net::Crack>,
@@ -694,7 +725,7 @@ impl Client {
         labels.retain(|(pos, ..)| {
             let d = *pos - eye;
             let len = d.length();
-            len < 24.0 && (len < 0.2 || physics::raycast(c, &opaque, eye, d / len, len - 0.1, false).is_none())
+            len < 24.0 && (len < 0.2 || physics::raycast(c, &opaque, eye, d / len, len - 0.1, weft_abi::ray::BLOCKS).is_none())
         });
         (self.gizmo_lines, self.gizmo_fills, self.gizmo_labels) = (lines, fills, labels);
     }
@@ -781,6 +812,7 @@ impl Client {
                 jump_cooldown: 0,
                 eye: 1.62,
                 fov_mul: 1.0,
+                zoom: 1.0,
                 pose: Pose::STAND,
                 forced: None,
                 sprinting: false,
@@ -796,9 +828,8 @@ impl Client {
                 in_liquid: false,
                 climbing: false,
                 speed_mul: 1.0,
-                step_height: 0.6,
-                gravity_mul: 1.0,
                 jump_mul: 1.0,
+                moves: physics::Moves::default(),
             },
             joined: false,
             player_id: 0,
@@ -823,6 +854,7 @@ impl Client {
             disconnected: None,
             break_delay: 0.0,
             use_delay: 0.0,
+            keys_down: Vec::new(),
             view_radius,
             terrain: terrain::spawn(gpu_tx, gpu_on.clone()),
             lod: lod::Lod::new(gpu_terrain.lod_tx.clone()),
@@ -854,6 +886,7 @@ impl Client {
             rng: weft_noise::Rng(0x9E37_79B9_7F4A_7C15),
             drag: None,
             sweep: Vec::new(),
+            picking: Vec::new(),
             last_click: None,
             players: Vec::new(),
             sent: Vec::new(),
@@ -996,6 +1029,8 @@ impl Client {
 
     pub fn close_menu(&mut self) {
         self.drag = None;
+        self.sweep.clear();
+        self.picking.clear();
         if self.menu.take().is_some() {
             self.conn.send(ToServer::CloseMenu);
         }
@@ -1148,6 +1183,7 @@ impl Client {
         let wider = if self.player.flying { 0.1 } else { 0.0 } + if self.player.sprinting { 0.15 } else { 0.0 };
         let fov_target = 1.0 + wider * self.fov_effects;
         self.player.fov_mul += (fov_target - self.player.fov_mul) * k as f32;
+        self.player.zoom += (self.attribute(crate::registry::attr::FOV) - self.player.zoom) * k as f32;
         self.camera_keys(input);
     }
 
@@ -1414,7 +1450,31 @@ impl Client {
         }
     }
 
+    /// The server hears every action go down and up (`event::KEY`), what the world has of the
+    /// input: none while a screen has it.
+    fn send_keys(&mut self, input: &Input) {
+        let keys = &content().game.keys;
+        self.keys_down.resize(keys.len(), false);
+        let (mut down, mut up) = (Vec::new(), Vec::new());
+        let world = input.captured && !self.dead;
+        for (i, k) in keys.iter().enumerate() {
+            let now = world && input.held(&k.name);
+            if now != self.keys_down[i] {
+                self.keys_down[i] = now;
+                if now { down.push(i as u32) } else { up.push(i as u32) }
+            } else if !now && world && input.pressed(&k.name) {
+                // Down and up within a frame (a wheel notch, a tap): both still count.
+                down.push(i as u32);
+                up.push(i as u32);
+            }
+        }
+        if self.joined && !(down.is_empty() && up.is_empty()) {
+            self.conn.send(ToServer::Keys { down, up });
+        }
+    }
+
     fn act(&mut self, input: &Input, dt: f64, look: DVec3) {
+        self.send_keys(input);
         self.break_delay -= dt as f32;
         self.use_delay -= dt as f32;
         // The server judges actions by where the player looks, which it only hears 20 times a
@@ -1519,12 +1579,114 @@ impl Client {
         (at - cell.as_dvec3()).as_vec3().to_array()
     }
 
+    /// Whether the ground around the player is drawn, columns `reach` cubes about: what a
+    /// picture of the world is needed for no longer (the rest comes in from far away, as it does
+    /// anyway).
+    pub fn near_shown(&self, reach: i32) -> bool {
+        let at = crate::world::cube_of(self.player.pos.floor().as_ivec3());
+        self.joined
+            && (-reach..=reach).all(|x| {
+                (-reach..=reach).all(|z| {
+                    self.world
+                        .column_shown(glam::IVec2::new(at.x + x, at.z + z), self.seed)
+                })
+            })
+    }
+
+    /// The held block used on `hit`, shown placed at once where the server will put it
+    /// (`Dim::place_clicked`, `Dim::place`), as vanilla's client does: placing doesn't wait for the
+    /// server, nor does the player fall into the cell meanwhile. Only what is sure here: a block
+    /// alone in its cell, in one cell, held up by nothing, into air or what it replaces, not into
+    /// the player. The server sends the cell back as it is either way. Where it went.
+    fn predict_place(&mut self, hit: &Hit, at: [f32; 3], look: [f32; 3], sneak: bool) -> Option<IVec3> {
+        use crate::content::{AIR, Then, When};
+        let c = content();
+        let held = self.held();
+        let state = c
+            .items
+            .get(held.item as usize)
+            .and_then(|i| i.block)
+            .filter(|_| hit.frame == 0 && !held.is_empty() && !self.mode.has(crate::tag_bits::game_mode::NO_PLACE))?;
+        // A block that takes the click itself goes first.
+        let clicked = c.block_of(hit.state);
+        if (clicked.cb.on_use.is_some() || clicked.opens.is_some()) && (!sneak || clicked.sneak_use == weft_abi::sneak_use::ALWAYS) {
+            return None;
+        }
+        let replaceable = |s: u32| c.states[s as usize].flags & bf::REPLACEABLE != 0;
+        let cell = |p: IVec3| -> Option<Vec<u32>> {
+            let main = self.world.block_or_air(p)?;
+            Some(
+                std::iter::once(main)
+                    .chain(self.world.extras(p).iter().copied())
+                    .filter(|&s| s != AIR)
+                    .collect(),
+            )
+        };
+        let replacing = replaceable(self.world.block(hit.block)) && cell(hit.block)?.iter().all(|&s| replaceable(s));
+        let (axis, up) = ((hit.face / 2) as usize, hit.face % 2 == 1);
+        let mut point = at;
+        point[axis] = if replacing { if up { 1e-3 } else { 1.0 - 1e-3 } } else { at[axis] + if up { 1e-3 } else { -1e-3 } };
+        // Into the clicked cell's own room (a slab's other half): the server's to work out.
+        if !replacing && (0.0..1.0).contains(&point[axis]) {
+            return None;
+        }
+        let normal = crate::world::DIRS[hit.face as usize];
+        let (p, local) =
+            if replacing { (hit.block, point) } else { (hit.block + normal, std::array::from_fn(|a| point[a] - normal[a] as f32)) };
+        let def = c.block_of(state);
+        let mut chosen = def.first_state;
+        if let Some((owner, cb)) = def.cb.placement {
+            let mut args = weft_abi::PlaceArgs {
+                pos: p.to_array().into(),
+                face: hit.face as u32,
+                look,
+                state: def.first_state,
+                first: def.first_state,
+                hit: local,
+                placed: 0,
+            };
+            crate::host::invoke(owner, cb, &mut args);
+            chosen = args.state;
+            if !(def.first_state..def.first_state + def.states).contains(&chosen) {
+                return None;
+            }
+        }
+        let st = &c.states[chosen as usize];
+        let held_up = st
+            .rules
+            .iter()
+            .any(|r| matches!(r.when, When::Neighbor(_)) && matches!(r.then, Then::Break | Then::Shed(_)));
+        if !st.cells.is_empty() || held_up {
+            return None;
+        }
+        if cell(p)?
+            .iter()
+            .any(|&s| !replaceable(s) || c.states[s as usize].liquid.is_some() || c.states[s as usize].block == st.block)
+        {
+            return None;
+        }
+        let mut shape = Vec::new();
+        physics::boxes(c, chosen, &mut shape);
+        let d = self.player.dims();
+        let me = physics::Aabb::around(self.player.pos, d.half_width, d.height);
+        let at = p.as_dvec3();
+        if shape
+            .iter()
+            .any(|b| physics::Aabb { min: at + DVec3::new(b[0], b[1], b[2]), max: at + DVec3::new(b[3], b[4], b[5]) }.intersects(&me))
+        {
+            return None;
+        }
+        self.world.set_block(p, chosen);
+        self.world.set_extras(p, Vec::new());
+        Some(p)
+    }
+
     fn use_held(&mut self, input: &Input, dt: f64, look: DVec3, send_look: &mut LookOnce) {
-        if let Some((left, _)) = &mut self.using {
-            *left = (*left - dt as f32 * self.tick_rate as f32).max(0.0);
+        if let Some((held, _)) = &mut self.using {
+            *held += dt as f32 * self.tick_rate as f32;
+            // The server hears the button go up with the other keys (`send_keys`).
             if !input.held("core:use") {
                 self.using = None;
-                self.conn.send(ToServer::StopUsing);
             }
         } else if input.pressed("core:use") || (input.held("core:use") && self.use_delay <= 0.0) {
             send_look.send(&mut self.conn);
@@ -1533,14 +1695,17 @@ impl Client {
             } else if let Some(hit) = self.target {
                 let sneak = input.held("core:sneak");
                 let at = self.hit_point(&hit, hit.block);
+                let look = look.as_vec3().to_array();
+                let placed = self.predict_place(&hit, at, look, sneak);
                 self.conn.send(ToServer::Use {
                     pos: hit.block,
                     part: hit.state,
                     face: hit.face,
-                    look: look.as_vec3().to_array(),
+                    look,
                     hit: at,
                     sneak,
                     frame: hit.frame,
+                    placed,
                 });
             } else {
                 self.conn.send(ToServer::UseItem { target: None });
@@ -1624,14 +1789,24 @@ impl Client {
                 dyaw = (dyaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
             }
             e.yaw += dyaw * k as f32;
-            e.body_yaw = turn_body(e.body_yaw, e.yaw, walked.unwrap_or(e.pos - before), dt as f32);
+            e.pitch += (e.target_pitch - e.pitch) * k as f32;
+            // A projectile is all one piece pointing where it flies.
+            e.body_yaw = if c.game.entities[e.kind as usize].projectile.is_some() {
+                e.yaw
+            } else {
+                turn_body(e.body_yaw, e.yaw, walked.unwrap_or(e.pos - before), dt as f32)
+            };
             advance_swing(&mut e.arm_swing, dt as f32);
             let speed = (walked.unwrap_or(e.pos - before).with_y(0.0).length() / dt.max(1e-4)) as f32;
             e.walked += speed * dt as f32;
             crate::model::walk_limbs(&mut e.walk, &mut e.swing, speed, dt as f32);
             e.crouched = fade_pose(e.crouched, e.pose == Pose::CROUCH, dt as f32);
             if let Some((p, _)) = &mut e.using {
-                *p = (*p + dt as f32 * crate::world::TPS as f32 / e.use_ticks.max(1.0)).min(1.0);
+                *p = if endless_use(e.use_ticks) {
+                    *p + dt as f32
+                } else {
+                    (*p + dt as f32 * crate::world::TPS as f32 / e.use_ticks.max(1.0)).min(1.0)
+                };
             }
             e.hurt = (e.hurt - dt as f32).max(0.0);
             e.age += dt as f32;
@@ -1649,6 +1824,53 @@ impl Client {
         }
         self.frames = frames;
         self.seat_riders();
+        self.hold_stuck();
+    }
+
+    /// Projectiles stuck in an entity, where they went in on its body as drawn this frame: they
+    /// turn with its body, not its head, keep up with it however fast it goes, and fall over
+    /// with it when it dies, going when it does.
+    fn hold_stuck(&mut self) {
+        let stuck: Vec<u64> = self
+            .entities
+            .iter()
+            .filter(|e| e.1.stuck.is_some())
+            .map(|e| *e.0)
+            .collect();
+        for id in stuck {
+            let Some(st) = self.entities.get(&id).and_then(|e| e.stuck) else { continue };
+            let host = if st.host == self.player_id {
+                Some((self.me.pos, self.player.yaw, self.me.body_yaw, self.me.dying))
+            } else {
+                self.entities
+                    .get(&st.host)
+                    .map(|h| (h.pos, h.yaw, h.body_yaw, h.dying))
+            };
+            let Some((pos, head, body, dying)) = host else {
+                if st.leaving {
+                    self.entities.remove(&id);
+                }
+                continue;
+            };
+            let Some(e) = self.entities.get_mut(&id) else { continue };
+            // The server keeps it by the head's yaw: onto the body as it is when first seen here.
+            let st = if st.on_body {
+                st
+            } else {
+                Stuck { at: turn_y(st.at, head - body), yaw: st.yaw + head - body, pitch: e.target_pitch, on_body: true, ..st }
+            };
+            e.stuck = Some(st);
+            // Dying, the body tips onto its side about its feet as the stock `death` clip has it.
+            let fall = glam::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2 * dying.map_or(0.0, |d| (d as f64 * 1.6).sqrt().min(1.0)));
+            let (sy, cy) = (st.yaw as f64).sin_cos();
+            let (sp, cp) = (st.pitch as f64).sin_cos();
+            let dir = fall * DVec3::new(-sy * cp, sp, -cy * cp);
+            let p = pos + turn_y(fall * st.at, body);
+            (e.pos, e.target) = (p, p);
+            let yaw = body + (-dir.x).atan2(-dir.z) as f32;
+            (e.yaw, e.target_yaw, e.body_yaw) = (yaw, yaw, yaw);
+            (e.pitch, e.target_pitch) = (dir.y.asin() as f32, st.pitch);
+        }
     }
 
     /// Riders where their seats are on their mounts as drawn this frame, mounts first.
@@ -2148,7 +2370,7 @@ impl Client {
             }
             let physics::Dims { half_width: hw, height: h, .. } = e.dims();
             let b = physics::Aabb::around(e.pos, hw, h);
-            if let Some(t) = physics::ray_aabb(eye, dir, &b, max) {
+            if let Some((t, _)) = physics::ray_aabb(eye, dir, &b, max) {
                 if best.is_none_or(|(bt, _)| t < bt) {
                     best = Some((t, id));
                 }
@@ -2173,10 +2395,13 @@ impl Client {
             effect,
             forced,
             riding,
+            stuck,
             game_mode,
             permission,
             attributes,
             shown,
+            // Only in its slot.
+            trash: _,
         } = c.game.fields;
         let now = self.ticks();
         let f: Vec<f32> = words(bytes).map(f32::from_le_bytes).collect();
@@ -2204,6 +2429,15 @@ impl Client {
             e.vehicle = (bytes.len() >= 12).then(|| {
                 let mount = u64::from_le_bytes(bytes[..8].try_into().unwrap());
                 (mount, u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as u8)
+            });
+        } else if comp == stuck {
+            e.stuck = (bytes.len() >= 24).then(|| Stuck {
+                host: u64::from_le_bytes(bytes[..8].try_into().unwrap()),
+                at: DVec3::new(f[2] as f64, f[3] as f64, f[4] as f64),
+                yaw: f[5],
+                pitch: 0.0,
+                on_body: false,
+                leaving: false,
             });
         } else if comp == burning {
             e.burning = bytes.first().is_some_and(|&b| b != 0);
@@ -2267,8 +2501,7 @@ impl Client {
             self.player.speed_mul = self.attributes[a::MOVEMENT_SPEED as usize] as f64;
             self.player.jump_mul = self.attributes[a::JUMP_STRENGTH as usize] as f64;
             self.player.can_sprint = self.attributes[a::CAN_SPRINT as usize] >= 1.0;
-            (self.player.step_height, self.player.gravity_mul) =
-                (self.attributes[a::STEP_HEIGHT as usize] as f64, self.attributes[a::GRAVITY as usize] as f64);
+            self.player.moves = physics::Moves::of(|a| self.attributes[a as usize] as f64);
             // Flight goes with what allowed it (a mode, a ring), which comes a tick after the mode;
             // a mod's flight without it stays.
             if could && !self.can_fly() && !self.mode.has(crate::tag_bits::game_mode::ALWAYS_FLY) {
@@ -2368,7 +2601,7 @@ impl Client {
                     .map(|s| (id, physics::Transform::of(e.pose(now)), s as &dyn physics::Blocks))
             })
             .collect();
-        physics::pick(content(), &world::SeenCells { world, air_if_missing: false }, &structures, eye, look, reach, false)
+        physics::pick(content(), &world::SeenCells { world, air_if_missing: false }, &structures, eye, look, reach, weft_abi::ray::BLOCKS)
     }
 
     /// Server tick (fractional) bodies are shown at when the client clock reads `clock`.
@@ -2408,7 +2641,7 @@ impl Client {
             pos: self.smooth_pos() + DVec3::Y * self.player.eye + pillow,
             yaw: self.player.yaw,
             pitch: self.player.pitch,
-            fov: self.fov * self.player.fov_mul * self.attribute(crate::registry::attr::FOV) * inside,
+            fov: self.fov * self.player.fov_mul * self.player.zoom * inside,
             bob: (Vec3::ZERO, 0.0, 0.0),
         }
     }
@@ -2459,10 +2692,10 @@ impl Client {
             .get(w.start as usize..w.end as usize)
             .map_or(Vec::new(), |s| s.iter().filter(|s| !s.is_empty()).map(|s| s.item).collect());
         let (held, off_held) = (self.shown_held().item, self.off_held().item);
-        let using = self
-            .using
-            .map(|(left, all)| (1.0 - left / all.max(1.0), self.using_off));
+        let into = |(held, all): (f32, f32)| if endless_use(all) { held / self.tick_rate as f32 } else { held / all.max(1.0) };
+        let using = self.using.map(|u| (into(u), self.using_off));
         let me = &mut self.me;
+        me.use_ticks = self.using.map_or(0.0, |u| u.1);
         (me.yaw, me.target_yaw, me.pitch) = (self.player.yaw, self.player.yaw, self.player.pitch);
         (me.worn, me.held, me.off_held, me.using) = (worn, held, off_held, using);
         (me.arm_swing, me.swing_off, me.pose) = (self.hand_swing, self.hand_swing_off, self.player.pose);
@@ -2710,6 +2943,7 @@ impl Client {
             hand,
             textures,
             &light,
+            &|p: IVec3| self.world.biome_at(p),
             &scene,
             scene_buf,
             self.target
@@ -2738,6 +2972,16 @@ impl Client {
 
 /// Vanilla's tickHeadTurn: the body turns towards where it walks (or stays put), and the head
 /// drags it along only once it has turned more than 50 degrees away. Radians, `moved` this frame.
+/// Ticks of an item used until it is let go (`abi::USE_HOLD`), as the server sends them.
+pub(crate) fn endless_use(ticks: f32) -> bool {
+    ticks >= (weft_abi::USE_HOLD >> 1) as f32
+}
+
+/// `v` turned about the up axis by `yaw` radians, as models turn with their yaw.
+fn turn_y(v: DVec3, yaw: f32) -> DVec3 {
+    glam::DQuat::from_rotation_y(yaw as f64) * v
+}
+
 pub(crate) fn turn_body(body: f32, head: f32, moved: DVec3, dt: f32) -> f32 {
     let mut body = body;
     let flat = moved.with_y(0.0);
@@ -2853,13 +3097,13 @@ fn step_player(p: &mut LocalPlayer, input: &Input, block: &impl physics::Cells, 
     let right = DVec3::new(cy, 0.0, -sy);
     // Vanilla's moveRelative input: normalized only when longer than 1.
     let wish = forward * fwd_in + right * side_in;
-    let g = physics::gravity_per_tick(gravity) * p.gravity_mul;
+    let g = physics::gravity_per_tick(gravity) * p.moves.gravity;
 
     let height = p.dims().height;
     let before = p.pos;
 
     if p.flying || p.noclip {
-        let f = physics::Flight { wish, up: jump, down: sneak, speed: p.fly_speed as f64 * if sprint { 2.0 } else { 1.0 } };
+        let f = physics::Flight { wish, up: jump, down: sneak, speed: p.fly_speed as f64 * p.moves.fly * if sprint { 2.0 } else { 1.0 } };
         // Flying creative players stop flying when they come down onto the ground.
         if physics::fly(c, block, bodies, 0, &mut p.pos, &mut p.vel, &mut p.on_ground, hw, height, &f, p.noclip) {
             p.flying = false;
@@ -2879,6 +3123,7 @@ fn step_player(p: &mut LocalPlayer, input: &Input, block: &impl physics::Cells, 
         wish,
         ground: if sprint { 0.13 } else { 0.1 } * p.speed_mul,
         air: if sprint { 0.026 } else { 0.02 },
+        liquid: physics::SWIM * p.moves.swim,
         jump: if jump && p.jump_cooldown == 0 { physics::JUMP * p.jump_mul } else { 0.0 },
         jump_boost: if sprint { forward * 0.2 } else { DVec3::ZERO },
         swim: jump,
@@ -2886,7 +3131,7 @@ fn step_player(p: &mut LocalPlayer, input: &Input, block: &impl physics::Cells, 
         sprint: swimming,
         swim_look: swimming.then(|| (p.pitch as f64).sin()),
     };
-    let frame = physics::Frame { half_width: hw, height, step: p.step_height, gravity: g };
+    let frame = physics::Frame { half_width: hw, height, gravity: g, moves: p.moves };
     let w = physics::walk(c, block, bodies, 0, &mut p.pos, &mut p.vel, p.on_ground, &ctl, &frame);
     if w.jumped {
         p.jump_cooldown = 10;

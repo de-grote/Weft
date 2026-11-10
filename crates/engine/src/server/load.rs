@@ -330,10 +330,10 @@ impl Server {
                         crate::background().spawn(move || s.lock().save(c, dim, pos, &cube, &around, &bytes));
                     }
                     for id in inside {
-                        r.entities.remove(id);
+                        r.entities.remove(id, weft_abi::removal::UNLOADED);
                     }
                 }
-                r.entities.compact();
+                r.compact(c);
             }
             d.dirty |= d.regions.iter().map(|r| r.space.cubes.len()).sum::<usize>() != before;
         }

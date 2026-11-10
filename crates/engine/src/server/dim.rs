@@ -22,6 +22,10 @@ const MAX_NEIGHBOR_UPDATES: usize = 1 << 16;
 /// Missed ticks are made up in at most this many parts, all in one tick (`run_systems`).
 const CATCH_UP_PARTS: u64 = 20;
 const ITEM_LIFETIME: u64 = crate::world::TPS as u64 * 60 * 5;
+/// The removal of what nobody was told came and so isn't told went: a refused spawn, and what is
+/// blocks (moving blocks set down, a block entity whose block went), whose comings and goings are
+/// the blocks'.
+pub const UNTOLD: u32 = u32::MAX;
 
 pub enum DimEvent {
     /// An entity started using an item that takes time (ticks, off hand), or stopped.
@@ -730,7 +734,7 @@ fn hazards_met(c: &Content, block: &impl crate::physics::Cells, e: &super::entit
 impl Dim {
     /// Writes the fields clients show (`registry::HEALTH` ...) into their synced components when
     /// they differ, so they travel like mods' components. Absent ones stay absent while default.
-    pub fn mirror_fields(&mut self, c: &Content) {
+    pub fn mirror_fields(&mut self, c: &'static Content) {
         let crate::registry::FieldComps {
             health,
             burning,
@@ -740,6 +744,7 @@ impl Dim {
             off_held,
             using,
             riding,
+            stuck,
             game_mode,
             permission,
             attributes,
@@ -830,6 +835,21 @@ impl Dim {
                     .collect()
             });
             put(comps, riding, &rides);
+            let held_by: Vec<u8> = match e.stuck {
+                Some(super::entity::Stuck { into: super::entity::StuckIn::Entity(host), at, yaw, .. }) => host
+                    .to_le_bytes()
+                    .into_iter()
+                    .chain(
+                        at.as_vec3()
+                            .to_array()
+                            .into_iter()
+                            .chain([yaw])
+                            .flat_map(f32::to_le_bytes),
+                    )
+                    .collect(),
+                _ => Vec::new(),
+            };
+            put(comps, stuck, &held_by);
             if let Some(a) = attrs {
                 let bytes: Vec<u8> = a.iter().flat_map(|v| v.to_le_bytes()).collect();
                 put(comps, attributes, &bytes);
@@ -1235,7 +1255,7 @@ impl Dim {
 
     /// Block entities go with their blocks from the cell at `p` and come with new ones, what one
     /// held dropped.
-    fn block_entities_follow(&mut self, c: &Content, p: IVec3, before: &[u32], after: &[u32]) {
+    fn block_entities_follow(&mut self, c: &'static Content, p: IVec3, before: &[u32], after: &[u32]) {
         let blocks = |parts: &[u32]| -> Vec<u32> { parts.iter().map(|&s| c.states[s as usize].block).collect() };
         let (was, now) = (blocks(before), blocks(after));
         for &b in was.iter().filter(|b| !now.contains(b)) {
@@ -1252,7 +1272,7 @@ impl Dim {
                     self.spawn_item(c, p.as_dvec3() + DVec3::splat(0.5), s);
                 }
             }
-            self.entities.remove(id);
+            self.entities.remove(id, UNTOLD);
         }
         for b in now.iter().filter(|b| !was.contains(b)) {
             if let Some(&kind) = c.game.block_entities.get(b) {
@@ -1463,7 +1483,7 @@ impl Dim {
     }
 
     /// 0 for kinds that belong to a block: those come only with their block.
-    pub fn spawn(&mut self, c: &Content, kind: u32, pos: DVec3) -> u64 {
+    pub fn spawn(&mut self, c: &'static Content, kind: u32, pos: DVec3) -> u64 {
         if c.game.is_block_entity(kind) {
             return 0;
         }
@@ -1529,7 +1549,7 @@ impl Dim {
         for (id, pos, blocks, ground, on) in landed {
             // One without its blocks (loaded from a save mid-fall) just goes.
             if blocks.is_empty() {
-                self.entities.remove(id);
+                self.entities.remove(id, UNTOLD);
                 continue;
             }
             let entities: Vec<Option<u64>> = blocks
@@ -1554,7 +1574,7 @@ impl Dim {
                     }
                 }
                 if down.is_empty() {
-                    d.entities.remove(id);
+                    d.entities.remove(id, UNTOLD);
                 } else {
                     d.put_down(c, id, down, Vec::new(), None);
                 }
@@ -1566,13 +1586,13 @@ impl Dim {
     }
 
     /// How far a player's actions on blocks reach, with room for what the client saw last.
-    pub fn block_reach(&self, c: &Content, player: u64) -> f64 {
+    pub fn block_reach(&mut self, c: &'static Content, player: u64) -> f64 {
         self.attribute(c, player, crate::registry::attr::BLOCK_REACH, false) + super::BLOCK_SLACK
     }
 
     /// `stack` thrown by `player`: from just below its eyes where it looks, not to be picked up
     /// for two seconds.
-    pub fn throw(&mut self, c: &Content, player: u64, stack: ItemStack) -> u64 {
+    pub fn throw(&mut self, c: &'static Content, player: u64, stack: ItemStack) -> u64 {
         let Some(e) = self.entities.get(player) else { return 0 };
         let (from, look) = (e.drop_point(c), crate::physics::look_dir(e.yaw, e.pitch));
         let id = self.spawn_item(c, from, stack);
@@ -1583,7 +1603,9 @@ impl Dim {
         id
     }
 
-    pub fn spawn_item(&mut self, c: &Content, pos: DVec3, stack: ItemStack) -> u64 {
+    /// A dropped stack, asked about and told of as any new entity (`spawn_cause::DROP`): its id,
+    /// 0 if refused.
+    pub fn spawn_item(&mut self, c: &'static Content, pos: DVec3, stack: ItemStack) -> u64 {
         // A liquid by the millibucket spills away instead: it only lives in liquid slots.
         if stack.is_empty() || c.item_fluid.contains_key(&stack.item) {
             return 0;
@@ -1595,7 +1617,7 @@ impl Dim {
         let (a, b) = (self.rng.float() - 0.5, self.rng.float() - 0.5);
         e.vel = DVec3::new(a as f64 * 2.0, 3.0, b as f64 * 2.0);
         self.entities.insert(c, e);
-        id
+        self.announce(c, id, abi::spawn_cause::DROP)
     }
 
     /// Calls a mod callback with this dimension as its world.
@@ -1618,52 +1640,39 @@ impl Dim {
     }
 
     /// A melee hit of `attacker` on `target`, the same for players and mobs: the `ATTACK`
-    /// question, then the `ATTACK_DAMAGE` chain from what it holds (else its kind's
-    /// `attack_damage`, 1 without), scaled by how charged its swing is, then the damage.
+    /// question, its `ATTACK_DAMAGE` against the target through `chain::MELEE` (how charged its
+    /// swing is, whether it crits), the damage, extra knockback (`ATTACK_KNOCKBACK`), a sweep.
     pub fn attack(&mut self, c: &'static Content, attacker: u64, target: u64, held: ItemStack) -> bool {
-        let (Some(me), Some(t)) = (self.entities.get(attacker), self.entities.get(target)) else { return false };
+        let (Some(_), Some(t)) = (self.entities.get(attacker), self.entities.get(target)) else { return false };
         if target == attacker || !t.is_body() {
             return false;
         }
-        let kind = me.kind;
         let mut q = abi::Query { entity: attacker, other: target, item: held.item, ..abi::Query::DEFAULT };
-        if !self.ask(c, abi::question::ATTACK, &mut q) {
+        if !self.ask(c, abi::question::ATTACK, &q) {
             return false;
         }
-        // What it holds hits, else its bare hand: its kind's damage (a mob's), else 1.
-        let own = || {
-            c.components
-                .id(abi::comp::ATTACK_DAMAGE)
-                .and_then(|id| c.components.get::<f32>(crate::components::ENTITY, kind, id))
-        };
-        let bonus = self.attribute(c, attacker, crate::registry::attr::ATTACK_DAMAGE, false) as f32;
-        let base = c
-            .stack_value::<f32>(&held, c.ids.attack_damage)
-            .filter(|_| !held.is_empty())
-            .or_else(own)
-            .unwrap_or(1.0)
-            + bonus;
-        // Weakness takes a hit down to nothing, never into healing.
-        let base = base.max(0.0);
-        self.events
-            .push(DimEvent::EntitySwing { id: attacker, off: false });
-        let dmg = (self.compute(c, abi::chain::ATTACK_DAMAGE, base as f64, &q, false) as f32).max(0.0);
-        // Modern's swing: charged by time since the last, and only a full one crits or knocks. It
-        // may have changed what it holds since the last tick looked.
+        // It may have changed what it holds since the last tick looked.
         if let Some(me) = self.entities.get_mut(attacker) {
             me.notice_hand(held);
         }
-        let strength = self.swing_strength(c, attacker, held);
+        q.charge = self.swing_strength(c, attacker, held);
+        q.crit = self.ask_or(c, abi::question::CRIT, &q, false) as u32;
+        let base = self.attribute_for(c, crate::registry::attr::ATTACK_DAMAGE, &q, false);
+        let dmg = (self.compute(c, abi::chain::MELEE, base, &q, false) as f32).max(0.0);
+        self.events
+            .push(DimEvent::EntitySwing { id: attacker, off: false });
         let Some(me) = self.entities.get_mut(attacker) else { return false };
         me.swing_ticks = 0;
-        let full = strength > 0.9;
-        let (sprinting, pos, height) = (me.sprinting, me.pos, me.height(c));
-        let here = crate::physics::around(c, &*self.space, pos, height);
-        let Some(me) = self.entities.get(attacker) else { return false };
-        let crit = full && me.fall > 0.0 && !me.on_ground && !here.in_liquid && !here.climbing && !sprinting;
-        let dmg = dmg * (0.2 + strength * strength * 0.8) * if crit { 1.5 } else { 1.0 };
-        let hit = self.damage(c, target, dmg, attacker, damage::ATTACK);
-        if hit && crit {
+        let pos = me.pos;
+        let hit = self.damage(
+            c,
+            target,
+            &abi::Damage { amount: dmg, cause: damage::ATTACK, source: attacker, item: held, crit: q.crit, ..abi::Damage::DEFAULT },
+        );
+        if !hit {
+            return false;
+        }
+        if q.crit != 0 {
             if let Some(t) = self.entities.get(target) {
                 let (pos, id) = (t.pos + DVec3::Y * (t.dims(c).height * 0.5), self.id);
                 self.events.push(DimEvent::Particles {
@@ -1685,25 +1694,22 @@ impl Dim {
                 });
             }
         }
-        if hit && full && sprinting {
-            // A sprint's hit knocks further, and ends the sprint.
+        // Asked before the knock below ends a sprint.
+        let sweeps = self.ask_or(c, abi::question::SWEEP, &q, false);
+        let extra = self.attribute_for(c, crate::registry::attr::ATTACK_KNOCKBACK, &q, false);
+        if extra > 0.0 {
             let away = (self.entities.get(target).map_or(pos, |t| t.pos) - pos)
                 .with_y(0.0)
                 .normalize_or_zero();
-            let resist = self.attribute(c, target, crate::registry::attr::KNOCKBACK_RESISTANCE, false);
-            self.push(target, (away * 10.0 + DVec3::Y * 2.0) * (1.0 - resist.clamp(0.0, 1.0)));
-            if let Some(me) = self.entities.get_mut(attacker) {
+            self.knock(c, target, away * extra * 0.5);
+            // A knocking hit ends a sprint, as vanilla's.
+            if let Some(me) = self.entities.get_mut(attacker).filter(|e| e.sprinting) {
                 me.sprinting = false;
+                self.events.push(DimEvent::StopSprint { player: attacker });
             }
-            self.events.push(DimEvent::StopSprint { player: attacker });
         }
-        // Standing still with a sword, a full swing also sweeps what stands next to the target.
-        let sweeps = c
-            .ids
-            .sweeps
-            .is_some_and(|id| held.item != 0 && c.components.has(crate::components::ITEM, held.item, id));
-        let on_ground = self.entities.get(attacker).is_some_and(|e| e.on_ground);
-        if hit && full && sweeps && on_ground && !sprinting && !crit {
+        if sweeps {
+            let sweep = self.compute(c, abi::chain::SWEEP_DAMAGE, dmg as f64, &q, false) as f32;
             let center = self.entities.get(target).map_or(pos, |t| t.pos);
             let near: Vec<u64> = self
                 .entities
@@ -1719,14 +1725,32 @@ impl Dim {
                 .map(|e| e.id)
                 .collect();
             for id in near {
-                self.damage(c, id, 1.0, attacker, damage::ATTACK);
+                self.damage(
+                    c,
+                    id,
+                    &abi::Damage { amount: sweep, cause: damage::ATTACK, source: attacker, item: held, ..abi::Damage::DEFAULT },
+                );
             }
         }
-        hit
+        true
+    }
+
+    /// Vanilla's knockback by `push` (flat; its length is the strength), less the target's
+    /// `KNOCKBACK_RESISTANCE`; a player's client applies its own.
+    pub fn knock(&mut self, c: &'static Content, id: u64, push: DVec3) {
+        let resist = self.attribute(c, id, crate::registry::attr::KNOCKBACK_RESISTANCE, false);
+        let Some(e) = self.entities.get_mut(id) else { return };
+        if e.player {
+            self.entities
+                .told
+                .push((id, Told::Knock(push.as_vec3().to_array())));
+        } else {
+            e.vel = crate::physics::knock(e.vel * crate::world::TICK, push, e.on_ground, resist) * crate::world::TPS as f64;
+        }
     }
 
     /// How charged an entity's next swing is, 0..1.
-    pub fn swing_strength(&self, c: &Content, id: u64, held: ItemStack) -> f32 {
+    pub fn swing_strength(&mut self, c: &'static Content, id: u64, held: ItemStack) -> f32 {
         let Some(e) = self.entities.get(id) else { return 1.0 };
         crate::content::swing_charge(
             c,
@@ -1738,29 +1762,38 @@ impl Dim {
     }
 
     /// Effect `effect` on `id` at `level` for `ticks`, replacing the one it had (0 ticks ends it,
-    /// `INFINITE_TICKS` never does).
-    /// An instant one acts once, its hazards at that level, and doesn't stay.
+    /// `INFINITE_TICKS` never does): asked first (`action::EFFECT`) and told after, an end told
+    /// as `EFFECT_ENDED`. An instant one acts once, its hazards at that level, and doesn't stay.
     pub fn give_effect(&mut self, c: &'static Content, id: u64, effect: u32, level: u32, ticks: u32) {
         let Some(def) = c.game.entity_effects.get(effect as usize) else { return };
         if self.entities.get(id).is_none() {
             return;
         }
         let level = level.max(1);
+        let comp = c.game.fields.effect;
+        let had: Vec<_> = crate::world::effects_on(self.entities.comps.get(&(id, comp)).map(|b| &b[..]), self.time).collect();
+        let change = abi::EffectChange { entity: id, effect, level, ticks, pad: 0 };
+        if ticks > 0 {
+            let q = abi::Query { entity: id, cause: effect, amount: level as f64, state: ticks, ..abi::Query::DEFAULT };
+            if !self.ask(c, abi::action::EFFECT, &q) {
+                return;
+            }
+            self.emit_engine(c, abi::action::EFFECT, &change);
+        }
         if def.instant {
             for h in def.hazards_at(level) {
                 if let Some(cause) = h.cause {
-                    self.damage(c, id, h.damage, 0, cause);
+                    self.damage(c, id, &abi::Damage::new(h.damage, cause));
                 }
             }
             return;
         }
-        let comp = c.game.fields.effect;
-        let mut list: Vec<_> = crate::world::effects_on(self.entities.comps.get(&(id, comp)).map(|b| &b[..]), self.time)
-            .filter(|f| f.id != effect)
-            .collect();
+        let mut list: Vec<_> = had.iter().copied().filter(|f| f.id != effect).collect();
         if ticks > 0 {
             let until = if ticks == abi::INFINITE_TICKS { crate::world::FOREVER } else { self.time + ticks as u64 };
             list.push(crate::world::OnEffect { id: effect, level, until });
+        } else if let Some(f) = had.iter().find(|f| f.id == effect) {
+            self.emit_engine(c, abi::event::EFFECT_ENDED, &abi::EffectChange { level: f.level, ticks: 0, ..change });
         }
         self.entities
             .comps
@@ -1768,15 +1801,53 @@ impl Dim {
         self.entities.dirty_comp.insert((id, comp));
     }
 
-    /// The damage a fall of `fell` blocks does to `id`: past its `SAFE_FALL`, by its
-    /// `FALL_DAMAGE_MULTIPLIER`; none for a kind that takes none.
-    pub fn fall_damage(&self, c: &Content, id: u64, fell: f32) -> Option<f32> {
-        let e = self.entities.get(id)?;
-        let safe = self.attribute(c, id, crate::registry::attr::SAFE_FALL, false) as f32;
-        let mul = self.attribute(c, id, crate::registry::attr::FALL_DAMAGE_MULTIPLIER, false) as f32;
-        (c.game.entities[e.kind as usize].is(ef::FALL_DAMAGE) && fell > safe)
-            .then(|| (fell - safe) * mul)
-            .filter(|&d| d > 0.0)
+    /// Effects that ran out go (`EFFECT_ENDED`), then each effect with a tick of its own gets every
+    /// entity that has it, once.
+    fn tick_effects(&mut self, c: &'static Content) {
+        let comp = c.game.fields.effect;
+        let mut ended = Vec::new();
+        let mut ticking: FxHashMap<u32, (Vec<u64>, Vec<u32>)> = FxHashMap::default();
+        let (entities, now) = (&mut self.entities, self.time);
+        for id in entities.list.iter().filter(|e| !e.removed).map(|e| e.id) {
+            let Some(bytes) = entities.comps.get_mut(&(id, comp)) else { continue };
+            for f in crate::world::effects_on(Some(&bytes[..]), now) {
+                if c.game.entity_effects[f.id as usize].on_tick.is_some() {
+                    let t = ticking.entry(f.id).or_default();
+                    t.0.push(id);
+                    t.1.push(f.level);
+                }
+            }
+            if crate::world::effects_on(Some(&bytes[..]), u64::MAX).any(|f| f.until <= now) {
+                let (on, off): (Vec<_>, Vec<_>) = crate::world::effects_on(Some(&bytes[..]), u64::MAX).partition(|f| f.until > now);
+                *bytes = crate::world::encode_effects(&on);
+                ended.push((id, off));
+            }
+        }
+        for (id, off) in ended {
+            self.entities.dirty_comp.insert((id, comp));
+            for f in off {
+                self.emit_engine(
+                    c,
+                    abi::event::EFFECT_ENDED,
+                    &abi::EffectChange { entity: id, effect: f.id, level: f.level, ticks: 0, pad: 0 },
+                );
+            }
+        }
+        let mut effects: Vec<u32> = ticking.keys().copied().collect();
+        effects.sort();
+        for effect in effects {
+            let (ids, levels) = &ticking[&effect];
+            let Some((owner, cb)) = c.game.entity_effects[effect as usize].on_tick else { continue };
+            let (ids, levels, count) = (ids.as_ptr(), levels.as_ptr(), ids.len());
+            self.call(owner, cb, |w| abi::EffectTickArgs { world: w, effect, ids, levels, count });
+        }
+    }
+
+    /// The damage a fall of `fell` blocks does to `id` (`chain::FALL_DAMAGE`), if any.
+    pub fn fall_damage(&mut self, c: &'static Content, id: u64, fell: f32) -> Option<f32> {
+        self.entities.get(id)?;
+        let q = abi::Query { entity: id, amount: fell as f64, ..abi::Query::DEFAULT };
+        Some(self.compute(c, abi::chain::FALL_DAMAGE, fell as f64, &q, false) as f32).filter(|&d| d > 0.0)
     }
 
     /// What everyone near sees of a fall: dust where entity `id` landed from `fell` blocks up
@@ -1840,9 +1911,11 @@ impl Dim {
     }
 
     /// Damage to an entity, or with a negative `amount` healing: one entry for every change of
-    /// health that mods may watch or change.
-    pub fn damage(&mut self, c: &'static Content, id: u64, amount: f32, source: u64, cause: u32) -> bool {
-        let spared = self.attribute(c, id, crate::registry::attr::INVULNERABLE, false) >= 1.0;
+    /// health that mods may watch or change. The `HURT` question (`core:immune` first), whether
+    /// it is still recovering (`question::RECOVERING`), the `DAMAGE` chain, knockback
+    /// (`chain::KNOCKBACK`), then the `HURT` event.
+    pub fn damage(&mut self, c: &'static Content, id: u64, d: &abi::Damage) -> bool {
+        let (amount, source, cause) = (d.amount, d.source, d.cause);
         let Some(e) = self.entities.get(id) else { return false };
         let k = &c.game.entities[e.kind as usize];
         if !e.alive() || amount.is_nan() {
@@ -1855,39 +1928,25 @@ impl Dim {
             crate::host::misuse("damage", || format!("no damage cause {cause}"));
             return false;
         };
-        let immune = c
-            .damage_immune
-            .get(cause as usize)
-            .copied()
-            .flatten()
-            .is_some_and(|t| c.components.has(crate::components::ENTITY, e.kind, t));
-        // A rule may turn the cause off (`core:damage.fall`).
-        let off = c.game.damage_rules[cause as usize].is_some_and(|r| crate::config::get(r) == 0.0);
-        // The void gets through everything, or /clear would silently fail.
-        if immune || off || (!def.has(df::PIERCES_INVULNERABLE) && spared) {
+        let q = abi::Query {
+            entity: id,
+            other: source,
+            direct: d.direct,
+            item: d.item.item,
+            cause,
+            amount: amount as f64,
+            crit: d.crit,
+            ..abi::Query::DEFAULT
+        };
+        if !self.ask(c, abi::action::HURT, &q) {
             return false;
         }
-        let recovering = e.hurt_cooldown > 0 && !def.has(df::IGNORES_COOLDOWN);
-        // One path: the `HURT` veto, the `DAMAGE` chain, then the `ENTITY_HURT` event.
-        let mut q = abi::Query { entity: id, other: source, cause, amount: amount as f64, ..abi::Query::DEFAULT };
-        if !self.ask(c, abi::action::HURT, &mut q) {
-            return false;
-        }
-        let amount =
-            self.compute(c, abi::chain::DAMAGE, amount as f64, &q, crate::log::on(crate::log::Channel::Modifiers, log::Level::Debug))
-                as f32;
-        if crate::log::on(crate::log::Channel::Modifiers, log::Level::Debug) {
+        let recovering = self.ask_or(c, abi::question::RECOVERING, &q, false);
+        let explain = crate::log::on(crate::log::Channel::Modifiers, log::Level::Debug);
+        let amount = self.compute(c, abi::chain::DAMAGE, amount as f64, &q, explain) as f32;
+        if explain {
             log::debug!(target: "modifiers", "{}", super::extend::explanation());
         }
-        // What it resists comes off last; what pierces invulnerability gets through.
-        let amount = if def.has(df::PIERCES_INVULNERABLE) {
-            amount
-        } else {
-            let fire = if def.has(df::BURNING) { self.attribute(c, id, crate::registry::attr::FIRE_RESISTANCE, false) as f32 } else { 0.0 };
-            amount * (1.0 - self.attribute(c, id, crate::registry::attr::DAMAGE_RESISTANCE, false) as f32) * (1.0 - fire)
-        };
-        // What can't kill leaves half a heart.
-        let amount = if def.has(df::NOT_LETHAL) { amount.min(self.entities.get(id).map_or(0.0, |e| e.health - 1.0)) } else { amount };
         // While recovering only what goes beyond the last hit lands, and it doesn't knock.
         let last = self.entities.get(id).map_or(0.0, |e| e.last_hurt);
         let landing = if recovering { amount - last } else { amount };
@@ -1895,39 +1954,46 @@ impl Dim {
             return false;
         }
         let amount = landing;
-        self.emit_engine(c, abi::action::HURT, &abi::Hurt { entity: id, source, amount, cause });
-        let knock = self
-            .entities
-            .get(source)
-            .filter(|_| !recovering && !def.has(df::NO_KNOCKBACK))
-            .map(|s| s.pos);
+        let direct = if d.direct != 0 { d.direct } else { source };
+        self.emit_engine(c, abi::action::HURT, &abi::Hurt { entity: id, source, direct: d.direct, amount, cause, crit: d.crit, pad: 0 });
+        let from = self.entities.get(direct).map(|s| s.pos);
+        let knock = if recovering || def.has(df::NO_KNOCKBACK) {
+            None
+        } else if d.knock != abi::Vec3::ZERO {
+            Some(
+                DVec3::from_array(d.knock.to_array())
+                    .with_y(0.0)
+                    .normalize_or_zero(),
+            )
+        } else {
+            from.and_then(|from| {
+                self.entities.get(id).map(|e| {
+                    (e.pos - from)
+                        .with_y(0.0)
+                        .try_normalize()
+                        .unwrap_or(DVec3::X)
+                })
+            })
+        };
         // A death mods may refuse (a totem): it lives on with one health.
         let dying = self
             .entities
             .get(id)
             .is_some_and(|e| e.health - amount <= 0.0);
         let spared = dying && {
-            let mut q = abi::Query { entity: id, other: source, cause, amount: amount as f64, ..abi::Query::DEFAULT };
-            !self.ask(c, abi::action::DIE, &mut q)
+            let q = abi::Query { amount: amount as f64, ..q };
+            !self.ask(c, abi::action::DIE, &q)
         };
-        let resist = self.attribute(c, id, crate::registry::attr::KNOCKBACK_RESISTANCE, false);
+        let cooldown = self.attribute(c, id, crate::registry::attr::HURT_COOLDOWN, false) as u32;
+        if let Some(way) = knock {
+            let strength = self.compute(c, abi::chain::KNOCKBACK, 0.4, &q, false);
+            self.knock(c, id, way * strength);
+        }
         let Some(e) = self.entities.get_mut(id) else { return false };
         e.health = if spared { 1.0 } else { (e.health - amount).max(0.0) };
         e.last_hurt = if recovering { last + amount } else { amount };
         if !recovering {
-            e.hurt_cooldown = 10;
-        }
-        let mut knocked = None;
-        if let Some(from) = knock {
-            let away = (e.pos - from)
-                .with_y(0.0)
-                .try_normalize()
-                .unwrap_or(DVec3::X);
-            if e.player {
-                knocked = Some(away.as_vec3().to_array());
-            } else {
-                e.vel = crate::physics::knock(e.vel * crate::world::TICK, away, e.on_ground, resist) * crate::world::TPS as f64;
-            }
+            e.hurt_cooldown = cooldown;
         }
         let (health, player, pos, kind, on_fire, height) = (e.health, e.player, e.pos, e.kind, e.fire > 0, e.height(c));
         let effects = k.effects;
@@ -1939,9 +2005,6 @@ impl Dim {
                 1.0,
                 0.0,
             );
-        }
-        if let Some(away) = knocked {
-            self.entities.told.push((id, Told::Knock(away)));
         }
         if health <= 0.0 {
             self.entities.killed.push(id);
@@ -1969,7 +2032,7 @@ impl Dim {
                     self.spawn_item(c, pos + DVec3::Y * 0.5, s);
                 }
                 self.drop_inventory(c, id);
-                self.entities.remove(id);
+                self.entities.remove(id, abi::removal::DIED);
             }
         }
         true
@@ -1987,12 +2050,16 @@ impl Dim {
             return false;
         }
         e.health += gained;
-        self.emit_engine(c, abi::event::ENTITY_HEALED, &abi::Hurt { entity: id, source, amount: gained, cause });
+        self.emit_engine(
+            c,
+            abi::event::ENTITY_HEALED,
+            &abi::Hurt { entity: id, source, direct: 0, amount: gained, cause, crit: 0, pad: 0 },
+        );
         true
     }
 
     /// What a dead player carried falls where it died.
-    pub fn drop_inventory(&mut self, c: &Content, id: u64) {
+    pub fn drop_inventory(&mut self, c: &'static Content, id: u64) {
         let Some(items) = self.entities.inventories.get(&id).cloned() else { return };
         let pos = self
             .entities
@@ -2019,13 +2086,51 @@ impl Dim {
         self.space.signals.now = self.time;
         self.players = None;
         self.tick_blocks_first(c);
+        self.tick_effects(c);
         self.source_modifiers(c);
         self.natural_spawns(c);
         self.tick_entities(c);
         self.tick_bodies(c);
         self.tick_blocks_after(c);
-        self.entities.compact();
+        self.compact(c);
         self.finish_tick(c);
+    }
+
+    /// Drops what was removed, telling mods (`event::ENTITY_REMOVED`) what went and why.
+    pub fn compact(&mut self, c: &'static Content) {
+        let gone: Vec<abi::Removed> = self
+            .entities
+            .list
+            .iter()
+            .filter(|e| e.removed && e.removal != UNTOLD)
+            .map(|e| abi::Removed { entity: e.id, kind: e.kind, reason: e.removal, pos: self.place.to_local(e.pos).to_array().into() })
+            .collect();
+        for r in &gone {
+            self.emit_engine(c, abi::event::ENTITY_REMOVED, r);
+        }
+        self.entities.compact();
+    }
+
+    /// `spawn`, set up by `init` (its owner, speed), then asked (`action::SPAWN`, `cause` a
+    /// `spawn_cause`) and told after: 0 when refused.
+    pub fn spawn_by(&mut self, c: &'static Content, kind: u32, pos: DVec3, cause: u32, init: impl FnOnce(&mut Entity)) -> u64 {
+        let id = self.spawn(c, kind, pos);
+        let Some(e) = self.entities.get_mut(id) else { return 0 };
+        init(e);
+        self.announce(c, id, cause)
+    }
+
+    /// A new entity asked about (`action::SPAWN`) and told of: its id, 0 if refused.
+    fn announce(&mut self, c: &'static Content, id: u64, cause: u32) -> u64 {
+        let Some(e) = self.entities.get(id) else { return 0 };
+        let (kind, at) = (e.kind, self.place.to_local(e.pos));
+        let q = abi::Query { entity: id, cause, pos: abi::Vec3::from(at.to_array()).block(), ..abi::Query::DEFAULT };
+        if !self.ask(c, abi::action::SPAWN, &q) {
+            self.entities.remove(id, UNTOLD);
+            return 0;
+        }
+        self.emit_engine(c, abi::action::SPAWN, &abi::Spawned { entity: id, kind, cause, pos: at.to_array().into() });
+        id
     }
 
     fn tick_blocks_first(&mut self, c: &'static Content) {
@@ -2101,7 +2206,7 @@ impl Dim {
             .map(|e| e.id)
             .collect();
         for id in orphans {
-            self.entities.remove(id);
+            self.entities.remove(id, UNTOLD);
         }
         for b in self.bodies.values_mut() {
             b.signals.now = self.time;
@@ -2381,9 +2486,11 @@ impl Dim {
                 }
                 let n = rule.group[0] + (self.rng.next() % (rule.group[1] - rule.group[0] + 1) as u64) as u32;
                 for _ in 0..n {
-                    self.spawn(c, rule.entity, DVec3::new(x as f64 + 0.5, y as f64, z as f64 + 0.5));
+                    let at = DVec3::new(x as f64 + 0.5, y as f64, z as f64 + 0.5);
+                    if self.spawn_by(c, rule.entity, at, abi::spawn_cause::NATURAL, |_| {}) != 0 {
+                        count[rule.category as usize] += 1;
+                    }
                 }
-                count[rule.category as usize] += n;
             }
         }
     }
@@ -2474,14 +2581,10 @@ impl Dim {
             .map(|e| e.id)
             .collect();
         for id in bodies {
-            use crate::registry::attr as a;
-            let (step, gravity, safe) = (
-                self.attribute(c, id, a::STEP_HEIGHT, false),
-                self.attribute(c, id, a::GRAVITY, false),
-                self.attribute(c, id, a::SAFE_FALL, false),
-            );
+            let moves = crate::physics::Moves::of(|a| self.attribute(c, id, a, false));
+            let safe = self.attribute(c, id, crate::registry::attr::SAFE_FALL, false) as f32;
             if let Some(e) = self.entities.get_mut(id) {
-                (e.step_height, e.gravity_mul, e.safe_fall) = (step, gravity, safe as f32);
+                (e.moves, e.safe_fall) = (moves, safe);
             }
         }
         let (here, now, gravity) = (self.id, self.time, c.dims[self.id as usize].gravity as f64);
@@ -2557,8 +2660,8 @@ impl Dim {
                 let k = &c.game.entities[e.kind as usize];
                 let (mut fell, mut splash) = (None, false);
                 let mut crushed = Vec::new();
-                // Players move on their client, bodies moved above; the rest here.
-                if !e.player && !k.is(ef::SOLID) {
+                // Players move on their client, bodies moved above, projectiles after; the rest here.
+                if !e.player && !k.is(ef::SOLID) && k.projectile.is_none() {
                     let (wet, falling) = (e.in_liquid, -e.vel.y * crate::world::TICK);
                     let s = step(c, e, gravity, &block, bodies);
                     crushed = s.crushed;
@@ -2603,7 +2706,7 @@ impl Dim {
                 }
                 // What sets things burning burns a dropped stack up, as lava and fire do in vanilla.
                 if hot && !e.item.is_empty() {
-                    e.removed = true;
+                    e.gone(abi::removal::BURNED);
                 }
                 if wet && !hot {
                     e.fire = 0;
@@ -2611,37 +2714,50 @@ impl Dim {
                 e.fire = e.fire.saturating_sub(1);
                 let burn = e.fire > 0 && e.fire % crate::world::TPS == 0 && !hot;
                 let despawn = c.game.categories[k.category as usize].despawn;
-                if despawn > 0.0 && e.age % 100 == 0 {
+                // A named one, or one that picked something up or a mod keeps, stays.
+                let kept = || comps.contains_key(&(e.id, c.game.persistent_comp)) || comps.contains_key(&(e.id, c.game.name_comp));
+                if despawn > 0.0 && e.age % 100 == 0 && !kept() {
                     let near = players
                         .iter()
                         .any(|p| (*p - e.pos).length_squared() < despawn * despawn);
                     if !near {
-                        e.removed = true;
+                        e.gone(abi::removal::DESPAWNED);
                     }
                 }
                 if !e.item.is_empty() {
                     e.pickup_delay = e.pickup_delay.saturating_sub(1);
                     if e.age > ITEM_LIFETIME {
-                        e.removed = true;
+                        e.gone(abi::removal::EXPIRED);
                     }
                 }
                 (fell.is_some() || splash || burn || !met.is_empty()).then_some(TickHit { id: e.id, fell, splash, burn, met })
             })
             .collect();
-        for (i, push) in super::entity::soft_push(c, &self.entities.list) {
+        let cram = crate::config::get(c.game.max_cramming) as u32;
+        let mut crammed = Vec::new();
+        for (i, push, too_many) in super::entity::soft_push(c, &self.entities.list, cram) {
             self.entities.list[i].vel += push;
+            if too_many {
+                crammed.push(self.entities.list[i].id);
+            }
+        }
+        // Vanilla's: a quarter of the ticks, 6 a time.
+        for id in crammed {
+            if self.random() % 4 == 0 {
+                self.damage(c, id, &abi::Damage::new(6.0, damage::CRAMMING));
+            }
         }
         self.seat_riders(c);
         for TickHit { id, fell, splash, burn, met } in hits {
             self.fall_effects(c, id, fell, splash);
             if let Some(f) = fell {
                 if let Some(amount) = self.fall_damage(c, id, f) {
-                    self.damage(c, id, amount, 0, damage::FALL);
+                    self.damage(c, id, &abi::Damage::new(amount, damage::FALL));
                 }
                 self.riders_fall(c, id, f);
             }
             if burn {
-                self.damage(c, id, 1.0, 0, damage::FIRE);
+                self.damage(c, id, &abi::Damage::new(1.0, damage::FIRE));
             }
             for (state, h) in met {
                 let Some(e) = self
@@ -2666,10 +2782,11 @@ impl Dim {
                     }
                 }
                 if let Some(cause) = h.cause {
-                    self.damage(c, id, h.damage, 0, cause);
+                    self.damage(c, id, &abi::Damage::new(h.damage, cause));
                 }
             }
         }
+        self.fly_projectiles(c);
         self.items(c);
         self.land_falling(c);
     }
@@ -2922,10 +3039,16 @@ impl Dim {
                         .unwrap_or(u32::MAX);
                     self.sound(pickup, pos, 1.0, 0.0);
                     self.emit_engine(c, abi::action::PICKUP_ITEM, &abi::Pickup { entity: pid, stack: ItemStack { count: taken, ..stack } });
+                    // A mob that picked something up keeps it: it no longer despawns, as vanilla's.
+                    if self.entities.get(pid).is_some_and(|e| !e.player) {
+                        self.entities
+                            .comps
+                            .insert((pid, c.game.persistent_comp), Box::new([]));
+                    }
                 }
                 if let Some(e) = self.entities.get_mut(id) {
                     if rest.is_empty() {
-                        e.removed = true;
+                        e.gone(abi::removal::PICKED_UP);
                         self.entities.taken.push((id, pid));
                     } else {
                         e.item = rest;
@@ -2934,7 +3057,7 @@ impl Dim {
                 continue;
             }
             if merging {
-                let max = c.max_stack(stack.item);
+                let max = c.max_stack(&stack);
                 let at = pos.floor().as_ivec3();
                 let list = &self.entities.list;
                 let other = (-1..=1)
@@ -2952,7 +3075,7 @@ impl Dim {
                 if let Some(oi) = other {
                     self.entities.list[oi].item.count += stack.count;
                     if let Some(e) = self.entities.get_mut(id) {
-                        e.removed = true;
+                        e.gone(abi::removal::MERGED);
                     }
                 }
             }
@@ -3182,11 +3305,11 @@ impl Dim {
 
     /// The share of `part` of the cell at `pos` in `frame` an entity's mining does this tick, by
     /// what it holds and where it is now.
-    pub fn mining_rate_of(&mut self, c: &Content, id: u64, frame: u64, pos: IVec3, part: u32) -> f32 {
+    pub fn mining_rate_of(&mut self, c: &'static Content, id: u64, frame: u64, pos: IVec3, part: u32) -> f32 {
         let Some(e) = self.entities.get(id) else { return 0.0 };
         let (wet, on_ground, creative) = (self.head_in_liquid(c, e), e.on_ground, e.mode.has(crate::tag_bits::game_mode::INSTANT_BREAK));
         let tool = self.entities.held(id);
-        let attr = |a| self.attribute(c, id, a, false) as f32;
+        let mut attr = |a| self.attribute(c, id, a, false) as f32;
         use crate::registry::attr as a;
         let speed = attr(a::MINING_SPEED)
             * if wet { attr(a::SUBMERGED_MINING_SPEED) } else { 1.0 }
@@ -3520,12 +3643,30 @@ impl Dim {
         true
     }
 
-    /// True if the block consumed the click.
-    pub fn player_use(&mut self, c: &'static Content, p: IVec3, part: u32, face: u8, player: u64) -> bool {
+    /// True if the block consumed the click. A sneaking player uses it as its `sneak_use` says.
+    pub fn player_use(&mut self, c: &'static Content, p: IVec3, part: u32, face: u8, player: u64, sneaking: bool) -> bool {
         let p = self.block_at(c, p).map_or(p, |b| b.0);
         let state = self.aimed_part(c, p, part);
         if state == AIR {
             return false;
+        }
+        if sneaking {
+            let empty_hands = || {
+                let off = self
+                    .entities
+                    .get(player)
+                    .zip(self.entities.inventories.get(&player))
+                    .map(|(e, i)| crate::content::in_off_hand(c, e.kind, i));
+                self.entities.held(player).is_empty() && off.is_none_or(|s| s.is_empty())
+            };
+            let uses = match c.block_of(state).sneak_use {
+                abi::sneak_use::ALWAYS => true,
+                abi::sneak_use::NEVER => false,
+                _ => empty_hands(),
+            };
+            if !uses {
+                return false;
+            }
         }
         let opens = c.block_of(state).opens;
         if c.block_of(state).cb.on_use.is_some() || opens.is_some() {
@@ -3551,7 +3692,15 @@ impl Dim {
                 c,
                 state,
                 |b| b.on_use,
-                |w| abi::UseArgs { world: w, pos: p.to_array().into(), state, face: face as u32, player, handled: 0 },
+                |w| abi::UseArgs {
+                    world: w,
+                    pos: p.to_array().into(),
+                    state,
+                    face: face as u32,
+                    player,
+                    handled: 0,
+                    sneaking: sneaking as u32,
+                },
             )
         });
         r.is_some_and(|a| a.handled != 0)

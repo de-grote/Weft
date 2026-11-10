@@ -20,6 +20,7 @@ static HUD_FOOD: HudElement = HudElement::named("food");
 static HUD_AIR: HudElement = HudElement::named("air");
 static HUD_ATTACK: HudElement = HudElement::named("attack_indicator");
 static WATER_LIKE: Tag = Tag::named("water");
+static ALWAYS_EATABLE: Tag = Tag::named("can_always_eat");
 
 const MAX_AIR: f32 = 300.0;
 
@@ -61,6 +62,9 @@ pub fn register(r: &mut Registry) {
     r.world_tick(tick_players);
     // Not hungry, it doesn't start eating; the other way round it would only find out at the end.
     r.before_event(&actions::USE_ITEM, |q| {
+        if ALWAYS_EATABLE.on_item(q.item()) {
+            return Verdict::Abstain;
+        }
         let full = FOOD.on_item(q.item()).is_some()
             && q.world()
                 .component(q.entity(), &HUNGER)
@@ -86,7 +90,7 @@ pub fn register(r: &mut Registry) {
     // Armor is a step of the damage chain (modern's CombatRules: big hits go through more of it,
     // unless it is tough), and wears when the hit actually lands, a quarter of the damage per
     // piece (at least 1) like vanilla.
-    r.modify(&chain::DAMAGE, stage::MULTIPLY, |m| {
+    r.modify(&chain::DAMAGE, &phase::MULTIPLY, |m| {
         let q = *m.query();
         if !armor_applies(q.cause) {
             return;
@@ -134,6 +138,11 @@ pub fn register(r: &mut Registry) {
     r.hud_element(&HUD_HEALTH, hud_anchor::HOTBAR_LEFT, 0, |ui| {
         ui.icons("heart", 10, |c| if c.outside_survival() { -1.0 } else { c.player_state().map_or(20.0, |s| s.health.ceil()) })
             .max_by(|c| c.player_state().map_or(20.0, |s| s.max_health.ceil()))
+            // Wither's black hearts over poison's green ones, as vanilla's.
+            .look_while("heart_withered", |c| c.effect_level(&crate::effects::WITHER) as f32)
+            .look_while("heart_poisoned", |c| c.effect_level(&crate::effects::POISON) as f32)
+            // One life: hearts that say so, as vanilla's hardcore ones.
+            .look_while("heart_hardcore", |_| (weft_sdk::settings::LIVES.get() == 1) as u32 as f32)
             .shaking()
             .flash_on_gain(0.5)
             .flash_on_loss(1.0);
@@ -147,6 +156,8 @@ pub fn register(r: &mut Registry) {
     r.hud_element(&HUD_FOOD, hud_anchor::HOTBAR_RIGHT, 0, |ui| {
         ui.icons("food", 10, |c| if c.outside_survival() { -1.0 } else { c.component(&HUNGER).map_or(20.0, |h| h.food.ceil()) })
             .from_right()
+            // Green while something drains it (the hunger effect), as vanilla's.
+            .look_while("food_hunger", |c| c.attribute(&crate::effects::EXHAUSTION) as f32)
             // With no saturation left the food shakes, harder when it is nearly gone.
             .shaking_by(|c| match c.component(&HUNGER) {
                 Some(h) if h.saturation <= 0.0 => {
@@ -189,6 +200,14 @@ pub fn register(r: &mut Registry) {
         .group("result", Slots::single().output().large())
         .equipment()
         .player_inventory()
+        // Last, so the slots before keep their numbers.
+        .group(
+            "trash",
+            Slots::single()
+                .trash()
+                .background("slot_trash")
+                .tooltip("storage.base.trash"),
+        )
         .recipes(&crate::recipes::CRAFTING)
         .on_change(craft_result)
         .on_take(consume_grid)
@@ -206,7 +225,10 @@ pub fn register(r: &mut Registry) {
                             ui.group("result");
                         });
                         ui.spacer();
-                        ui.group(OFF_HAND.name());
+                        ui.row(S::row(), |ui| {
+                            ui.group(OFF_HAND.name());
+                            ui.group("trash");
+                        });
                     });
                 });
                 ui.player_inventory(false);
@@ -288,7 +310,7 @@ fn heal_or_starve(w: &World, id: u64, st: &mut EntityState) {
     h.food_timer = 0;
     if h.food <= 0.0 {
         if st.health > 1.0 {
-            w.damage(id, 1.0, 0, damage_cause::STARVE);
+            w.damage(id, Damage::new(1.0, damage_cause::STARVE));
         }
     } else {
         let spent = if every == 10 { h.saturation.min(6.0) } else { 6.0 };
@@ -348,7 +370,7 @@ fn tick_players(w: &World) {
             h.air -= 1.0;
             if h.air <= -20.0 {
                 h.air = 0.0;
-                w.damage(id, 2.0, 0, damage_cause::DROWN);
+                w.damage(id, Damage::new(2.0, damage_cause::DROWN));
             }
         } else if h.air < MAX_AIR {
             h.air = (h.air + 4.0).min(MAX_AIR);

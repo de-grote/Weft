@@ -81,7 +81,16 @@ pub async fn status_effects(t: T) -> R {
     t.until("drank", Duration::from_secs(5), |t| t.c().inventory_slot(0).item == weft_sdk::Item::named("base:glass_bottle").id())
         .await?;
     t.secs(0.3).await?;
-    t.check((attr(&t, "core:attack_damage").await? - 3.0).abs() < 1e-6, "the potion's strength");
+    t.check((attr(&t, "core:attack_damage").await? - 4.0).abs() < 1e-6, "the potion's strength: a bare hand's 1 and 3");
+    Ok(())
+}
+
+/// Steps run by phase, then by `before`, whoever registered first: (1 + 3) x 2, + 0.5 in a
+/// phase right after multiply, x 3 in rules, x 10 before the late - 1. A question's last answer
+/// that isn't "keep" wins: no, yes, keep is yes.
+pub async fn steps_in_phases(t: T) -> R {
+    t.flat().await?;
+    t.check_eq(t.op("value").await?, "254 1".into(), "value and answer");
     Ok(())
 }
 

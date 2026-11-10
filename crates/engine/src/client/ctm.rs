@@ -1,13 +1,15 @@
-//! Connected and varied block textures. A `<texture>.ctm` file next to a block texture (in a mod
-//! or a resource pack) holds rules for every cube face showing that texture, on any block and any
-//! face (a log side is just its side texture); a pack that replaces the picture without a file of
-//! its own leaves it with none. Methods and keys follow OptiFine/MCPatcher CTM so existing packs
-//! port with little more than renaming files:
+//! Connected and varied block textures. A texture that is a folder of tiles instead of one
+//! picture, `block/glass/` with `glass.ctm` in it (in a mod or a resource pack), has rules for
+//! every cube face showing it, on any block and any face (a log side is just its side texture).
+//! Where nothing connects it (items, particles, distant terrain, faces a rule isn't for) it is the
+//! tile a block alone gets (`assets::ctm_alone`). A pack's plain `glass.png` over a mod's folder
+//! has no rules; a folder and a picture of one mod or pack stop the game. Methods and keys follow
+//! OptiFine/MCPatcher CTM so existing packs port with little more than moving files:
 //!
 //! ```text
 //! method = compact       # ctm (47 tiles), compact (5), horizontal, vertical, h+v, v+h (4/4/7/7),
-//!                        # top (1), random, repeat, fixed (1)
-//! tiles = glass/0-4      # relative to this file; ranges expand, <default> is the plain texture
+//!                        # top (2: plain, then under the same block), random, repeat, fixed (1)
+//! tiles = 0-4            # in this folder (or `mod:block/x` anywhere); ranges expand
 //! connect = tile         # tile (default: neighbors showing this texture on that face, whatever
 //!                        # block they are), block (same block), state (same block state)
 //! faces = sides          # all, top, bottom, sides, north, south, east, west
@@ -64,7 +66,7 @@ enum Connect {
     State,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Rule {
     method: Method,
     connect: Connect,
@@ -92,9 +94,9 @@ pub struct Ctm {
     /// Per texture id: range in `rules`.
     by_texture: Vec<(u32, u32)>,
     rules: Vec<Rule>,
-    /// Per texture id: its `<name>_overlay` texture id + 1, or 0. The overlay is drawn over the
-    /// face and takes the block's tint instead of the face (vanilla's grass sides).
-    pub overlay: Vec<u32>,
+    /// Per texture id: the one it connects as, a tinted copy (`content::tinted_copy`) as its
+    /// picture, so tinted glass joins any glass by tile.
+    connects_as: Vec<u32>,
     /// What tiles draw that are models.
     models: Vec<Vec<ModelBox>>,
     /// Per state, if its faces aren't simply its `textures`: what they show. Neighbors connect
@@ -117,6 +119,9 @@ pub struct Extra {
     /// Compact sets expanded to 47 tiles: per tile, the source texture id of each quadrant
     /// (top-left, top-right, bottom-left, bottom-right). Ids continue after `names`.
     pub composites: Vec<[u32; 4]>,
+    /// Tiles of tinted copies: the tile's texture id and the color. Ids continue after
+    /// `composites`.
+    pub tinted: Vec<(u32, u32)>,
 }
 
 static CURRENT: RwLock<Option<Arc<Ctm>>> = RwLock::new(None);
@@ -230,34 +235,6 @@ fn ranges(v: &str) -> Vec<(i32, i32)> {
         .collect()
 }
 
-/// Tile names relative to the folder of `texture`; `a-b` at the end of an entry expands to numbers.
-fn tile_names(v: &str, texture: &str) -> Vec<Option<String>> {
-    let dir = match texture.rfind('/') {
-        Some(i) => texture[..=i].to_string(),
-        None => texture
-            .split_once(':')
-            .map_or(String::new(), |(ns, _)| format!("{ns}:")),
-    };
-    let full = |rel: &str| if rel.contains(':') { rel.to_string() } else { format!("{dir}{rel}") };
-    let mut out = Vec::new();
-    for t in v.split_whitespace() {
-        if t == "<default>" {
-            out.push(None);
-            continue;
-        }
-        let (prefix, last) = t.rsplit_once('/').map_or(("", t), |(p, l)| (p, l));
-        let prefix = if prefix.is_empty() { String::new() } else { format!("{prefix}/") };
-        match last
-            .split_once('-')
-            .and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)))
-        {
-            Some((a, b)) => out.extend((a..=b).map(|i| Some(full(&format!("{prefix}{i}"))))),
-            None => out.push(Some(full(t))),
-        }
-    }
-    out
-}
-
 /// Whether something drawn other than as a cube shows `tex`, on a face in `faces`.
 fn off_cube(d: &Drawn, tex: u32, faces: u8) -> bool {
     d.model != weft_abi::BlockModel::Cube && (0..6).any(|f| faces & (1 << f) != 0 && d.on_face(f).contains(&tex))
@@ -287,9 +264,21 @@ pub fn load(assets: &Assets, c: &Content, looks: &Looks, mut names: Names) -> (C
     let base = c.textures.len();
     let mut extra = Extra::default();
     let mut ctm = Ctm::default();
-    let mut overlays: Vec<(u32, u32)> = Vec::new();
     let mut todo: Vec<u32> = (0..names.list.len() as u32).collect();
     let mut queued: FxHashSet<u32> = todo.iter().copied().collect();
+    // A tinted copy has its picture's rules, tiles tinted: that picture's are read too.
+    let copies: Vec<(u32, u32, u32)> = (0..base as u32)
+        .filter_map(|t| {
+            let (of, rgb) = crate::content::tinted_copy(&names.list[t as usize])?;
+            let of = of.to_string();
+            Some((t, names.id(&of), rgb))
+        })
+        .collect();
+    for &(_, of, _) in &copies {
+        if queued.insert(of) {
+            todo.push(of);
+        }
+    }
     let mut tile_models: FxHashMap<(String, u32), u32> = FxHashMap::default();
     // Compact sets waiting for their composite ids, which come after every tile name.
     let mut compact: Vec<(usize, u32, Vec<u32>)> = Vec::new();
@@ -297,12 +286,8 @@ pub fn load(assets: &Assets, c: &Content, looks: &Looks, mut names: Names) -> (C
     while let Some(&tex) = todo.get(next) {
         next += 1;
         let name = names.list[tex as usize].clone();
-        let over = format!("{name}_overlay");
-        if assets.path(&over, "textures", "png").is_some() {
-            overlays.push((tex, names.id(&over) + 1));
-        }
         let Some(src) = assets
-            .sidecar(&name, "textures", "png", "ctm")
+            .ctm_rules(&name)
             .and_then(|p| std::fs::read(p).ok())
             .map(|b| String::from_utf8_lossy(&b).into_owned())
         else {
@@ -332,12 +317,7 @@ pub fn load(assets: &Assets, c: &Content, looks: &Looks, mut names: Names) -> (C
             };
             let is_compact = matches!(kv.get("method").copied(), Some("compact" | "ctm_compact"));
             let (mut tiles, mut models) = (Vec::new(), Vec::new());
-            for t in tile_names(kv.get("tiles").copied().unwrap_or(""), &name) {
-                let Some(n) = t else {
-                    tiles.push(tex);
-                    models.push(NO_MODEL);
-                    continue;
-                };
+            for n in crate::assets::ctm_tiles(kv.get("tiles").copied().unwrap_or(""), &name) {
                 let known = tile_models.get(&(n.clone(), tex)).copied();
                 let model = known.or_else(|| {
                     let boxes = tile_model(assets, &n, tex, &mut names)?;
@@ -361,6 +341,7 @@ pub fn load(assets: &Assets, c: &Content, looks: &Looks, mut names: Names) -> (C
                 Method::Ctm => 47,
                 Method::Horizontal | Method::Vertical => 4,
                 Method::HorizontalVertical | Method::VerticalHorizontal => 7,
+                Method::Top => 2,
                 Method::Repeat => {
                     let w = kv
                         .get("width")
@@ -519,9 +500,33 @@ pub fn load(assets: &Assets, c: &Content, looks: &Looks, mut names: Names) -> (C
             .extend(COMPACT.iter().map(|q| q.map(|code| src[code as usize])));
         ctm.rules[rule].tiles = (start..start + 47).collect();
     }
-    ctm.overlay = vec![0; names.list.len()];
-    for (tex, over) in overlays {
-        ctm.overlay[tex as usize] = over;
+    let first_tinted = first_composite + extra.composites.len() as u32;
+    let mut tinted_tiles: FxHashMap<(u32, u32), u32> = FxHashMap::default();
+    for &(copy, of, rgb) in &copies {
+        let &(start, len) = ctm.by_texture.get(of as usize).unwrap_or(&(0, 0));
+        if len == 0 {
+            continue;
+        }
+        let from = ctm.rules.len() as u32;
+        for r in start..start + len {
+            let mut rule = ctm.rules[r as usize].clone();
+            for t in &mut rule.tiles {
+                let next = first_tinted + extra.tinted.len() as u32;
+                *t = *tinted_tiles.entry((*t, rgb)).or_insert_with(|| {
+                    extra.tinted.push((*t, rgb));
+                    next
+                });
+            }
+            ctm.rules.push(rule);
+        }
+        if ctm.by_texture.len() <= copy as usize {
+            ctm.by_texture.resize(copy as usize + 1, (0, 0));
+        }
+        ctm.by_texture[copy as usize] = (from, len);
+    }
+    ctm.connects_as = (0..names.list.len() as u32).collect();
+    for &(copy, of, _) in &copies {
+        ctm.connects_as[copy as usize] = of;
     }
     extra.names = names.list.split_off(base);
     if !ctm.rules.is_empty() {
@@ -547,15 +552,34 @@ impl Ctm {
     /// Works out what the rules mean for each block state.
     fn see_states(&mut self, c: &Content, looks: &Looks) {
         let (any_models, any_open) = (self.rules.iter().any(|r| !r.models.is_empty()), self.rules.iter().any(|r| r.open));
-        self.shown = c
+        // What a face shows is each of its layers, as they connect.
+        let leaves = |list: Vec<u32>| -> Vec<u32> {
+            list.into_iter()
+                .flat_map(|t| c.layers(t).iter().map(|l| self.connects_as(l.tex)))
+                .collect()
+        };
+        let layered = |t: &u32| {
+            c.layers(*t).len() > 1
+                || c.layers(*t)
+                    .first()
+                    .is_some_and(|l| l.tex != *t || l.tint != 0)
+        };
+        let shown: Vec<_> = c
             .states
             .iter()
             .enumerate()
             .map(|(st, s)| {
                 let d = looks.drawn(st as u32, s);
-                (d.model != weft_abi::BlockModel::Cube || d.textures != s.textures).then(|| Box::new(std::array::from_fn(|f| d.on_face(f))))
+                let plain = d.model == weft_abi::BlockModel::Cube
+                    && d.textures == s.textures
+                    && !s
+                        .textures
+                        .iter()
+                        .any(|t| layered(t) || self.connects_as(*t) != *t);
+                (!plain).then(|| Box::new(std::array::from_fn(|f| leaves(d.on_face(f)))))
             })
             .collect();
+        self.shown = shown;
         if any_models {
             self.model_from = vec![(0, NO_MODEL); c.states.len()];
         }
@@ -573,7 +597,11 @@ impl Ctm {
         {
             let d = looks.drawn(st as u32, s);
             for dir in 0..6 {
-                for tex in d.on_face(dir) {
+                for tex in d
+                    .on_face(dir)
+                    .into_iter()
+                    .flat_map(|t| c.layers(t).iter().map(|l| l.tex))
+                {
                     let &(start, len) = self.by_texture.get(tex as usize).unwrap_or(&(0, 0));
                     for rule in &self.rules[start as usize..(start + len) as usize] {
                         if !rule.covers(st as u32) {
@@ -593,9 +621,10 @@ impl Ctm {
 }
 
 impl Ctm {
+    /// The texture `tex` connects as: a tinted copy as its picture.
     #[inline]
-    pub fn has_overlay(&self, tex: u32) -> bool {
-        self.overlay.get(tex as usize).is_some_and(|&o| o != 0)
+    fn connects_as(&self, tex: u32) -> u32 {
+        self.connects_as.get(tex as usize).copied().unwrap_or(tex)
     }
 
     /// Whether a block of these flags hides the faces next to it.
@@ -636,8 +665,9 @@ impl Ctm {
         }
     }
 
-    /// Whether `state` shows `tex` on face `dir`.
+    /// Whether `state` shows `tex` on face `dir`, in any of its layers, tinted or not.
     fn shows(&self, c: &Content, state: u32, dir: usize, tex: u32) -> bool {
+        let tex = self.connects_as(tex);
         match self.shown.get(state as usize) {
             Some(Some(faces)) => faces[dir].contains(&tex),
             _ => c.states[state as usize].textures[dir] == tex,
@@ -744,7 +774,7 @@ impl Ctm {
                     if dir == 2 || dir == 3 || c.states[above as usize].block != info.block {
                         continue;
                     }
-                    0
+                    1
                 }
                 Method::Random => {
                     let group = (dir as u32) / rule.symmetry as u32;
@@ -816,16 +846,7 @@ mod tests {
 
     #[test]
     fn tile_ranges_expand() {
-        let t = tile_names("glass/0-2 <default> other:x/y", "base:block/glass");
-        assert_eq!(
-            t,
-            vec![
-                Some("base:block/glass/0".into()),
-                Some("base:block/glass/1".into()),
-                Some("base:block/glass/2".into()),
-                None,
-                Some("other:x/y".into())
-            ]
-        );
+        let t = crate::assets::ctm_tiles("0-2 other:x/y", "base:block/glass");
+        assert_eq!(t, ["base:block/glass/0", "base:block/glass/1", "base:block/glass/2", "other:x/y"]);
     }
 }

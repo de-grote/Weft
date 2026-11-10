@@ -285,6 +285,16 @@ pub async fn creative_inventory(t: T) -> R {
         t.click_ui("slot:36", 0);
         t.until("bricks in the hotbar", Duration::from_secs(5), |t| t.c().inventory_slot(0).item == stone)
             .await?;
+        // A number key over an entry: a stack of it in that hotbar slot.
+        let Rect { x, y, w, h } = t
+            .c()
+            .ui_rect(&format!("item:{stone}"))
+            .ok_or("no bricks entry")?;
+        t.c().input_cursor(x + w / 2.0, y + h / 2.0);
+        t.frames(3).await?;
+        t.press("core:hotbar5");
+        t.until("bricks by the number key", Duration::from_secs(5), |t| t.c().inventory_slot(4).count == 64)
+            .await?;
     }
     t.c().menu_close();
     t.no_screen().await?;
@@ -639,6 +649,72 @@ pub async fn inventory_hotkeys(t: T) -> R {
     hover(21)?;
     t.secs(0.8).await?;
     t.check(t.slot("me", 20).await?.1 == 0 && t.slot("me", 21).await?.1 == 0, "shift-sweeping moved both cobblestone stacks to the hotbar");
+    t.secs(0.5).await?;
+
+    // The drop keys over a slot: one, then with Ctrl the rest.
+    t.op("put me 12 stick 5").await?;
+    t.secs(0.2).await?;
+    hover(12)?;
+    t.frames(3).await?;
+    t.press("core:drop");
+    t.secs(0.3).await?;
+    t.check_eq(t.slot("me", 12).await?.1, 4, "Q over a slot threw one");
+    t.press("core:drop_all");
+    t.secs(0.3).await?;
+    t.check_eq(t.slot("me", 12).await?.1, 0, "Ctrl+Q threw the rest");
+
+    // A stack picked up and the button still held: slots swept over give theirs.
+    for s in [13, 14, 15] {
+        t.op(&format!("put me {s} sand 1")).await?;
+    }
+    t.secs(0.2).await?;
+    hover(13)?;
+    t.frames(3).await?;
+    t.c().input_click(0, 1.0);
+    t.frames(4).await?;
+    hover(14)?;
+    t.frames(4).await?;
+    hover(15)?;
+    t.secs(1.0).await?;
+    t.check_eq(t.c().cursor_stack().count, 3, "sweeping on with the stack picked up gathered the sand");
+    hover(13)?;
+    t.frames(3).await?;
+    t.c().input_click(0, 0.0);
+    t.secs(0.3).await?;
+
+    // Shift-clicked off with a full hotbar, worn armor goes to the main inventory.
+    for s in 0..9 {
+        t.op(&format!("put me {s} dirt 1")).await?;
+    }
+    t.op("put me 37 iron_chestplate 1").await?;
+    t.secs(0.3).await?;
+    let plate = id("base:iron_chestplate");
+    let at = (0..64)
+        .find(|&i| t.c().menu_slot(i).item == plate)
+        .ok_or("no chestplate in the menu")?;
+    t.c().input_key("ShiftLeft", 0.5);
+    t.frames(1).await?;
+    t.click_ui(&format!("slot:{at}"), 0);
+    t.secs(0.4).await?;
+    let now = (0..64).find(|&i| t.c().menu_slot(i).item == plate);
+    t.check(now.is_some_and(|i| i != at), format!("the chestplate left its slot {at} for {now:?}"));
+
+    // The trash key over a slot: its stack goes to the trash (base's, in the inventory), the
+    // next one takes its place.
+    let slots = t.c().menu().map_or(0, |m| m.slots);
+    t.op("put me 12 stick 3").await?;
+    t.op("put me 13 sand 2").await?;
+    t.secs(0.3).await?;
+    for (slot, item) in [(12, "base:stick"), (13, "base:sand")] {
+        hover(slot)?;
+        t.frames(3).await?;
+        t.press("core:trash");
+        t.secs(0.3).await?;
+        t.check_eq(t.slot("me", slot).await?.1, 0, "the stack left for the trash");
+        let shown: Vec<u32> = (0..slots).map(|i| t.c().menu_slot(i).item).collect();
+        t.check(shown.contains(&id(item)), format!("{item} shown in the trash"));
+    }
+    t.check(!(0..slots).any(|i| t.c().menu_slot(i).item == id("base:stick")), "the sticks gone for the sand");
     Ok(())
 }
 

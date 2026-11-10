@@ -106,12 +106,12 @@ impl Pool {
 #[derive(Clone, Copy)]
 struct GpuMesh {
     /// Its places in `CubeTable`, none for `u32::MAX`.
-    slots: [u32; 4],
+    slots: [u32; 6],
     faces: Option<Alloc>,
-    /// Per layer, per direction rank (see `mesher::DIR_RANK`).
-    face_counts: [[u32; 6]; 3],
+    /// Per layer (`mesher::LAYERS`), per direction rank (see `mesher::DIR_RANK`).
+    face_counts: [[u32; 6]; 4],
     quads: Option<Alloc>,
-    quad_counts: [u32; 3],
+    quad_counts: [u32; 4],
 }
 
 #[derive(Clone, Copy)]
@@ -176,7 +176,8 @@ fn region_of(key: MeshKey) -> (u64, IVec3) {
 /// The draws the CPU makes of a mesh: a structure's all, and of the world's what is translucent, the
 /// rest being `CubeTable`'s.
 fn mesh_draws(m: &GpuMesh, key: MeshKey, lo: Vec3, k: i32, cam_cube: IVec3, out: &mut Vec<DrawRecord>) -> u64 {
-    let first_layer = if k == 0 { 2 } else { 0 };
+    // The world's own are the cube table's but what is translucent.
+    let drawn = |layer: usize| k != 0 || layer == 2;
     let rel = if k == 0 { key.1 - cam_cube } else { key.1 };
     let origin = [rel.x, rel.y, rel.z, k];
     let center = lo + Vec3::splat(8.0);
@@ -192,9 +193,9 @@ fn mesh_draws(m: &GpuMesh, key: MeshKey, lo: Vec3, k: i32, cam_cube: IVec3, out:
         // Directions by rank: +X +Y +Z -X -Y -Z.
         let seen = [lo.x < 0.0, lo.y < 0.0, lo.z < 0.0, lo.x > -16.0, lo.y > -16.0, lo.z > -16.0];
         let mut off = a.offset;
-        for layer in 0..3 {
+        for layer in 0..4 {
             let counts = m.face_counts[layer];
-            if layer < first_layer {
+            if !drawn(layer) {
                 off += counts.iter().sum::<u32>();
                 continue;
             }
@@ -221,9 +222,9 @@ fn mesh_draws(m: &GpuMesh, key: MeshKey, lo: Vec3, k: i32, cam_cube: IVec3, out:
     }
     if let Some(a) = m.quads {
         let mut off = a.offset;
-        for layer in 0..3 {
+        for layer in 0..4 {
             let n = m.quad_counts[layer];
-            if n > 0 && layer >= first_layer {
+            if n > 0 && drawn(layer) {
                 out.push((1, layer as u8, a.page, args(off, n), origin, center));
             }
             off += n;
@@ -291,8 +292,9 @@ impl Solid {
 }
 
 pub struct WorldRenderer {
-    face_pipes: [PipelineId; 3],
-    quad_pipes: [PipelineId; 3],
+    /// By mesh layer: opaque, cutout, translucent, upper layers of faces.
+    face_pipes: [PipelineId; 4],
+    quad_pipes: [PipelineId; 4],
     lod_pipe: PipelineId,
     /// Distant terrain tiles (`lod`): their quads (in `faces`, four words like a face), count
     /// and the heights they span; the ones to draw this frame; and the columns whose cubes show
@@ -339,8 +341,6 @@ pub struct WorldRenderer {
     tint_tiles: u32,
     tex_info: BufferId,
     anim: BufferId,
-    /// Start of the overlay table in `anim`.
-    overlays: u32,
     /// Block shader slot per texture id (`shader_table`).
     tex_shader: BufferId,
     /// `GameTextures::glow_buffer`, bound as it is.
@@ -411,7 +411,7 @@ impl WorldRenderer {
         let (face_pipes, quad_pipes, lod_pipe) = Self::pipelines(gpu, &shader)?;
         let tex_shader = shader_table(gpu, c, textures, &slots);
 
-        let (tex_info, anim, overlays) = Self::texture_info(gpu, textures);
+        let (tex_info, anim) = Self::texture_info(gpu, textures);
 
         // Tint kind colors per biome, then the blended columns (`set_tint_tiles`).
         let biome_data: Vec<u32> = if c.biomes.is_empty() {
@@ -466,7 +466,6 @@ impl WorldRenderer {
             tint_tiles: 0,
             tex_info,
             anim,
-            overlays,
             glow: textures.glow_buffer(),
             tex_shader,
             tex_generation: textures.generation(),
@@ -478,13 +477,13 @@ impl WorldRenderer {
     }
 
     /// The block texture tables (`GameTextures::world_tables`) on the GPU.
-    fn texture_info(gpu: &mut dyn Backend, textures: &GameTextures) -> (BufferId, BufferId, u32) {
-        let (info, frames, overlays) = textures.world_tables();
+    fn texture_info(gpu: &mut dyn Backend, textures: &GameTextures) -> (BufferId, BufferId) {
+        let (info, frames) = textures.world_tables();
         let tex_info = gpu.create_buffer((info.len().max(1) * 4) as u64, usage::STORAGE, "texture info");
         gpu.write_buffer(tex_info, 0, bytemuck::cast_slice(&info));
         let anim = gpu.create_buffer((frames.len() * 4) as u64, usage::STORAGE, "texture frames");
         gpu.write_buffer(anim, 0, bytemuck::cast_slice(&frames));
-        (tex_info, anim, overlays)
+        (tex_info, anim)
     }
 
     /// Builds the texture tables again when textures were loaded since (cheap: a few words per
@@ -496,11 +495,11 @@ impl WorldRenderer {
         }
         gpu.destroy_buffer(self.tex_info);
         gpu.destroy_buffer(self.anim);
-        (self.tex_info, self.anim, self.overlays) = Self::texture_info(gpu, textures);
+        (self.tex_info, self.anim) = Self::texture_info(gpu, textures);
         self.tex_generation = textures.generation();
     }
 
-    fn pipelines(gpu: &mut dyn Backend, shader: &Shader) -> Result<([PipelineId; 3], [PipelineId; 3], PipelineId), String> {
+    fn pipelines(gpu: &mut dyn Backend, shader: &Shader) -> Result<([PipelineId; 4], [PipelineId; 4], PipelineId), String> {
         let depth_write = Some(DepthState { write: true, compare: Compare::GreaterEqual });
         let depth_read = Some(DepthState { write: false, compare: Compare::GreaterEqual });
         let mut make = |label: &str, vs: &str, fs: &str, depth, blend, cull| {
@@ -521,11 +520,14 @@ impl WorldRenderer {
             make("faces opaque", "vs_face", "fs_opaque", depth_write, Blend::None, true)?,
             make("faces cutout", "vs_face", "fs_cutout", depth_write, Blend::None, true)?,
             make("faces translucent", "vs_face", "fs_translucent", depth_read, Blend::Alpha, true)?,
+            // A face's layers over its first, on the very same corners: no depth of their own.
+            make("faces layers", "vs_face", "fs_translucent", depth_read, Blend::Alpha, true)?,
         ];
         let quads = [
             make("quads opaque", "vs_quad", "fs_opaque", depth_write, Blend::None, true)?,
             make("quads cutout", "vs_quad", "fs_cutout", depth_write, Blend::None, true)?,
             make("quads translucent", "vs_quad", "fs_translucent", depth_read, Blend::Alpha, true)?,
+            make("quads layers", "vs_quad", "fs_translucent", depth_read, Blend::Alpha, true)?,
         ];
         let lod = make("distant terrain", "vs_lod", "fs_lod", depth_write, Blend::None, true)?;
         Ok((faces, quads, lod))
@@ -862,7 +864,7 @@ impl WorldRenderer {
             self.table
                 .add(key.1, faces, &face_counts, quads, &quad_counts)
         } else {
-            [u32::MAX; 4]
+            [u32::MAX; 6]
         };
         let mesh = GpuMesh { slots, faces, face_counts, quads, quad_counts };
         if key.0 == 0 && face_counts[2].iter().sum::<u32>() + quad_counts[2] == 0 {
@@ -897,7 +899,7 @@ impl WorldRenderer {
             cam_frac: [cam_frac.x, cam_frac.y, cam_frac.z, 0.0],
             ids: [0, 0, (self.biome_table.len() / crate::content::content().tint_kinds.len()) as u32, self.tint_tiles],
             cam_cube: cam_cube.extend(0).to_array(),
-            extra: [self.overlays, 0, crate::content::content().tint_kinds.len() as u32, self.lod_half],
+            extra: [0, 0, crate::content::content().tint_kinds.len() as u32, self.lod_half],
         };
         let gbuf = self.globals[frame.slot];
         gpu.mapped(gbuf)[..size_of::<Globals>()].copy_from_slice(bytemuck::bytes_of(&globals));
@@ -969,14 +971,15 @@ impl WorldRenderer {
         // of each run go, so the near-to-far order holds inside runs without a sort.
         let seen_parts = &parts[..seen.len()];
         let pages = self.faces.pages.len().max(self.quads.pages.len()).max(1);
-        // Opaque and cutout runs; translucent ones are sorted far to near over all of them.
-        let nb = 4 * pages;
+        // Opaque, cutout and upper layers' runs; translucent ones are sorted far to near over all
+        // of them.
+        let nb = 8 * pages;
         let bucket = |d: &DrawRecord| (d.1 as usize * 2 + d.0 as usize) * pages + d.2 as usize;
         let counts: Vec<Vec<u32>> = seen_parts
             .par_iter()
             .map(|p| {
                 let mut c = vec![0u32; nb];
-                for d in p.iter().filter(|d| d.1 < 2) {
+                for d in p.iter().filter(|d| d.1 != 2) {
                     c[bucket(d)] += 1;
                 }
                 c
@@ -1011,7 +1014,8 @@ impl WorldRenderer {
         trans.par_sort_unstable_by_key(|d| std::cmp::Reverse(d.5.length_squared().to_bits()));
 
         // Distant terrain after the cubes (nearer, they hide most of it), a run per page.
-        let mut lod: Vec<DrawRecord> = self
+        // Each with its box, from the camera's cube in blocks, for the occlusion test to go by.
+        let mut lod: Vec<(DrawRecord, [i32; 6])> = self
             .lod_draw
             .iter()
             .filter_map(|key| {
@@ -1032,18 +1036,24 @@ impl WorldRenderer {
                     vertex_offset: (a.offset * 4) as i32,
                     first_instance: 0,
                 };
-                Some((3, 0, a.page, args, [o.x / 16 - cam_cube.x, -cam_cube.y, o.y / 16 - cam_cube.z, 0], center))
+                let lo = [o.x - cam_cube.x * 16, y0 - cam_cube.y * 16, o.y - cam_cube.z * 16];
+                let size = key.size() as i32;
+                let bounds = [lo[0], lo[1], lo[2], lo[0] + size, lo[1] + (y1 - y0), lo[2] + size];
+                Some(((3, 0, a.page, args, [o.x / 16 - cam_cube.x, -cam_cube.y, o.y / 16 - cam_cube.z, 0], center), bounds))
             })
             .collect();
-        lod.sort_by_key(|d| (d.2, d.5.length_squared().to_bits()));
+        lod.sort_by_key(|d| (d.0.2, d.0.5.length_squared().to_bits()));
+        let (lod, lod_bounds): (Vec<DrawRecord>, Vec<[i32; 6]>) = lod.into_iter().unzip();
         let lods = lod.len() as u32;
         let n = opaque + lods + trans.len() as u32;
         let (gpu_draws, gpu_faces) = self.table.drawn_last(gpu, frame.slot);
-        self.drawn = n + gpu_draws;
-        self.faces_drawn = faces_drawn + gpu_faces;
+        // Read back from the GPU: garbage before it has written them.
+        self.drawn = n.saturating_add(gpu_draws);
+        self.faces_drawn = faces_drawn.saturating_add(gpu_faces);
         let mut runs = std::mem::take(&mut self.runs);
         runs.clear();
-        let obuf = crate::gpu_layout::frame_buffer(gpu, &mut self.origins, frame.slot, n, 16, usage::STORAGE, "origins");
+        // After the draws' origins, two more for each distant tile: the corners of its box.
+        let obuf = crate::gpu_layout::frame_buffer(gpu, &mut self.origins, frame.slot, n + 2 * lods, 16, usage::STORAGE, "origins");
         let fbuf = crate::gpu_layout::frame_buffer(
             gpu,
             &mut self.offsets,
@@ -1076,7 +1086,7 @@ impl WorldRenderer {
             .par_iter()
             .zip(starts.par_iter_mut())
             .for_each(|(p, at)| {
-                for d in p.iter().filter(|d| d.1 < 2) {
+                for d in p.iter().filter(|d| d.1 != 2) {
                     let b = bucket(d);
                     put(at[b], d);
                     at[b] += 1;
@@ -1084,6 +1094,11 @@ impl WorldRenderer {
             });
         for (j, d) in lod.iter().enumerate() {
             put(opaque + j as u32, d);
+        }
+        let boxes = &mut gpu.mapped(obuf)[n as usize * 16..(n + 2 * lods) as usize * 16];
+        for (j, b) in lod_bounds.iter().enumerate() {
+            boxes[j * 32..j * 32 + 12].copy_from_slice(bytemuck::cast_slice(&b[..3]));
+            boxes[j * 32 + 16..j * 32 + 28].copy_from_slice(bytemuck::cast_slice(&b[3..]));
         }
         for (j, d) in trans.iter().enumerate() {
             put(opaque + lods + j as u32, d);
@@ -1269,34 +1284,37 @@ impl CubeTable {
         slot
     }
 
-    /// A mesh's opaque and cutout layers: their places.
+    /// A mesh's opaque, cutout and upper layers (all but what is translucent): their places.
     fn add(
         &mut self,
         cube: IVec3,
         faces: Option<Alloc>,
-        face_counts: &[[u32; 6]; 3],
+        face_counts: &[[u32; 6]; 4],
         quads: Option<Alloc>,
-        quad_counts: &[u32; 3],
-    ) -> [u32; 4] {
-        let mut slots = [u32::MAX; 4];
+        quad_counts: &[u32; 4],
+    ) -> [u32; 6] {
+        let mut slots = [u32::MAX; 6];
+        let mut slot = 0;
         if let Some(a) = faces {
             let mut start = a.offset;
-            for layer in 0..2 {
+            for layer in 0..4 {
                 let c = face_counts[layer];
                 let total: u32 = c.iter().sum();
-                if total > 0 {
+                if total > 0 && layer != 2 {
                     let counts = [c[0] | c[1] << 16, c[2] | c[3] << 16, c[4] | c[5] << 16];
-                    slots[layer] = self.put(cube, a.page * 4 + layer as u32, start, counts);
+                    slots[slot] = self.put(cube, a.page * 8 + layer as u32, start, counts);
+                    slot += 1;
                 }
                 start += total;
             }
         }
         if let Some(a) = quads {
             let mut start = a.offset;
-            for layer in 0..2 {
+            for layer in 0..4 {
                 let n = quad_counts[layer];
-                if n > 0 {
-                    slots[2 + layer] = self.put(cube, a.page * 4 + 2 + layer as u32, start, [n, 0, 0]);
+                if n > 0 && layer != 2 {
+                    slots[slot] = self.put(cube, a.page * 8 + 4 + layer as u32, start, [n, 0, 0]);
+                    slot += 1;
                 }
                 start += n;
             }
@@ -1304,7 +1322,7 @@ impl CubeTable {
         slots
     }
 
-    fn remove(&mut self, slots: [u32; 4]) {
+    fn remove(&mut self, slots: [u32; 6]) {
         for slot in slots.into_iter().filter(|s| *s != u32::MAX) {
             let e = &mut self.entries[slot as usize];
             self.per_bucket[e.bucket as usize] -= 1;
@@ -1374,7 +1392,7 @@ impl CubeTable {
             .per_bucket
             .iter()
             .enumerate()
-            .map(|(id, &n)| n * if id & 2 == 0 { DRAWS_PER_FACES } else { 1 })
+            .map(|(id, &n)| n * if id & 4 == 0 { DRAWS_PER_FACES } else { 1 })
             .sum::<u32>()
             .max(1);
         if self.out.as_ref().is_none_or(|o| o.capacity < needed) {
@@ -1406,7 +1424,7 @@ impl CubeTable {
             for (id, &n) in self.per_bucket.iter().enumerate() {
                 words[id * 2] = 0;
                 words[id * 2 + 1] = base;
-                base += n * if id & 2 == 0 { DRAWS_PER_FACES } else { 1 };
+                base += n * if id & 4 == 0 { DRAWS_PER_FACES } else { 1 };
             }
             words[faces * 2] = 0;
         }
@@ -1428,14 +1446,14 @@ impl CubeTable {
         list.push(Cmd::Barrier);
     }
 
-    /// The buckets with anything in them, in drawing order, opaque before cutout: kind, layer, page,
-    /// bucket, where its draws start and how many it may have.
+    /// The buckets with anything in them, in drawing order, opaque before cutout before upper
+    /// layers: kind, layer, page, bucket, where its draws start and how many it may have.
     fn groups(&self) -> Vec<(u8, u8, u32, u32, u32, u32)> {
         let mut base = 0;
         let mut out = Vec::new();
         for (id, &n) in self.per_bucket.iter().enumerate() {
             let id = id as u32;
-            let (page, kind, layer) = (id / 4, (id >> 1 & 1) as u8, (id & 1) as u8);
+            let (page, kind, layer) = (id / 8, (id >> 2 & 1) as u8, (id & 3) as u8);
             let max = n * if kind == 0 { DRAWS_PER_FACES } else { 1 };
             if n > 0 {
                 out.push((kind, layer, page, id, base, max));

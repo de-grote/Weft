@@ -15,6 +15,7 @@ mod load;
 pub mod lod_tops;
 pub mod path;
 mod player_file;
+mod projectile;
 pub mod signal;
 pub mod space;
 mod sync;
@@ -1071,7 +1072,7 @@ impl Server {
             .and_then(|r| r.entities.take(p.entity));
         let mut frame = None;
         if let Some((mut e, inv, mut comps)) = taken {
-            crate::world::rebase_effects(&mut comps, c.game.fields.effect, dims[to as usize].time as i64 - dims[from].time as i64);
+            extend::rebase_clock(c, &mut e, &mut comps, dims[to as usize].time as i64 - dims[from].time as i64);
             e.pos = pos;
             let id = e.id;
             let r = dims[to as usize].ensure_region(c, pos);
@@ -1325,7 +1326,7 @@ impl Server {
             .collect();
         e.pos = pos;
         let by = self.dims[to_dim as usize].time as i64 - self.dims[dim as usize].time as i64;
-        crate::world::rebase_effects(&mut comps, c.game.fields.effect, by);
+        extend::rebase_clock(c, &mut e, &mut comps, by);
         let r = self.dims[to_dim as usize].ensure_region(c, pos);
         r.entities.insert_with(c, e, inv, comps);
         if let Some(mut s) = structure {
@@ -1333,8 +1334,8 @@ impl Server {
             (s.cell, s.in_touch) = (None, false);
             r.bodies.insert(id, s);
         }
-        for (b, inv, mut comps) in on_it {
-            crate::world::rebase_effects(&mut comps, c.game.fields.effect, by);
+        for (mut b, inv, mut comps) in on_it {
+            extend::rebase_clock(c, &mut b, &mut comps, by);
             r.entities.insert_with(c, b, inv, comps);
         }
     }

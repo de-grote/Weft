@@ -31,6 +31,8 @@ pub struct IconEffect {
     pub bind: Option<FloatBind>,
     pub amount: f32,
     pub value: f32,
+    /// `LOOK`: the class drawn instead.
+    pub class: String,
 }
 
 /// A row of icons as `abi::icon_effect::MAX` makes it: how many icons, in how many rows of
@@ -90,6 +92,9 @@ pub struct Style {
     /// Placed at a point instead of in the flow: (x, y) in GUI pixels from the parent's inner
     /// corner, and which point of the node goes there (0..1 of its width and height).
     pub at: Option<[f32; 4]>,
+    /// The point of the parent's inside `at` counts from, 0..1 of its width and height (top
+    /// left unless said).
+    pub at_from: [f32; 2],
 }
 
 impl Default for Style {
@@ -110,6 +115,7 @@ impl Default for Style {
             scroll: false,
             fill: None,
             at: None,
+            at_from: [0.0; 2],
         }
     }
 }
@@ -119,6 +125,11 @@ impl Style {
     pub fn at(mut self, x: f32, y: f32, pivot: [f32; 2]) -> Self {
         self.at = Some([x, y, pivot[0], pivot[1]]);
         self
+    }
+    /// `at` from point `from` of the parent's inside ([1.0, 0.0] its top right corner).
+    pub fn at_from(mut self, from: [f32; 2], x: f32, y: f32, pivot: [f32; 2]) -> Self {
+        self.at_from = from;
+        self.at(x, y, pivot)
     }
     pub fn row() -> Style {
         Style { row: true, align: Align::Center, ..Default::default() }
@@ -222,6 +233,9 @@ pub struct TextNode {
     pub line: Option<f32>,
 }
 
+/// Two clicks on one button closer than this are a double click.
+pub const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(400);
+
 pub enum Kind {
     Container {
         class: Option<String>,
@@ -230,6 +244,8 @@ pub enum Kind {
     Button {
         class: String,
         action: Option<Action>,
+        /// Clicked twice in a row (`DOUBLE_CLICK`), after `action`.
+        on_double: Option<Action>,
         enabled: bool,
         selected: bool,
     },
@@ -273,6 +289,9 @@ pub enum Kind {
         value: f32,
         bind: FloatBind,
         on_change: Rc<dyn Fn(&mut Ctx, f32)>,
+        /// With one, dragging only shows (`on_change`) and this takes the value when let go: a
+        /// GUI scale that would change under the cursor on its way.
+        on_release: Option<Rc<dyn Fn(&mut Ctx, f32)>>,
         steps: u32,
     },
     /// Engine-drawn content (slots, 3D previews) identified by a tag.
@@ -567,7 +586,18 @@ impl Ui {
     }
 
     pub fn button(&mut self, class: &str, style: Style, action: Action, f: impl FnOnce(&mut Ui)) -> NodeId {
-        self.with(Kind::Button { class: class.to_string(), action: Some(action), enabled: true, selected: false }, style.center(), f)
+        self.with(
+            Kind::Button { class: class.to_string(), action: Some(action), on_double: None, enabled: true, selected: false },
+            style.center(),
+            f,
+        )
+    }
+
+    /// What clicking button `node` twice in a row does too.
+    pub fn on_double_click(&mut self, node: NodeId, action: Action) {
+        if let Kind::Button { on_double, .. } = &mut self.nodes[node].kind {
+            *on_double = Some(action);
+        }
     }
 
     pub fn text_mut(&mut self, id: NodeId) -> Option<&mut TextNode> {
@@ -665,6 +695,10 @@ impl Ui {
                         main += cm + if i > 0 { style.gap } else { 0.0 };
                         cross = cross.max(cc);
                     }
+                    // A column that will scroll is wider by its bar, so the bar covers nothing.
+                    if style.scroll && !style.row && main + pad_h > fixed_h.unwrap_or(avail[1]) {
+                        cross += Scrollbar::ROOM;
+                    }
                     if style.row { [main, cross] } else { [cross, main] }
                 }
             }
@@ -673,10 +707,10 @@ impl Ui {
             .unwrap_or(content[0] + pad_w)
             .max(style.min[0])
             .min(style.max_w);
-        let h = fixed_h
-            .unwrap_or(content[1] + pad_h)
-            .max(style.min[1])
-            .min(style.max_h);
+        // What scrolls up and down needs no more height than it gets: a row holding a long list
+        // stays as tall as the screen, and so do the list's neighbors stretched beside it.
+        let own_h = if style.scroll && !style.row { (content[1] + pad_h).min(avail[1]) } else { content[1] + pad_h };
+        let h = fixed_h.unwrap_or(own_h).max(style.min[1]).min(style.max_h);
         self.nodes[id].measured = [w, h];
         [w, h]
     }
@@ -711,7 +745,9 @@ impl Ui {
             .collect();
         for c in placed {
             let ([x, y, px, py], [w, h]) = (self.nodes[c].style.at.unwrap(), self.nodes[c].measured);
-            self.arrange(c, Rect { x: inner.x + x - px * w, y: inner.y + y - py * h, w, h }, font);
+            let [fx, fy] = self.nodes[c].style.at_from;
+            let (ox, oy) = (inner.x + fx * inner.w, inner.y + fy * inner.h);
+            self.arrange(c, Rect { x: ox + x - px * w, y: oy + y - py * h, w, h }, font);
         }
         let children: Vec<NodeId> = children
             .into_iter()

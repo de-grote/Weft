@@ -104,12 +104,24 @@ impl Client {
             ToClient::Despawn(ids) => {
                 self.entity_components
                     .retain(|(e, _), _| !ids.iter().any(|g| g.0 == *e));
-                for (id, killed) in ids {
+                for &(id, killed) in &ids {
                     self.showing_blocks.remove(&id);
+                    // What is stuck in one that died goes down with it.
+                    let host = self.entities.get(&id).and_then(|e| e.stuck).map(|s| s.host);
+                    let host_dies = host.is_some_and(|h| {
+                        ids.contains(&(h, true))
+                            || self.entities.get(&h).is_some_and(|h| h.dying.is_some())
+                            || (h == self.player_id && self.me.dying.is_some())
+                    });
                     // Killed mobs stay a moment for the death animation, taken items until
                     // they reach the taker.
                     match self.entities.get_mut(&id) {
                         Some(e) if e.pulled.is_some() => {}
+                        Some(e) if host_dies => {
+                            if let Some(s) = &mut e.stuck {
+                                s.leaving = true;
+                            }
+                        }
                         Some(e) if (killed || e.health <= 0.0) && e.item.is_empty() && e.dying.is_none() => e.dying = Some(0.0),
                         _ => {
                             self.entities.remove(&id);
@@ -160,6 +172,8 @@ impl Client {
             ToClient::CloseMenu => {
                 self.menu = None;
                 self.drag = None;
+                self.sweep.clear();
+                self.picking.clear();
                 self.events.push(ClientEvent::CloseMenu);
             }
             ToClient::BreakRefused { frame, pos } => {
@@ -167,7 +181,7 @@ impl Client {
                 self.breaking = None;
             }
             ToClient::Using(ticks) => {
-                self.using = ticks.map(|(t, _)| (t as f32, t as f32));
+                self.using = ticks.map(|(t, _)| (0.0, t as f32));
                 self.using_off = ticks.is_some_and(|(_, off)| off);
             }
 
@@ -181,10 +195,10 @@ impl Client {
             ToClient::StopSprint => self.sprint_stopped = true,
             ToClient::LodColumns { dim, all, cols } => self.lod.set_columns(dim, all, &cols),
             ToClient::Camera { mode, locked, transition, easing } => self.camera_from_server(mode, locked, transition, easing),
-            ToClient::Knock { away } => {
-                let away = Vec3::from_array(away).as_dvec3();
+            ToClient::Knock { push } => {
+                let push = Vec3::from_array(push).as_dvec3();
                 let resist = self.attribute(crate::registry::attr::KNOCKBACK_RESISTANCE) as f64;
-                self.player.vel = physics::knock(self.player.vel, away, self.player.on_ground, resist);
+                self.player.vel = physics::knock(self.player.vel, push, self.player.on_ground, resist);
             }
             ToClient::Velocity { add } => self.player.vel += Vec3::from_array(add).as_dvec3(),
             ToClient::SetVelocity(v) => self.player.vel = Vec3::from_array(v).as_dvec3(),
@@ -304,7 +318,7 @@ impl Client {
                 let was = e.target;
                 e.target = pos;
                 e.target_yaw = yaw;
-                e.pitch = pitch;
+                e.target_pitch = pitch;
                 e.frame = frame;
                 if solid(e.kind) {
                     // A paused server keeps sending the same tick: one sample per

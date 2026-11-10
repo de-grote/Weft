@@ -266,7 +266,12 @@ pub(crate) fn register_rules(r: &mut crate::Registry, kind: &'static crate::Enti
                 .filter(|h| w.entity(h.entity).is_some_and(|s| kind.is(s.kind)))
             {
                 for rider in w.riders(h.entity).into_iter().flatten() {
-                    w.damage(rider, h.amount * share, h.source, h.cause);
+                    w.damage(
+                        rider,
+                        crate::Damage::new(h.amount * share, h.cause)
+                            .by(h.source)
+                            .through(h.direct),
+                    );
                 }
             }
         });

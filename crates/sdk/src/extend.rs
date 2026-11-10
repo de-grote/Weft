@@ -5,10 +5,11 @@
 //! pub static EATEN: Event<Eaten> = Event::named("eaten");
 //! r.on_event(&EATEN, |b| for e in b.iter() { b.world().damage(..) });
 //! w.emit(&EATEN, Eaten { .. });
-//! // May it happen? Any deny wins:
+//! // May it happen? Each answer is no, keep or yes, the last that isn't keep wins:
 //! r.before_event(&actions::BREAK_BLOCK, |q| if q.pos()[1] < 0 { Verdict::Deny } else { Verdict::Abstain });
-//! // Computed values in stages, explainable:
-//! r.modify(&chain::DAMAGE, stage::MULTIPLY, |m| m.value *= 0.5);
+//! // Values computed step by step in phases, explainable; attributes and questions are chains too:
+//! r.modify(&chain::DAMAGE, &phase::MULTIPLY, |m| m.value *= 0.5);
+//! r.modify(&attribute::MOVEMENT_SPEED, &phase::ADD, |m| m.value += 0.1);
 //! // Loot tables any mod can change:
 //! r.loot(&OAK_LEAVES).pool(Pool::new().when(Cond::chance(0.05)).item("sapling"));
 //! r.edit(base::ZOMBIE.loot()).pool(Pool::new().item("mymod:brain"));
@@ -20,11 +21,69 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::abi::{self, ItemStack, Slice, Str};
 use crate::component::Value;
-use crate::{Attribute, Chain, LootSource, LootTable, Question, Registry, WithComponents, World, callback, comps, host, qualify};
+use crate::{
+    Attribute, Chain, LootSource, LootTable, Phase, Question, Registry, Step, WithComponents, World, callback, comps, host, qualify,
+};
 
 pub use abi::{
-    BlockChange, ChatMessage, Death, DimensionChange, Hurt, Interaction, ItemUsed, Pickup, PlayerEvent, attr_op, permission, stage,
+    BlockChange, ChatMessage, Death, DimensionChange, EffectChange, Hurt, Interaction, ItemUsed, Pickup, PlayerEvent, Removed, Spawned,
+    permission, removal, spawn_cause,
 };
+
+/// The engine's phases, in the order they run (`Registry::phase` puts a mod's after one).
+pub mod phase {
+    use crate::Phase;
+    /// What the thing is: a weapon's own damage, a set base.
+    pub static BASE: Phase = Phase::named(crate::abi::phase::BASE);
+    pub static ADD: Phase = Phase::named(crate::abi::phase::ADD);
+    /// Shares of the value the phase started from, added up (vanilla's percent modifiers).
+    pub static PERCENT: Phase = Phase::named(crate::abi::phase::PERCENT);
+    pub static MULTIPLY: Phase = Phase::named(crate::abi::phase::MULTIPLY);
+    /// Where questions are answered unless said otherwise.
+    pub static RULES: Phase = Phase::named(crate::abi::phase::RULES);
+    pub static OVERRIDE: Phase = Phase::named(crate::abi::phase::OVERRIDE);
+    /// For what has to see the finished value.
+    pub static FINAL: Phase = Phase::named(crate::abi::phase::FINAL);
+}
+
+/// The engine's steps that take a modifier's number: `ADD` adds it, `MUL` multiplies by it,
+/// `SET` makes the value it, `PERCENT` adds that share of what the phase started from.
+pub mod step {
+    use crate::Step;
+    pub static ADD: Step = Step::named(crate::abi::step::ADD);
+    pub static MUL: Step = Step::named(crate::abi::step::MUL);
+    pub static SET: Step = Step::named(crate::abi::step::SET);
+    pub static PERCENT: Step = Step::named(crate::abi::step::PERCENT);
+}
+
+/// What a step can change: a chain, an attribute, a question (an action's included).
+pub trait Valued {
+    fn chain_name(&self) -> &str;
+}
+
+impl Valued for Chain {
+    fn chain_name(&self) -> &str {
+        self.name()
+    }
+}
+
+impl Valued for Attribute {
+    fn chain_name(&self) -> &str {
+        self.name()
+    }
+}
+
+impl Valued for Question {
+    fn chain_name(&self) -> &str {
+        self.name()
+    }
+}
+
+impl<T: Value> Valued for Action<T> {
+    fn chain_name(&self) -> &str {
+        self.ask.name()
+    }
+}
 
 /// The engine's questions with no event after them (`Registry::before_event`, `World::ask`); the
 /// others are `actions`.
@@ -38,15 +97,36 @@ pub mod question {
     /// Cubes kept loaded (`World::keep_loaded`) from block `pos`, `amount` the mode
     /// (`force_load::*`), `other` the ticket's key: deny one in someone else's claim.
     pub static FORCE_LOAD: Question = Question::named(crate::abi::action::FORCE_LOAD);
+    /// Whether a melee hit (`entity` on `other` with `item`, swing `charge`) is a critical one;
+    /// vanilla's test is the step `core:vanilla_crit`.
+    pub static CRIT: Question = Question::named(crate::abi::question::CRIT);
+    /// Whether the hit also sweeps those beside the target (`core:vanilla_sweep`).
+    pub static SWEEP: Question = Question::named(crate::abi::question::SWEEP);
+    /// Whether `entity` is still recovering from its last hurt, so this one only lands what
+    /// goes beyond it and doesn't knock (`core:hurt_cooldown`). Deny it for a weapon that
+    /// ignores the pause.
+    pub static RECOVERING: Question = Question::named(crate::abi::question::RECOVERING);
 }
 
 /// The engine's value chains (`Registry::modify`, `World::chain_compute`).
 pub mod chain {
     use crate::Chain;
-    /// Damage an entity takes (`entity` hurt by `other`, `cause`), after `on_hurt` hooks.
+    /// Damage an entity takes (`entity` hurt by `other` through `direct`, `cause`, `crit`):
+    /// `core:resistance`, `core:not_lethal`.
     pub static DAMAGE: Chain = Chain::named(crate::abi::chain::DAMAGE);
-    /// Melee damage of `entity` hitting `other` holding `item`, from the item's `attack_damage`.
-    pub static ATTACK_DAMAGE: Chain = Chain::named(crate::abi::chain::ATTACK_DAMAGE);
+    /// What a melee hit does from the attacker's `attribute::ATTACK_DAMAGE` against the target:
+    /// `core:charge` (0.2 + 0.8 x charge squared), `core:crit` (times `CRIT_DAMAGE`).
+    pub static MELEE: Chain = Chain::named(crate::abi::chain::MELEE);
+    /// How hard a hurt knocks (0.4).
+    pub static KNOCKBACK: Chain = Chain::named(crate::abi::chain::KNOCKBACK);
+    /// What a sweep does to those beside the target, from the hit's damage.
+    pub static SWEEP_DAMAGE: Chain = Chain::named(crate::abi::chain::SWEEP_DAMAGE);
+    pub static HEAL: Chain = Chain::named(crate::abi::chain::HEAL);
+    /// What a projectile does to what it hits, from its damage: times its speed, rounded up.
+    pub static PROJECTILE_DAMAGE: Chain = Chain::named(crate::abi::chain::PROJECTILE_DAMAGE);
+    /// What a fall does, from how far (`amount`): past `SAFE_FALL`, times
+    /// `FALL_DAMAGE_MULTIPLIER`. Hay or a trampoline is a step reading what is under the faller.
+    pub static FALL_DAMAGE: Chain = Chain::named(crate::abi::chain::FALL_DAMAGE);
 }
 
 /// Attributes the engine reads.
@@ -85,7 +165,8 @@ pub mod attribute {
     pub static GRAVITY: Attribute = Attribute::named(crate::abi::attribute::GRAVITY);
     /// Share of knockback shrugged off (0..1).
     pub static KNOCKBACK_RESISTANCE: Attribute = Attribute::named(crate::abi::attribute::KNOCKBACK_RESISTANCE);
-    /// Added to each melee hit (0).
+    /// Its own melee damage as vanilla's (1; a kind's `.attack_damage(..)`), what it holds adding
+    /// to it.
     pub static ATTACK_DAMAGE: Attribute = Attribute::named(crate::abi::attribute::ATTACK_DAMAGE);
     /// Share of damage taken off after armor (0..1).
     pub static DAMAGE_RESISTANCE: Attribute = Attribute::named(crate::abi::attribute::DAMAGE_RESISTANCE);
@@ -99,20 +180,51 @@ pub mod attribute {
     pub static AIRBORNE_MINING_SPEED: Attribute = Attribute::named(crate::abi::attribute::AIRBORNE_MINING_SPEED);
     /// How much its player sees as if everything were lit (0..1).
     pub static NIGHT_VISION: Attribute = Attribute::named(crate::abi::attribute::NIGHT_VISION);
+    /// Multiplier on how fast it moves itself in liquids (1).
+    pub static SWIM_SPEED: Attribute = Attribute::named(crate::abi::attribute::SWIM_SPEED);
+    /// Multiplier on how fast it flies (1).
+    pub static FLYING_SPEED: Attribute = Attribute::named(crate::abi::attribute::FLYING_SPEED);
+    /// What a critical hit multiplies by (1.5).
+    pub static CRIT_DAMAGE: Attribute = Attribute::named(crate::abi::attribute::CRIT_DAMAGE);
+    /// Share of a hit's damage a sweep adds to its 1 (0).
+    pub static SWEEPING_DAMAGE_RATIO: Attribute = Attribute::named(crate::abi::attribute::SWEEPING_DAMAGE_RATIO);
+    /// Extra knockback of its melee hits (0).
+    pub static ATTACK_KNOCKBACK: Attribute = Attribute::named(crate::abi::attribute::ATTACK_KNOCKBACK);
+    /// Ticks after a hurt in which a weaker one doesn't land (10).
+    pub static HURT_COOLDOWN: Attribute = Attribute::named(crate::abi::attribute::HURT_COOLDOWN);
 }
 
-/// An attribute modifier that comes with something (`.modifier(..)` on an item, a pose, an
-/// entity kind): `Modifier::add(&attribute::MOVEMENT_SPEED, 0.2)`, while worn (`.worn()`) or
-/// while conditions hold for its holder (`.when(..)`).
+/// A step with a number on an attribute, that comes with something (`.modifier(..)` on an item,
+/// a pose, an entity kind, an effect) or is put on an entity (`World::attribute_add_modifier`):
+/// `Modifier::add(&attribute::MOVEMENT_SPEED, 0.2)`, while worn (`.worn()`) or while conditions
+/// hold for its holder (`.when(..)`). Any code of your own is a step too: `Modifier::step(&A,
+/// &MY_STEP, 2.0)` runs `MY_STEP` (`Registry::step`) with 2.0 as `Modify::arg`.
 #[derive(Clone)]
 pub struct Modifier(pub(crate) abi::Modifier);
 
 impl Modifier {
-    pub fn new(attribute: &crate::Attribute, op: u32, amount: f64) -> Modifier {
-        Modifier(abi::Modifier { attribute: attribute.name().to_string(), op, amount, ..Default::default() })
+    pub fn step(attribute: &crate::Attribute, step: &Step, amount: f64) -> Modifier {
+        Modifier(abi::Modifier { attribute: attribute.name().to_string(), step: step.name().to_string(), amount, ..Default::default() })
     }
     pub fn add(attribute: &crate::Attribute, amount: f64) -> Modifier {
-        Modifier::new(attribute, abi::attr_op::ADD, amount)
+        Modifier::step(attribute, &step::ADD, amount)
+    }
+    pub fn mul(attribute: &crate::Attribute, factor: f64) -> Modifier {
+        Modifier::step(attribute, &step::MUL, factor)
+    }
+    /// The value becomes `value`, at the end (`phase::OVERRIDE`) unless `.phase(..)` says.
+    pub fn set(attribute: &crate::Attribute, value: f64) -> Modifier {
+        Modifier::step(attribute, &step::SET, value)
+    }
+    /// Adds `share` of the value its phase started from: vanilla's percent modifiers, which add
+    /// up (speed and slowness together are +5%, not 1.2 x 0.85).
+    pub fn percent(attribute: &crate::Attribute, share: f64) -> Modifier {
+        Modifier::step(attribute, &step::PERCENT, share)
+    }
+    /// Runs in `phase` rather than its step's own.
+    pub fn phase(mut self, phase: &Phase) -> Modifier {
+        self.0.phase = phase.name().to_string();
+        self
     }
     /// An item's, while it is in an equipment slot rather than in the main hand.
     pub fn worn(mut self) -> Modifier {
@@ -175,7 +287,12 @@ schema_values!(
     abi::Interaction,
     abi::Mounting,
     abi::DimensionChange,
-    abi::WeatherTick
+    abi::WeatherTick,
+    abi::Spawned,
+    abi::Removed,
+    abi::ProjectileHit,
+    abi::KeyChange,
+    abi::EffectChange
 );
 
 /// The engine's events with no question before them; the others are `actions`.
@@ -188,9 +305,16 @@ pub static PLAYER_RESPAWNED: Event<abi::PlayerEvent> = Event::named(abi::event::
 pub static ENTITY_HEALED: Event<abi::Hurt> = Event::named(abi::event::ENTITY_HEALED);
 /// Every tick in each dimension with weather: which it is.
 pub static WEATHER_TICK: Event<abi::WeatherTick> = Event::named(abi::event::WEATHER_TICK);
+/// A player pressed an action or let go of it (`held_ticks` after how long): any key binding, the
+/// mouse buttons' `keys::USE` and `keys::ATTACK` too. Keys of your own are `Registry::key`.
+pub static KEY: Event<abi::KeyChange> = Event::named(abi::event::KEY);
+/// An entity left the world, and why (`removal`): died, despawned, unloaded, picked up..
+pub static ENTITY_REMOVED: Event<abi::Removed> = Event::named(abi::event::ENTITY_REMOVED);
+/// An effect ran out or was taken off.
+pub static EFFECT_ENDED: Event<abi::EffectChange> = Event::named(abi::event::EFFECT_ENDED);
 
-/// Something that happens, as one name: the question asked before it (`r.before_event(&A, ..)`,
-/// any deny wins) and the event after (`r.on_event(&A, ..)`). The engine's are in `actions`; a mod's
+/// Something that happens, as one name: the question asked before it (`r.before_event(&A, ..)`)
+/// and the event after (`r.on_event(&A, ..)`). The engine's are in `actions`; a mod's
 /// own goes through `w.act(&WRENCH, &mut query, value)`.
 ///
 /// ```ignore
@@ -234,9 +358,9 @@ impl<T: Value> AsRef<Event<T>> for Event<T> {
 }
 
 impl World {
-    /// Asks `action`'s question with `q`, and when nobody refuses sends its event with `value`.
+    /// Asks `action`'s question with `q`, and when the answer is yes sends its event with `value`.
     /// True if it may happen.
-    pub fn act<T: Value>(&self, action: &Action<T>, q: &mut abi::Query, value: T) -> bool {
+    pub fn act<T: Value>(&self, action: &Action<T>, q: &abi::Query, value: T) -> bool {
         let ok = self.ask(action, q);
         if ok {
             self.emit(action, value);
@@ -265,6 +389,15 @@ pub mod actions {
     /// Asked with `entity` the rider, `other` the mount, `amount` the seat.
     pub static MOUNT: Action<abi::Mounting> = Action::named(a::MOUNT);
     pub static DISMOUNT: Action<abi::Mounting> = Action::named(a::DISMOUNT);
+    /// Asked with `entity` just made and not yet seen, `cause` (`spawn_cause`), `pos`: a no and
+    /// it never was. Sent when it came. Not for dropped stacks and moving blocks.
+    pub static SPAWN: Action<abi::Spawned> = Action::named(a::SPAWN);
+    /// Asked with `entity` about to get effect `cause` at level `amount` for `state` ticks (an
+    /// immunity, a milk of your own); sent when it got it.
+    pub static EFFECT: Action<abi::EffectChange> = Action::named(a::EFFECT);
+    /// Asked with `entity` the projectile, `other` what it hits (0: the block at `pos`), `amount`
+    /// its speed: no, and it flies on past them. Sent when it hit.
+    pub static PROJECTILE_HIT: Action<abi::ProjectileHit> = Action::named(a::PROJECTILE_HIT);
 }
 
 /// Every value of one event queued during a tick, in the order they happened.
@@ -288,6 +421,8 @@ impl<T: Copy> EventBatch<T> {
     }
 }
 
+/// A question's answer at one step: `Deny` (no), `Abstain` (keep what the steps before said),
+/// `Allow` (yes). The last that isn't `Abstain` wins; nobody saying either way is yes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Verdict {
     Abstain,
@@ -295,11 +430,12 @@ pub enum Verdict {
     Deny,
 }
 
-/// A question being asked (`Registry::before_event`).
+/// A question being asked (`Registry::before_event`); `answer` is what the steps before said.
 pub struct Ask {
     world: World,
     question: &'static str,
-    query: *mut abi::Query,
+    query: abi::Query,
+    pub answer: bool,
 }
 
 impl Ask {
@@ -310,36 +446,41 @@ impl Ask {
         self.question
     }
     pub fn query(&self) -> &abi::Query {
-        unsafe { &*self.query }
+        &self.query
     }
     pub fn entity(&self) -> u64 {
-        self.query().entity
+        self.query.entity
     }
     pub fn pos(&self) -> BlockPos {
-        self.query().pos
+        self.query.pos
     }
     pub fn state(&self) -> u32 {
-        self.query().state
+        self.query.state
     }
     /// What a player is about to say (`actions::CHAT`).
     pub fn text(&self) -> &str {
-        unsafe { self.query().text.as_str() }
+        unsafe { self.query.text.as_str() }
     }
     pub fn item(&self) -> u32 {
-        self.query().item
+        self.query.item
     }
     /// Whether `question::CAMERA` asks about `mode`.
     pub fn is_camera(&self, mode: &crate::CameraMode) -> bool {
-        self.query().amount == mode.id() as f64
+        self.query.amount == mode.id() as f64
     }
 }
 
-/// One step of a value chain (`Registry::modify`): read the context, change `value`.
+/// One step's run (`Registry::modify`, `Registry::step`): read the context, change `value`.
+/// `base` is where the chain began, `start` where this phase began, `arg` the number a modifier
+/// gave the step (0 on a chain). A question's value is 1 for yes, 0 for no.
 pub struct Modify {
     world: World,
     query: abi::Query,
+    chain: &'static str,
     pub base: f64,
+    pub start: f64,
     pub value: f64,
+    pub arg: f64,
 }
 
 impl Modify {
@@ -349,7 +490,86 @@ impl Modify {
     pub fn query(&self) -> &abi::Query {
         &self.query
     }
+    /// The chain it runs in: one step may be on several (a modifier on any attribute).
+    pub fn chain(&self) -> &str {
+        self.chain
+    }
 }
+
+fn step_cb(f: impl Fn(&mut Modify) + Send + Sync + 'static) -> abi::Callback {
+    callback(move |a: &mut abi::StepArgs| {
+        let mut m = Modify {
+            world: World::from_raw(a.world),
+            query: unsafe { *a.ctx },
+            chain: unsafe { std::mem::transmute::<&str, &'static str>(a.chain.as_str()) },
+            base: a.base,
+            start: a.start,
+            value: a.value,
+            arg: a.arg,
+        };
+        f(&mut m);
+        a.value = m.value;
+    })
+}
+
+/// A step being registered (`Registry::step`, `modify`, `before_event`).
+pub struct StepBuilder<'a> {
+    reg: &'a mut Registry,
+    e: crate::entry::Entry,
+}
+
+impl StepBuilder<'_> {
+    /// Runs every time `chain` is computed; without, only where a modifier names it.
+    pub fn on(self, chain: &impl Valued) -> Self {
+        self.set_text(&comps::step::CHAIN, chain.chain_name())
+    }
+    pub fn phase(self, phase: &Phase) -> Self {
+        self.set_text(&comps::step::PHASE, phase.name())
+    }
+    /// Runs after step `name` when both are in one phase of a chain.
+    pub fn after(self, name: &str) -> Self {
+        self.push(&comps::step::AFTER, crate::full_name(name))
+    }
+    pub fn before(self, name: &str) -> Self {
+        self.push(&comps::step::BEFORE, crate::full_name(name))
+    }
+    /// What it does to the value.
+    pub fn run(self, f: impl Fn(&mut Modify) + Send + Sync + 'static) -> Self {
+        self.set(&comps::step::CALL, step_cb(f))
+    }
+    /// What it says to a question.
+    pub fn answer(self, f: impl Fn(&Ask) -> Verdict + Send + Sync + 'static) -> Self {
+        self.run(move |m| {
+            let ask = Ask { world: m.world, question: m.chain, query: m.query, answer: m.value != 0.0 };
+            match f(&ask) {
+                Verdict::Abstain => {}
+                Verdict::Allow => m.value = 1.0,
+                Verdict::Deny => m.value = 0.0,
+            }
+        })
+    }
+}
+
+/// A phase being registered (`Registry::phase`).
+pub struct PhaseBuilder<'a> {
+    reg: &'a mut Registry,
+    e: crate::entry::Entry,
+}
+
+impl PhaseBuilder<'_> {
+    /// Comes right after `phase` (after phases that said so before it).
+    pub fn after(self, phase: &Phase) -> Self {
+        self.set_text(&comps::phase::AFTER, phase.name())
+    }
+}
+
+crate::entry::entry_builder!(
+    Step => StepBuilder, step_entry;
+    Phase => PhaseBuilder, phase_entry;
+);
+
+/// Names of steps registered without a handle (`modify`, `before_event`).
+static UNNAMED: AtomicU32 = AtomicU32::new(0);
 
 /// What a loot roll knows.
 #[derive(Clone, Copy, Default)]
@@ -804,34 +1024,44 @@ impl Registry {
         unsafe { (host().reg_event_handler)(self.raw, Str::new(event.as_ref().name()), Str::new(&T::schema()), cb) }
     }
 
-    /// Answers `question` (`question::*` or a mod's own) before it happens.
-    pub fn before_event(&mut self, question: &impl AsRef<Question>, f: impl Fn(&Ask) -> Verdict + Send + Sync + 'static) {
-        let cb = callback(move |a: &mut abi::InterceptArgs| {
-            let ask = Ask {
-                world: World::from_raw(a.world),
-                question: unsafe { std::mem::transmute::<&str, &'static str>(a.question.as_str()) },
-                query: a.query,
-            };
-            let v = f(&ask);
-            unsafe {
-                (*a.query).verdict = match v {
-                    Verdict::Abstain => abi::verdict::ABSTAIN,
-                    Verdict::Allow => abi::verdict::ALLOW,
-                    Verdict::Deny => abi::verdict::DENY,
-                }
-            }
-        });
-        unsafe { (host().reg_interceptor)(self.raw, Str::new(question.as_ref().name()), cb) }
+    /// Answers `question` (`question::*`, `actions::*` or a mod's own) before it happens, in
+    /// `phase::RULES` unless `.phase(..)` says otherwise.
+    pub fn before_event(&mut self, question: &impl Valued, f: impl Fn(&Ask) -> Verdict + Send + Sync + 'static) -> StepBuilder<'_> {
+        self.unnamed_step()
+            .on(question)
+            .phase(&phase::RULES)
+            .answer(f)
     }
 
-    /// A step on value `chain` (`chain::*` or a mod's own) at `stage` (`stage::*`).
-    pub fn modify(&mut self, chain: &Chain, stage: u32, f: impl Fn(&mut Modify) + Send + Sync + 'static) {
-        let cb = callback(move |a: &mut abi::ModifyArgs| {
-            let mut m = Modify { world: World::from_raw(a.world), query: unsafe { *a.ctx }, base: a.base, value: a.value };
-            f(&mut m);
-            a.value = m.value;
-        });
-        unsafe { (host().reg_chain_modifier)(self.raw, Str::new(chain.name()), stage, cb) }
+    /// A step on `chain` (`chain::*`, an attribute, a question, a mod's own) in `phase`. One
+    /// others should be able to order around or replace is `Registry::step`.
+    pub fn modify(&mut self, chain: &impl Valued, phase: &Phase, f: impl Fn(&mut Modify) + Send + Sync + 'static) -> StepBuilder<'_> {
+        self.unnamed_step().on(chain).phase(phase).run(f)
+    }
+
+    /// A step of this mod's by name: `.on(&chain)` runs it in every computation of the chain,
+    /// without it only modifiers naming it run it (`Modifier::step`). `r.edit(&Step::named(
+    /// "core:crit"))` reorders or recodes anyone's, `r.remove` takes it out.
+    pub fn step(&mut self, step: &'static Step) -> StepBuilder<'_> {
+        self.step_entry(step)
+    }
+
+    fn step_entry(&mut self, step: &'static Step) -> StepBuilder<'_> {
+        StepBuilder { reg: self, e: crate::entry::Entry::of(step) }
+    }
+
+    fn unnamed_step(&mut self) -> StepBuilder<'_> {
+        let n = UNNAMED.fetch_add(1, Ordering::Relaxed);
+        self.step_entry(Step::generated(format!("step/{n}")))
+    }
+
+    /// A phase of this mod's, right after `after`.
+    pub fn phase(&mut self, phase: &'static Phase, after: &Phase) -> PhaseBuilder<'_> {
+        self.phase_entry(phase).after(after)
+    }
+
+    fn phase_entry(&mut self, phase: &'static Phase) -> PhaseBuilder<'_> {
+        PhaseBuilder { reg: self, e: crate::entry::Entry::of(phase) }
     }
 
     /// An attribute of living entities (`attribute::*` are the engine's).
@@ -890,33 +1120,47 @@ impl World {
         unsafe { (host().emit)(self.raw(), id, Slice::new(b)) }
     }
 
-    /// Asks the interceptors of `question`; true if allowed.
-    pub fn ask(&self, question: &impl AsRef<Question>, q: &mut abi::Query) -> bool {
-        unsafe { (host().ask)(self.raw(), Str::new(question.as_ref().name()), q) != 0 }
+    /// Question `question` about `q`; true if the answer is yes.
+    pub fn ask(&self, question: &impl Valued, q: &abi::Query) -> bool {
+        unsafe { (host().ask)(self.raw(), Str::new(question.chain_name()), q) != 0 }
     }
 
-    pub fn chain_compute(&self, chain: &Chain, base: f64, q: &abi::Query) -> f64 {
-        unsafe { (host().chain_compute)(self.raw(), Str::new(chain.name()), base, q, 0) }
+    pub fn chain_compute(&self, chain: &impl Valued, base: f64, q: &abi::Query) -> f64 {
+        unsafe { (host().chain_compute)(self.raw(), Str::new(chain.chain_name()), base, q, 0) }
     }
 
-    /// Like `chain_compute`, with the steps that led to the value ("4, base at stage 200: 4 -> 2 = 2").
-    pub fn chain_explain(&self, chain: &Chain, base: f64, q: &abi::Query) -> (f64, String) {
-        let v = unsafe { (host().chain_compute)(self.raw(), Str::new(chain.name()), base, q, 1) };
+    /// Like `chain_compute`, with the steps that led to the value
+    /// ("core:damage: 4, core:multiply mymod:step/0: 4 -> 2 = 2").
+    pub fn chain_explain(&self, chain: &impl Valued, base: f64, q: &abi::Query) -> (f64, String) {
+        let v = unsafe { (host().chain_compute)(self.raw(), Str::new(chain.chain_name()), base, q, 1) };
         (v, unsafe { (host().explanation)().as_str().to_string() })
     }
 
     pub fn attribute(&self, entity: u64, attribute: &Attribute) -> f64 {
-        unsafe { (host().attribute)(self.raw(), entity, Str::new(attribute.name())) }
+        unsafe { (host().attribute)(self.raw(), entity, Str::new(attribute.name()), 0) }
     }
 
     pub fn attribute_explain(&self, entity: u64, attribute: &Attribute) -> (f64, String) {
-        let v = unsafe { (host().attribute_explain)(self.raw(), entity, Str::new(attribute.name())) };
+        let v = unsafe { (host().attribute)(self.raw(), entity, Str::new(attribute.name()), 1) };
         (v, unsafe { (host().explanation)().as_str().to_string() })
     }
 
-    /// Adds or replaces modifier `id` on an attribute for `ticks` (0 = until removed).
-    pub fn attribute_add_modifier(&self, entity: u64, attr: &Attribute, id: &str, op: u32, amount: f64, ticks: u64) {
-        unsafe { (host().attribute_add_modifier)(self.raw(), entity, Str::new(attr.name()), Str::new(id), op, amount, ticks) }
+    /// Puts modifier `m` on an entity as `id` (replacing one of that id on the same attribute)
+    /// for `ticks` (0 = until removed). Saved with it; `worn` and `when` don't apply here.
+    pub fn attribute_add_modifier(&self, entity: u64, id: &str, m: &Modifier, ticks: u64) {
+        let m = &m.0;
+        unsafe {
+            (host().attribute_add_modifier)(
+                self.raw(),
+                entity,
+                Str::new(&m.attribute),
+                Str::new(id),
+                Str::new(&m.step),
+                Str::new(&m.phase),
+                m.amount,
+                ticks,
+            )
+        }
     }
 
     pub fn attribute_remove_modifier(&self, entity: u64, attr: &Attribute, id: &str) {
@@ -948,7 +1192,7 @@ impl World {
     }
 
     /// Breaks a block as if mined with `tool` by `player` (0 = nobody), with its loot when
-    /// `drops`. False if nothing broke or an interceptor said no.
+    /// `drops`. False if nothing broke or the question said no.
     pub fn break_block(&self, pos: impl Into<BlockPos>, tool: ItemStack, player: u64, drops: bool) -> bool {
         let pos = pos.into();
         unsafe { (host().break_block)(self.raw(), &pos, tool, player, drops as u32) != 0 }

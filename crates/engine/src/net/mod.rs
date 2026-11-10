@@ -328,7 +328,7 @@ messages! {
         /// Own synced components: (component id, bytes).
         Components(Vec<(u32, Vec<u8>)>),
         /// A hit knocks the player back, `away` being flat and of length 1 (`physics::knock`).
-        Knock { away: [f32; 3] },
+        Knock { push: [f32; 3] },
         /// Velocity change in blocks per tick (a mod's push, a sprinting hit).
         Velocity { add: [f32; 3] },
         /// A mod set the player's velocity, in blocks per tick.
@@ -407,8 +407,8 @@ messages! {
         StartBreak { pos: IVec3, part: u32, frame: u64 },
         /// Stopped mining without finishing.
         StopBreak,
-        /// Let go of the use button before the item took effect.
-        StopUsing,
+        /// Actions (key ids) that went down and up since the last.
+        Keys { down: Vec<u32>, up: Vec<u32> },
         /// The main hand's item goes to the other hand and back.
         SwapHands,
         /// `frame`: the structure (entity) the block is part of, its position in the structure's
@@ -417,8 +417,9 @@ messages! {
         Break { pos: IVec3, part: u32, face: u8, hit: [f32; 3], frame: u64 },
         /// Right click on a block: the block reacts first (chests), otherwise the held item is used or
         /// placed against the clicked face. `frame` like `Break`'s; `look` in world space.
-        /// `hit`: where on the block, from its corner.
-        Use { pos: IVec3, part: u32, face: u8, look: [f32; 3], hit: [f32; 3], sneak: bool, frame: u64 },
+        /// `hit`: where on the block, from its corner. `placed`: the cell the client already
+        /// shows the held block in, sent back as it really is whatever happens.
+        Use { pos: IVec3, part: u32, face: u8, look: [f32; 3], hit: [f32; 3], sneak: bool, frame: u64, placed: Option<IVec3> },
         UseItem { target: Option<(IVec3, u8)> },
         Select(u32),
         Attack(u64),
@@ -428,7 +429,8 @@ messages! {
         OpenInventory,
         Click { slot: u32, button: u8, shift: bool },
         /// Creative inventory: a full stack of this item onto the menu cursor.
-        /// Click on a creative entry: 0 left (stack), 1 right (one).
+        /// Click on a creative entry: 0 left (stack), 1 right (one), `menu::HOTBAR_SWAP + n` a
+        /// number key (a stack into that hotbar slot).
         CreativeTake { item: u32, button: u8 },
         /// Middle click on a block whose item is not in the hotbar: bring it into the selected slot
         /// from the inventory, or in creative make one.

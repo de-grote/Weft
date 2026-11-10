@@ -201,6 +201,7 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
             fill: None,
             max_h: f32::INFINITY,
             at: None,
+            at_from: [0.0; 2],
         };
         let (lang, input) = (b.lang, b.input);
         let spans = |key: Str, a: abi::Slice<abi::UiArg>| {
@@ -261,7 +262,7 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
                 let bind = float_bind(owner, n.bind);
                 let on_change: Rc<dyn Fn(&mut Ctx, f32)> = Rc::new(move |ctx: &mut Ctx, v: f32| on_change(ctx, String::new(), v));
                 let steps = if n.count == 0 { 100 } else { n.count };
-                b.ui.open(Kind::Slider { value: 0.0, bind, on_change, steps }, style)
+                b.ui.open(Kind::Slider { value: 0.0, bind, on_change, on_release: None, steps }, style)
             }
             uk::ITEM => {
                 let (item, count) = (n.data, n.count);
@@ -282,7 +283,14 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
                     style.pad = [6.0, 4.0, 6.0, 4.0];
                 }
                 // Labels sit in the middle, like on the engine's buttons.
-                b.ui.open(Kind::Button { class: class_or("button"), action: Some(action), enabled, selected }, style.center())
+                let double = n.on_double_click;
+                let on_double: Option<crate::ui::Action> = double.is_some().then(|| {
+                    Rc::new(move |ctx: &mut Ctx| {
+                        ctx.requests
+                            .push(crate::app::Request::ModCall(owner, double))
+                    }) as crate::ui::Action
+                });
+                b.ui.open(Kind::Button { class: class_or("button"), action: Some(action), on_double, enabled, selected }, style.center())
             }
             uk::TITLE => {
                 let c = crate::content::content();
@@ -443,6 +451,7 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
                                 bind: e.bind.func.is_some().then(|| float_bind(owner, e.bind)),
                                 amount: e.amount,
                                 value: 0.0,
+                                class: e.class.as_str().to_string(),
                             })
                             .collect(),
                         change: None,
@@ -512,12 +521,29 @@ pub unsafe extern "C" fn client_attribute(c: *mut abi::ClientCtx, name: abi::Str
     }
 }
 
+pub unsafe extern "C" fn client_effect_level(c: *mut abi::ClientCtx, effect: u32) -> u32 {
+    unsafe {
+        view(c).map_or(0, |cl| {
+            let now = cl.ticks();
+            cl.me
+                .effects
+                .iter()
+                .find(|f| f.id == effect && f.until > now)
+                .map_or(0, |f| f.level)
+        })
+    }
+}
+
 pub unsafe extern "C" fn client_swing_strength(c: *mut abi::ClientCtx) -> f32 {
     unsafe { view(c).map_or(1.0, |cl| cl.swing_strength()) }
 }
 
 pub unsafe extern "C" fn client_using(c: *mut abi::ClientCtx) -> f32 {
-    unsafe { view(c).and_then(|cl| cl.using).map_or(-1.0, |u| u.0) }
+    unsafe {
+        view(c)
+            .and_then(|cl| cl.using)
+            .map_or(-1.0, |(held, all)| (all - held).max(0.0))
+    }
 }
 
 pub unsafe extern "C" fn client_day_time(c: *mut abi::ClientCtx) -> u64 {

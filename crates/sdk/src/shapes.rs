@@ -234,11 +234,11 @@ impl BlockBuilder<'_> {
     /// is the same with a drawing of its own. `Facings::HORIZONTAL` for ladders (walls only),
     /// `Facings::ALL` for vines everywhere.
     pub fn on_sides(self, allowed: Facings) -> Self {
-        self.sides(allowed, true)
+        self.lying_on(allowed, true)
     }
 
     /// `on_sides`, with a plate of the block's textures on each side or not (wire draws itself).
-    pub(crate) fn sides(mut self, allowed: Facings, plates: bool) -> Self {
+    pub(crate) fn lying_on(mut self, allowed: Facings, plates: bool) -> Self {
         self.sides = Some(allowed);
         let sides: Vec<Dir> = allowed.dirs().collect();
         // With plates, the first state, the item's, lies on the first side.

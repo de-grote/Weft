@@ -45,6 +45,7 @@ commands:
   dist <dir>           a folder to hand to someone: the game and every mod packed
   submit-mod <dir>     send a mod's pushed commit to the mod index (--owner <login>)
   test-all             every test, several processes at once (--jobs N)
+  export-models <dir>  entity models made in code, any mod's, as Blockbench .geo.json files
 
 options:
   --run-dir <dir>      saves, settings, logs and mods go here
@@ -148,7 +149,7 @@ fn main() {
             },
         }
     }
-    let (mut server, mut pack, mut dist, mut submit) = (false, Vec::new(), None, None);
+    let (mut server, mut pack, mut dist, mut submit, mut export) = (false, Vec::new(), None, None, None);
     match (command.as_str(), places.len()) {
         ("client", 0) => {}
         ("server", 0) => server = true,
@@ -157,6 +158,7 @@ fn main() {
         ("dist", 1) => dist = places.pop(),
         // Sends a mod's pushed commit to the mod index, see `submit.rs`.
         ("submit-mod", 1) => submit = places.pop(),
+        ("export-models", 1) => export = places.pop(),
         _ => {
             eprint!("{HELP}");
             std::process::exit(2);
@@ -221,6 +223,16 @@ fn main() {
         opts.mod_dirs.push(shipped);
     }
     weft_engine::init_workers();
+    if let Some(out) = export {
+        match weft_engine::export_models(&opts, &out) {
+            Ok(n) => println!("{n} models written to {}", out.display()),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if server {
         if let Err(e) = weft_engine::dedicated::run(opts) {
             log::error!("{e}");

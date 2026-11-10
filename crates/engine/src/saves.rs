@@ -693,82 +693,37 @@ impl Screen for WorldSelect {
         "core:worlds"
     }
 
+    /// Like the title screen: the buttons down a bar on the left, the worlds as pictures filling
+    /// the rest, each with its name and game mode; the rest of what is known of it in its tooltip.
     fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
         let worlds = list(&cx.settings.saves_dir());
         let selected = worlds
             .iter()
             .position(|w| self.selected.as_ref() == Some(&w.dir));
-        frame(ui, cx, "world.select", |ui| {
-            // The list takes whatever height is left and scrolls; the buttons below always show.
-            let list = ui.panel(
-                "panel",
-                Style::default()
-                    .pad(8.0)
-                    .gap(4.0)
-                    .stretch()
-                    .w(300.0)
-                    .h(0.0)
-                    .grow()
-                    .min_h(60.0)
-                    .scroll(),
-                |ui| {
-                    if worlds.is_empty() {
-                        label(ui, cx, "world.empty", &[], "dim");
-                    }
-                    for (i, w) in worlds.iter().enumerate() {
-                        let when = format_age(now_secs().saturating_sub(w.last_played));
-                        let info = cx.t(
-                            "world.info",
-                            &[
-                                Arg::Text(
-                                    w.dir
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .into(),
-                                ),
-                                Arg::Text(when),
-                            ],
-                        );
-                        let (name, dir) = (w.name.clone(), w.dir.clone());
-                        let b = ui.button(
-                            "button",
-                            Style::default().pad(4.0).stretch().gap(2.0),
-                            Rc::new(move |c: &mut Ctx| {
-                                if let Some(s) = c.screen::<WorldSelect>() {
-                                    s.selected = Some(dir.clone());
-                                }
-                                c.requests.push(Request::Rebuild);
-                            }),
-                            |ui| {
-                                ui.text(text::plain(&name), "button");
-                                ui.text(info, "dim");
-                            },
-                        );
-                        if let Kind::Button { selected: s, .. } = &mut ui.nodes[b].kind {
-                            *s = selected == Some(i);
-                        }
-                        ui.set_id(b, &format!("world:{i}"));
-                    }
-                },
-            );
-            ui.set_id(list, "worlds");
-            ui.container(Style::row().gap(6.0), |ui| {
+        ui.root_style(Style::default().stretch());
+        ui.panel("background", Style::row().grow().stretch(), |ui| {
+            ui.panel("sidebar", Style::default().w(180.0).pad(12.0).gap(4.0).stretch(), |ui| {
+                // As wide as the bar, whatever the language says.
+                let t = label(ui, cx, "world.select", &[], "title");
+                if let Some(t) = ui.text_mut(t) {
+                    t.wrap = false;
+                    let chars = cx.lang.get("world.select").chars().count().max(1) as f32;
+                    t.scale = (156.0 / (chars * 6.0)).clamp(1.0, 3.0);
+                }
+                ui.spacer();
                 let sel = selected.and_then(|i| worlds.get(i)).cloned();
-                let play = button(ui, cx, "world.play", &[], 145.0, move |c| {
+                let play = button(ui, cx, "world.play", &[], 156.0, move |c| {
                     if let Some(w) = &sel {
-                        c.requests.push(Request::StartWorld(w.clone()));
+                        enter(c, w);
                     }
                 });
                 if let Kind::Button { enabled, .. } = &mut ui.nodes[play].kind {
                     *enabled = selected.is_some();
                 }
                 ui.set_id(play, "play");
-                button(ui, cx, "world.create", &[], 145.0, |c| c.requests.push(Request::Screen("core:create_world".into())));
-            });
-            ui.container(Style::row().gap(6.0), |ui| {
+                button(ui, cx, "world.create", &[], 156.0, |c| c.requests.push(Request::Screen("core:create_world".into())));
                 let sel = selected.and_then(|i| worlds.get(i)).cloned();
-                let del = button(ui, cx, "world.delete", &[], 145.0, move |c| {
+                let del = button(ui, cx, "world.delete", &[], 156.0, move |c| {
                     if let Some(w) = &sel {
                         c.requests
                             .push(Request::Open(Box::new(ConfirmDelete { world: w.clone() })));
@@ -777,13 +732,163 @@ impl Screen for WorldSelect {
                 if let Kind::Button { enabled, .. } = &mut ui.nodes[del].kind {
                     *enabled = selected.is_some();
                 }
+                // The selected world's cheats, changed where it is chosen.
+                let sel = selected.and_then(|i| worlds.get(i)).cloned();
+                let on = sel.as_ref().is_some_and(|w| w.cheats);
+                let cheats = button(ui, cx, "world.cheats", &[on_off(on)], 156.0, move |c| {
+                    if let Some(mut w) = sel.clone() {
+                        w.cheats = !w.cheats;
+                        w.save();
+                        c.requests.push(Request::Rebuild);
+                    }
+                });
+                // Hardcore stays without.
+                let hardcore = selected
+                    .and_then(|i| worlds.get(i))
+                    .is_some_and(is_hardcore);
+                if let Kind::Button { enabled, .. } = &mut ui.nodes[cheats].kind {
+                    *enabled = selected.is_some() && !hardcore;
+                }
                 let dir = cx.settings.run_dir.join("saves");
-                let open = button(ui, cx, "world.folder", &[], 70.0, move |_| crate::packs::open_folder(&dir));
+                let open = button(ui, cx, "world.folder", &[], 156.0, move |_| crate::packs::open_folder(&dir));
                 ui.set_id(open, "saves_folder");
-                button(ui, cx, "menu.back", &[], 70.0, |c| c.requests.push(Request::Close));
+                ui.add(Kind::Container { class: None }, Style::default().h(6.0));
+                button(ui, cx, "menu.back", &[], 156.0, |c| c.requests.push(Request::Close));
             });
+            // As many pictures to a row as fit.
+            let free = cx.size.x - 180.0 - 2.0 * 12.0;
+            let columns = (((free + TILE_GAP) / (TILE_W + TILE_GAP)).floor() as usize).max(1);
+            let list = ui.container(
+                Style::default()
+                    .grow()
+                    .pad(12.0)
+                    .gap(TILE_GAP)
+                    .self_align(crate::ui::Align::Stretch)
+                    .scroll(),
+                |ui| {
+                    if worlds.is_empty() {
+                        label(ui, cx, "world.empty", &[], "dim");
+                    }
+                    for (row, line) in worlds.chunks(columns).enumerate() {
+                        ui.container(Style::row().gap(TILE_GAP), |ui| {
+                            for (k, w) in line.iter().enumerate() {
+                                let i = row * columns + k;
+                                tile(ui, cx, w, i, selected == Some(i));
+                            }
+                        });
+                    }
+                },
+            );
+            ui.set_id(list, "worlds");
         });
     }
+}
+
+/// A world's tile in the list, across.
+const TILE_W: f32 = 136.0;
+const TILE_GAP: f32 = 6.0;
+
+/// A world's picture as last seen, whole, and made small for the list.
+pub const PREVIEW: &str = "preview.png";
+pub const PREVIEW_SMALL: &str = "preview_small.png";
+
+/// The picture a world shows in the list (`small`) or going into it: the last frame it was seen
+/// in, else a question mark.
+fn picture(w: &WorldMeta, small: bool) -> String {
+    let file = |name: &str| crate::ui::render::file_texture(&w.dir.join(name));
+    small
+        .then(|| file(PREVIEW_SMALL))
+        .flatten()
+        .or_else(|| file(PREVIEW))
+        .unwrap_or_else(|| "core:gui/world_unknown".into())
+}
+
+/// Into the world, its picture growing from where it is in the list.
+fn enter(c: &mut Ctx, w: &WorldMeta) {
+    let i = list_index(c, w);
+    let from = c
+        .top
+        .as_ref()
+        .and_then(|t| {
+            t.ui.find(&format!("picture:{i}"))
+                .map(|n| t.ui.nodes[n].rect)
+        })
+        .unwrap_or_default();
+    c.requests
+        .push(Request::EnterWorld { world: w.clone(), picture: picture(w, false), from });
+}
+
+/// Where `w` is in the list as built (its picture's id).
+fn list_index(c: &Ctx, w: &WorldMeta) -> usize {
+    list(&c.settings.saves_dir())
+        .iter()
+        .position(|x| x.dir == w.dir)
+        .unwrap_or(0)
+}
+
+/// World `w`, `i`-th in the list: its picture over its name and game mode, selected with a
+/// click, played with two.
+fn tile(ui: &mut Ui, cx: &BuildCx, w: &WorldMeta, i: usize, selected: bool) {
+    let dir = w.dir.clone();
+    let b = ui.button(
+        "button",
+        Style::default().w(TILE_W).pad(4.0).gap(2.0),
+        Rc::new(move |c: &mut Ctx| {
+            if let Some(s) = c.screen::<WorldSelect>() {
+                s.selected = Some(dir.clone());
+            }
+            c.requests.push(Request::Rebuild);
+        }),
+        |ui| {
+            let p = ui.add(
+                Kind::Image { texture: picture(w, true), color: 0xFFFFFFFF },
+                Style::default()
+                    .w(TILE_W - 8.0)
+                    .h((TILE_W - 8.0) * 9.0 / 16.0),
+            );
+            ui.set_id(p, &format!("picture:{i}"));
+            let name = ui.text(text::plain(&w.name), "button");
+            if let Some(t) = ui.text_mut(name) {
+                t.wrap = false;
+            }
+            let key = if is_hardcore(w) { "gamemode.hardcore".to_string() } else { format!("gamemode.{}", w.game_mode.name()) };
+            let mut chars = cx.lang.get(&key).chars();
+            let mode: String = chars
+                .next()
+                .map(|f| f.to_uppercase().chain(chars).collect())
+                .unwrap_or_default();
+            ui.text(text::plain(&mode), "dim");
+        },
+    );
+    if let Kind::Button { selected: s, .. } = &mut ui.nodes[b].kind {
+        *s = selected;
+    }
+    let world = w.clone();
+    ui.on_double_click(b, Rc::new(move |c: &mut Ctx| enter(c, &world)));
+    ui.set_id(b, &format!("world:{i}"));
+    let when = format_age(now_secs().saturating_sub(w.last_played));
+    let folder: String = w
+        .dir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into();
+    let mut tip = cx.t("world.info", &[Arg::Text(folder), Arg::Text(when)]);
+    tip.push(text::Span::text("\n", None));
+    tip.extend(cx.t("world.cheats", &[on_off(w.cheats)]));
+    ui.nodes[b].tooltip = Some(tip);
+}
+
+/// A world of one life: no cheats for it, ever.
+fn is_hardcore(w: &WorldMeta) -> bool {
+    w.configs
+        .iter()
+        .any(|(n, v)| n == "core:lives" && *v == 1.0)
+}
+
+/// The name shown for choice `i` of the world screen: a game mode, or past them hardcore.
+fn mode_key(i: usize, modes: usize) -> String {
+    if i >= modes { "gamemode.hardcore".into() } else { format!("gamemode.{}", game_mode(i).name()) }
 }
 
 /// The `i`-th game mode, the engine's first.
@@ -829,14 +934,20 @@ impl Screen for CreateWorld {
                 let seed = ui.add(Kind::input("", 32), Style::default().h(18.0).stretch());
                 ui.set_id(seed, "seed");
             });
+            // Every game mode, then hardcore: survival with one life and no cheats.
             let modes = crate::world::GameMode::all().count();
-            let mode = self.mode.clone();
-            let shown = self.mode.clone();
+            let (mode, shown, cheats) = (self.mode.clone(), self.mode.clone(), self.cheats.clone());
             bound_button(
                 ui,
                 260.0,
-                move || ("world.game_mode".into(), vec![Arg::Key(format!("gamemode.{}", game_mode(shown.get()).name()))]),
-                move |_| mode.set((mode.get() + 1) % modes),
+                move || ("world.game_mode".into(), vec![Arg::Key(mode_key(shown.get(), modes))]),
+                move |_| {
+                    let next = (mode.get() + 1) % (modes + 1);
+                    mode.set(next);
+                    // Creative and spectator come with cheats, as vanilla's.
+                    let m = game_mode(next);
+                    cheats.set(next < modes && (m == crate::world::GameMode::CREATIVE || m == crate::world::GameMode::SPECTATOR));
+                },
             );
             let (cheats, shown) = (self.cheats.clone(), self.cheats.clone());
             bound_button(ui, 260.0, move || ("world.cheats".into(), vec![on_off(shown.get())]), move |_| cheats.set(!cheats.get()));
@@ -848,7 +959,15 @@ impl Screen for CreateWorld {
                     let seed = parse_seed(&c.input_text("seed").unwrap_or_default());
                     let name = if name.trim().is_empty() { "World".to_string() } else { name.trim().to_string() };
                     let mut meta = create(&c.settings.saves_dir(), &name, seed);
-                    (meta.game_mode, meta.cheats, meta.configs) = (game_mode(mode.get()), cheats.get(), crate::config::world_values());
+                    let modes = crate::world::GameMode::all().count();
+                    let hardcore = mode.get() >= modes;
+                    if hardcore {
+                        if let Some(lives) = crate::config::by_name("core:lives") {
+                            crate::config::set(lives, 1.0);
+                        }
+                    }
+                    let picked = if hardcore { crate::world::GameMode::SURVIVAL } else { game_mode(mode.get()) };
+                    (meta.game_mode, meta.cheats, meta.configs) = (picked, cheats.get() && !hardcore, crate::config::world_values());
                     meta.save();
                     c.requests.push(Request::StartWorldAnyway(meta));
                 });

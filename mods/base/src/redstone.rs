@@ -52,7 +52,8 @@ pub fn register(r: &mut Registry) {
     // One item, on whichever face is clicked. Each piece breaks and drops by itself.
     r.block(&REDSTONE)
         .wire()
-        .textures("redstone_dust_dot", "redstone_dust_line", "redstone_dust_dot")
+        .texture("redstone_dust_line")
+        .ends("redstone_dust_dot")
         .item_texture("redstone")
         .sound_group("stone")
         .tag("dusts/redstone")
@@ -372,7 +373,7 @@ pub fn register(r: &mut Registry) {
         .signal_sink()
         .states(|_, s| {
             // Vanilla's: a furnace's sides, or all its top with the front up or down.
-            s.front_faces("furnace_top", "furnace_top", "dispenser_front")
+            s.texture("furnace_top").front("dispenser_front")
         })
         // With each new pulse, out of the front.
         .on_signal(|e| {

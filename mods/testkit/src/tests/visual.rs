@@ -223,7 +223,8 @@ pub async fn break_overlay(t: T) -> R {
     let (w, h) = (t.state().window[0], t.state().window[1]);
     let before = t.grab().await?;
     // Mining slowly, so a late picture still finds the button down and the block there.
-    t.op("attr_mod me core:mining_speed slow 0 -0.75 0").await?;
+    t.op("attr_mod me core:mining_speed slow core:add -0.75 0")
+        .await?;
     t.secs(0.2).await?;
     t.hold("core:attack", 2.0);
     t.secs(1.0).await?;

@@ -14,6 +14,8 @@ use crate::host;
 pub enum Owner {
     Temp,
     Player,
+    /// The player's trash (`slot_flags::TRASH`).
+    Trash,
     /// The inventory the menu opened on.
     On(Inv),
 }
@@ -23,8 +25,8 @@ pub struct SlotRef {
     pub owner: Owner,
     pub index: u32,
     pub flags: u32,
-    /// Only items with this tag or component (`u32::MAX`: any).
-    pub accepts: u32,
+    /// The items it takes, a bit each (`None`: any).
+    pub accepts: Option<&'static [u64]>,
     /// Most items it holds, 0: the item's stack size.
     pub limit: u32,
     pub priority: i32,
@@ -96,6 +98,7 @@ fn get(m: &OpenMenu, dim: &Dim, player: u64, slot: u32) -> ItemStack {
     let c = crate::content::content();
     match r.owner {
         Owner::Temp => m.temp.get(r.index as usize).copied().unwrap_or_default(),
+        Owner::Trash => trash(dim, c, player),
         Owner::Player => holder::get(dim, c, Inv::own(At::Entity(player)), r.index),
         Owner::On(inv) => holder::get(dim, c, inv, r.index),
     }
@@ -110,9 +113,31 @@ fn set(m: &mut OpenMenu, dim: &mut Dim, player: u64, slot: u32, stack: ItemStack
                 *s = stack;
             }
         }
+        Owner::Trash => {
+            let comp = crate::content::content().game.fields.trash;
+            let bytes: Box<[u8]> = [stack.item, stack.count, stack.data]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            dim.entities.comps.insert((player, comp), bytes);
+        }
         Owner::Player => dim.entities.set_slot(player, r.index, stack),
         Owner::On(inv) => holder::set(dim, crate::content::content(), inv, r.index, stack),
     }
+}
+
+/// What `player` last put in its trash.
+fn trash(dim: &Dim, c: &Content, player: u64) -> ItemStack {
+    let Some(b) = dim
+        .entities
+        .comps
+        .get(&(player, c.game.fields.trash))
+        .filter(|b| b.len() >= 12)
+    else {
+        return ItemStack::EMPTY;
+    };
+    let word = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().unwrap());
+    ItemStack { item: word(0), count: word(4), data: word(8) }
 }
 
 fn call(
@@ -138,20 +163,15 @@ fn call(
 
 /// The slots of menu `kind` opened on `on`, from its groups. `worn`: the equipment slots of the
 /// entity it is on, if that wears.
-pub fn slots(c: &Content, kind: u32, on: Option<Inv>, worn: Option<u32>, player: u64) -> Vec<SlotRef> {
+pub fn slots(c: &'static Content, kind: u32, on: Option<Inv>, worn: Option<u32>, player: u64) -> Vec<SlotRef> {
     use abi::slot_owner as so;
     let def = &c.game.menus[kind as usize];
     let layout = &c.game.player_layout;
     let mut out = Vec::new();
     for (g, _, n) in def.slot_groups(layout) {
-        let accepts = match g.accepts.as_str() {
-            "" => u32::MAX,
-            name => c.components.id(name).unwrap_or_else(|| {
-                host::misuse("menu", || format!("{}: group {} accepts {name}, which no item has", def.name, g.name));
-                u32::MAX - 1
-            }),
-        };
+        let accepts = g.accepted.as_deref();
         let (o, first) = match (g.owner, worn) {
+            _ if g.flags & sf::TRASH != 0 => (Owner::Trash, None),
             (so::MENU, _) => (Owner::Temp, None),
             (so::HOLDER, _) => (Owner::On(on.unwrap_or(Inv::own(At::Entity(0)))), None),
             (so::WORN, Some(w)) => (Owner::On(on.unwrap_or(Inv::own(At::Entity(0)))), Some(w + g.start)),
@@ -176,7 +196,7 @@ fn worn_on(dim: &Dim, c: &Content, on: Option<Inv>) -> Option<u32> {
     (!w.is_empty()).then_some(w.start)
 }
 
-pub fn open(dim: &mut Dim, c: &Content, player: u64, kind: u32, on: Option<Inv>) -> OpenMenu {
+pub fn open(dim: &mut Dim, c: &'static Content, player: u64, kind: u32, on: Option<Inv>) -> OpenMenu {
     let def = &c.game.menus[kind as usize];
     let held_item = match on.map(|inv| inv.at) {
         Some(At::Stack { entity, slot }) => holder::get(dim, c, Inv::own(At::Entity(entity)), slot).item,
@@ -221,7 +241,7 @@ pub fn tick(m: &mut OpenMenu, dim: &mut Dim, c: &Content, player: u64) {
 
 /// Returns temp slots and the cursor to the player (dropping what does not fit). Output slots are
 /// previews, not real items, and are discarded.
-pub fn close(m: OpenMenu, dim: &mut Dim, c: &Content, player: u64) {
+pub fn close(m: OpenMenu, dim: &mut Dim, c: &'static Content, player: u64) {
     let outputs: Vec<u32> = m
         .slots
         .iter()
@@ -258,12 +278,12 @@ fn fits(c: &Content, s: &SlotRef, item: u32) -> bool {
     if matches!(s.owner, Owner::On(Inv { at: At::Stack { .. }, .. })) && holder::item_slots(c, item) > 0 {
         return false;
     }
-    s.accepts == u32::MAX || item == 0 || c.components.has(crate::components::ITEM, item, s.accepts)
+    item == 0 || s.accepts.is_none_or(|a| crate::refs::has(a, item))
 }
 
-/// Most of `item` slot `s` holds.
-fn cap(c: &Content, s: &SlotRef, item: u32) -> u32 {
-    let max = c.max_stack(item);
+/// Most of `stack` slot `s` holds.
+fn cap(c: &Content, s: &SlotRef, stack: &ItemStack) -> u32 {
+    let max = c.max_stack(stack);
     if s.limit > 0 { max.min(s.limit) } else { max }
 }
 
@@ -332,9 +352,108 @@ pub const HOTBAR_SWAP: u8 = 2;
 pub const GATHER: u8 = 11;
 /// Middle click in creative: a full stack of what is in the slot onto an empty cursor.
 pub const CLONE: u8 = 12;
+/// The drop key over a slot with nothing on the cursor: one of its items thrown out (vanilla's Q).
+pub const THROW: u8 = 13;
+/// The same with the control key: the whole stack.
+pub const THROW_ALL: u8 = 14;
+/// Swept over with the button still held after picking a stack up: what the slot has of the
+/// same item joins the cursor, up to a full stack (Mouse Tweaks').
+pub const PICK_SAME: u8 = 15;
+/// The wheel up over a slot: an item of what it holds (or, empty, of the first that fits) comes
+/// in from the other side, as a shift-click sends it; with shift a stack (Mouse Tweaks').
+pub const WHEEL_UP: u8 = 19;
+/// The wheel down: an item of the slot goes to the other side, with shift all of it.
+pub const WHEEL_DOWN: u8 = 20;
 
-/// `button`: 0 left, 1 right, or `HOTBAR_SWAP + n`, `GATHER`, `CLONE`. `slot == u32::MAX` means outside
-/// the window (drop the cursor).
+/// Storage sorted (`SORT`): the slots like `slot` (the same inventory, the same rules), or with
+/// `u32::MAX` those of what the menu is opened on, else the player's main inventory. Stacks of a
+/// kind join, kinds come in the order they were registered, empty slots last.
+fn sort(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, slot: u32) {
+    let layout = &c.game.player_layout;
+    let plain = |s: &SlotRef| s.accepts.is_none() && s.flags & (sf::OUTPUT | sf::INPUT | sf::LIQUID | sf::LOCKED | sf::OFF_HAND) == 0;
+    let main =
+        |s: &SlotRef| s.owner == Owner::Player && s.index >= layout.hotbar && s.index < layout.slots && !layout.worn.contains(&s.index);
+    let picked: Vec<u32> = match m.slots.get(slot as usize).copied() {
+        Some(r) if plain(&r) => (0..m.slots.len() as u32)
+            .filter(|&i| {
+                let s = m.slots[i as usize];
+                s.owner == r.owner && s.flags == r.flags && plain(&s) && (s.owner != Owner::Player || main(&s) == main(&r))
+            })
+            .collect(),
+        Some(_) => return,
+        None => {
+            let on: Vec<u32> = (0..m.slots.len() as u32)
+                .filter(|&i| matches!(m.slots[i as usize].owner, Owner::On(_)) && plain(&m.slots[i as usize]))
+                .collect();
+            if on.is_empty() {
+                (0..m.slots.len() as u32)
+                    .filter(|&i| main(&m.slots[i as usize]))
+                    .collect()
+            } else {
+                on
+            }
+        }
+    };
+    let mut stacks: Vec<ItemStack> = Vec::new();
+    for &i in &picked {
+        let s = get(m, dim, player, i);
+        if s.is_empty() {
+            continue;
+        }
+        let max = c.max_stack(&s);
+        let mut left = s.count;
+        for t in stacks
+            .iter_mut()
+            .filter(|t| t.item == s.item && t.data == s.data && t.count < max)
+        {
+            let n = left.min(max - t.count);
+            t.count += n;
+            left -= n;
+        }
+        if left > 0 {
+            stacks.push(ItemStack { count: left, ..s });
+        }
+    }
+    stacks.sort_by_key(|s| (s.item, s.data, std::cmp::Reverse(s.count)));
+    for (k, &i) in picked.iter().enumerate() {
+        let s = stacks.get(k).copied().unwrap_or(ItemStack::EMPTY);
+        if get(m, dim, player, i) != s {
+            set(m, dim, player, i, s);
+            call(m, dim, c, player, i, |d| d.on_change);
+        }
+    }
+}
+
+/// A creative player's number key over an entry: a full stack of `item` in that hotbar slot,
+/// whatever was there gone (vanilla's).
+pub fn creative_to_hotbar(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, hot: u32, item: u32) {
+    if hot >= c.game.player_layout.hotbar {
+        return;
+    }
+    let Some(h) = m
+        .slots
+        .iter()
+        .position(|s| s.owner == Owner::Player && s.index == hot)
+        .map(|i| i as u32)
+    else {
+        return;
+    };
+    set(m, dim, player, h, ItemStack::new(item, c.max_stack(&ItemStack::new(item, 1))));
+    call(m, dim, c, player, h, |d| d.on_change);
+}
+
+/// The trash key over a slot: its stack goes to the player's trash, what was there gone.
+pub const TO_TRASH: u8 = 17;
+/// The other hand's key over a slot: swaps it with the other hand (vanilla's F).
+pub const OFF_HAND_SWAP: u8 = 18;
+
+/// Sorts the storage slot `slot` is in (`client_op::MENU_SORT`); `u32::MAX`: what the menu is
+/// opened on, else the player's main inventory.
+pub const SORT: u8 = 16;
+
+/// `button`: 0 left, 1 right, or `HOTBAR_SWAP + n`, `GATHER`, `CLONE`, `THROW`, `THROW_ALL`,
+/// `PICK_SAME`, `SORT`, `WHEEL_UP`, `WHEEL_DOWN`. `slot == u32::MAX` means outside the window
+/// (drop the cursor).
 pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, slot: u32, button: u8, shift: bool) {
     if m.slots
         .get(slot as usize)
@@ -345,15 +464,31 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
         }
         return;
     }
-    if (HOTBAR_SWAP..HOTBAR_SWAP + 9).contains(&button) {
-        let hot = (button - HOTBAR_SWAP) as u32;
-        if hot >= c.game.player_layout.hotbar {
+    if button == WHEEL_UP || button == WHEEL_DOWN {
+        let Some(r) = m.slots.get(slot as usize).copied() else { return };
+        let n = if shift { u32::MAX } else { 1 };
+        if r.flags & sf::OUTPUT != 0 || r.owner == Owner::Trash {
+            return;
+        }
+        if button == WHEEL_UP {
+            pull_in(m, dim, c, player, slot, n);
+        } else if takeable(&r) {
+            move_out(m, dim, c, player, slot, n);
+        }
+        return;
+    }
+    if (HOTBAR_SWAP..HOTBAR_SWAP + 9).contains(&button) || button == OFF_HAND_SWAP {
+        let hot = button.wrapping_sub(HOTBAR_SWAP) as u32;
+        if button != OFF_HAND_SWAP && hot >= c.game.player_layout.hotbar {
             return;
         }
         let Some(h) = m
             .slots
             .iter()
-            .position(|s| s.owner == Owner::Player && s.index == hot)
+            .position(|s| match button {
+                OFF_HAND_SWAP => s.flags & sf::OFF_HAND != 0,
+                _ => s.owner == Owner::Player && s.index == hot,
+            })
             .map(|i| i as u32)
         else {
             return;
@@ -370,7 +505,8 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
             || (!takeable(&a) && !sa.is_empty())
             || !fits(c, &a, sb.item)
             || !fits(c, &b, sa.item)
-            || sb.count > cap(c, &a, sb.item)
+            || sb.count > cap(c, &a, &sb)
+            || sa.count > cap(c, &b, &sa)
         {
             return;
         }
@@ -390,7 +526,7 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
             .is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::NO_COSTS));
         let there = if (slot as usize) < m.slots.len() { get(m, dim, player, slot) } else { ItemStack::EMPTY };
         if creative && m.cursor.is_empty() && !there.is_empty() {
-            m.cursor = ItemStack { count: c.max_stack(there.item), ..there };
+            m.cursor = ItemStack { count: c.max_stack(&there), ..there };
         }
         return;
     }
@@ -399,7 +535,7 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
         if want.is_empty() {
             return;
         }
-        let max = c.max_stack(want.item);
+        let max = c.max_stack(&want);
         // Partial stacks first, like vanilla, so full ones stay put when they are not needed.
         for full in [false, true] {
             for i in 0..m.slots.len() as u32 {
@@ -408,6 +544,7 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
                 }
                 let s = get(m, dim, player, i);
                 if m.slots[i as usize].flags & sf::OUTPUT != 0
+                    || m.slots[i as usize].owner == Owner::Trash
                     || !takeable(&m.slots[i as usize])
                     || s.is_empty()
                     || s.item != want.item
@@ -422,6 +559,81 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
                 call(m, dim, c, player, i, |d| d.on_change);
             }
         }
+        return;
+    }
+    if button == SORT {
+        sort(m, dim, c, player, slot);
+        return;
+    }
+    // Into the trash, whole, what was there gone (Terraria's).
+    let trash_at = m
+        .slots
+        .iter()
+        .position(|s| s.owner == Owner::Trash)
+        .map(|i| i as u32);
+    let into_trash = |m: &mut OpenMenu, dim: &mut Dim, stack: ItemStack| match trash_at {
+        Some(t) => set(m, dim, player, t, stack),
+        None => {
+            let bytes: Box<[u8]> = [stack.item, stack.count, stack.data]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            dim.entities
+                .comps
+                .insert((player, c.game.fields.trash), bytes);
+        }
+    };
+    if button == TO_TRASH {
+        let Some(r) = m.slots.get(slot as usize).copied() else { return };
+        let cur = get(m, dim, player, slot);
+        if cur.is_empty() || r.owner == Owner::Trash || !takeable(&r) || r.flags & sf::OUTPUT != 0 {
+            return;
+        }
+        into_trash(m, dim, cur);
+        set(m, dim, player, slot, ItemStack::EMPTY);
+        call(m, dim, c, player, slot, |d| d.on_change);
+        return;
+    }
+    if m.slots
+        .get(slot as usize)
+        .is_some_and(|s| s.owner == Owner::Trash)
+        && button <= 1
+        && !shift
+        && !m.cursor.is_empty()
+    {
+        let s = std::mem::replace(&mut m.cursor, ItemStack::EMPTY);
+        into_trash(m, dim, s);
+        return;
+    }
+    if button == THROW || button == THROW_ALL || button == PICK_SAME {
+        let Some(r) = m.slots.get(slot as usize).copied() else { return };
+        let cur = get(m, dim, player, slot);
+        let output = r.flags & sf::OUTPUT != 0;
+        if cur.is_empty() || !takeable(&r) {
+            return;
+        }
+        let n = if button == PICK_SAME {
+            let max = c.max_stack(&cur);
+            if output || m.cursor.is_empty() || m.cursor.item != cur.item || m.cursor.data != cur.data || m.cursor.count >= max {
+                return;
+            }
+            let n = cur.count.min(max - m.cursor.count);
+            m.cursor.count += n;
+            n
+        } else {
+            if !m.cursor.is_empty() {
+                return;
+            }
+            // A result comes out whole.
+            let n = if button == THROW_ALL || output { cur.count } else { 1 };
+            dim.throw(c, player, ItemStack { count: n, ..cur });
+            n
+        };
+        set(m, dim, player, slot, if n == cur.count { ItemStack::EMPTY } else { ItemStack { count: cur.count - n, ..cur } });
+        if output {
+            call(m, dim, c, player, slot, |d| d.on_take);
+        }
+        call(m, dim, c, player, slot, |d| d.on_change);
         return;
     }
     if slot == u32::MAX {
@@ -441,7 +653,7 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
     }
     let cur = get(m, dim, player, slot);
     let output = r.flags & sf::OUTPUT != 0;
-    let max = |item: u32| c.max_stack(item);
+    let max = |s: &ItemStack| c.max_stack(s);
 
     if output {
         if cur.is_empty() {
@@ -461,7 +673,7 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
                 }
                 return;
             }
-            for _ in 0..max(cur.item).max(64) {
+            for _ in 0..max(&cur).max(64) {
                 let now = get(m, dim, player, slot);
                 if now.is_empty() || now.item != cur.item || now.data != cur.data {
                     break;
@@ -481,7 +693,7 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
             return;
         } else if m.cursor.is_empty() {
             m.cursor = cur;
-        } else if m.cursor.item == cur.item && m.cursor.data == cur.data && m.cursor.count + cur.count <= max(cur.item) {
+        } else if m.cursor.item == cur.item && m.cursor.data == cur.data && m.cursor.count + cur.count <= max(&cur) {
             m.cursor.count += cur.count;
         } else {
             return;
@@ -493,71 +705,9 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
     }
 
     if shift {
-        if cur.is_empty() || !takeable(&r) {
-            return;
+        if !cur.is_empty() && takeable(&r) {
+            move_out(m, dim, c, player, slot, cur.count);
         }
-        // Player slots move to the container part (groups with a higher priority first), container
-        // slots move to the player part.
-        let from_player = r.owner == Owner::Player;
-        let mut rest = cur;
-        let mut targets: Vec<u32> = (0..m.slots.len() as u32)
-            .filter(|&i| {
-                let s = m.slots[i as usize];
-                // Not into a crafting grid: temporary slots are filled by hand.
-                i != slot
-                    && s.flags & sf::OUTPUT == 0
-                    && s.owner != Owner::Temp
-                    && (s.owner == Owner::Player) != from_player
-                    && fits(c, &s, cur.item)
-            })
-            .collect();
-        targets.sort_by_key(|&i| -m.slots[i as usize].priority);
-        // Slots made for this item (armor) win over generic ones.
-        let fitted: Vec<u32> = (0..m.slots.len() as u32)
-            .filter(|&i| {
-                let s = m.slots[i as usize];
-                s.accepts != u32::MAX && fits(c, &s, cur.item) && get(m, dim, player, i).is_empty()
-            })
-            .collect();
-        let layout = &c.game.player_layout;
-        let targets = if r.accepts == u32::MAX && !fitted.is_empty() {
-            fitted
-        } else if targets.is_empty() && from_player {
-            // Inventory screen: hotbar <-> main.
-            let hotbar = r.index < layout.hotbar;
-            (0..m.slots.len() as u32)
-                .filter(|&i| {
-                    let s = m.slots[i as usize];
-                    s.owner == Owner::Player
-                        && s.index < layout.slots
-                        && !layout.worn.contains(&s.index)
-                        && s.flags & (sf::OFF_HAND | sf::LOCKED) == 0
-                        && (s.index < layout.hotbar) != hotbar
-                })
-                .collect()
-        } else {
-            targets
-        };
-        for pass in 0..2 {
-            for &t in &targets {
-                if rest.count == 0 {
-                    break;
-                }
-                let ts = get(m, dim, player, t);
-                let room = cap(c, &m.slots[t as usize], rest.item);
-                if pass == 0 && !ts.is_empty() && ts.item == rest.item && ts.data == rest.data && ts.count < room {
-                    let n = (room - ts.count).min(rest.count);
-                    set(m, dim, player, t, ItemStack { count: ts.count + n, ..ts });
-                    rest.count -= n;
-                } else if pass == 1 && ts.is_empty() {
-                    let n = rest.count.min(room);
-                    set(m, dim, player, t, ItemStack { count: n, ..rest });
-                    rest.count -= n;
-                }
-            }
-        }
-        set(m, dim, player, slot, rest);
-        call(m, dim, c, player, slot, |d| d.on_change);
         return;
     }
 
@@ -567,7 +717,7 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
     let mut cursor = m.cursor;
     let mut slot_stack = cur;
     let same = !cursor.is_empty() && !slot_stack.is_empty() && cursor.item == slot_stack.item && cursor.data == slot_stack.data;
-    let room = cap(c, &r, cursor.item);
+    let room = cap(c, &r, &cursor);
     // An input slot only takes: anything that would hand items back is refused.
     if !takeable(&r) && !slot_stack.is_empty() && (cursor.is_empty() || !same) {
         return;
@@ -614,8 +764,120 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
     call(m, dim, c, player, slot, |d| d.on_change);
 }
 
+/// Where a shift-click sends items of `slot`, in order, `item` being what goes (`None`: any, the
+/// slots items may come from instead). Player slots go to the container part (groups with a higher
+/// priority first), container slots to the player part, slots made for the item (armor) before
+/// others; in the inventory screen hotbar <-> main, what is worn or in the other hand to the main
+/// part first, then the hotbar, as vanilla's.
+fn other_side(m: &OpenMenu, dim: &Dim, c: &Content, player: u64, slot: u32, item: Option<u32>) -> Vec<u32> {
+    let r = m.slots[slot as usize];
+    let fits_item = |s: &SlotRef| item.is_none_or(|i| fits(c, s, i));
+    let from_player = r.owner == Owner::Player;
+    let mut targets: Vec<u32> = (0..m.slots.len() as u32)
+        .filter(|&i| {
+            let s = m.slots[i as usize];
+            // Not into a crafting grid: temporary slots are filled by hand.
+            i != slot
+                && s.flags & sf::OUTPUT == 0
+                && s.owner != Owner::Temp
+                && s.owner != Owner::Trash
+                && (s.owner == Owner::Player) != from_player
+                && fits_item(&s)
+        })
+        .collect();
+    targets.sort_by_key(|&i| -m.slots[i as usize].priority);
+    let fitted: Vec<u32> = (0..m.slots.len() as u32)
+        .filter(|&i| {
+            let s = m.slots[i as usize];
+            item.is_some() && s.accepts.is_some() && fits_item(&s) && get(m, dim, player, i).is_empty()
+        })
+        .collect();
+    let layout = &c.game.player_layout;
+    if r.accepts.is_none() && !fitted.is_empty() {
+        fitted
+    } else if targets.is_empty() && from_player {
+        let part = |s: &SlotRef| match s.index {
+            i if layout.worn.contains(&i) || s.flags & sf::OFF_HAND != 0 || i >= layout.slots => None,
+            i if i < layout.hotbar => Some(1),
+            _ => Some(0),
+        };
+        let from = part(&r);
+        let mut to: Vec<u32> = (0..m.slots.len() as u32)
+            .filter(|&i| {
+                let s = m.slots[i as usize];
+                s.owner == Owner::Player && s.flags & sf::LOCKED == 0 && part(&s).is_some_and(|p| Some(p) != from)
+            })
+            .collect();
+        to.sort_by_key(|&i| part(&m.slots[i as usize]));
+        to
+    } else {
+        targets
+    }
+}
+
+/// Up to `n` of `slot`'s items to `other_side`, onto the same items first, then into empty slots
+/// (a shift-click, the wheel down).
+fn move_out(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, slot: u32, n: u32) {
+    let cur = get(m, dim, player, slot);
+    let mut rest = ItemStack { count: n.min(cur.count), ..cur };
+    let going = rest.count;
+    let targets = other_side(m, dim, c, player, slot, Some(cur.item));
+    for pass in 0..2 {
+        for &t in &targets {
+            if rest.count == 0 {
+                break;
+            }
+            let ts = get(m, dim, player, t);
+            let room = cap(c, &m.slots[t as usize], &rest);
+            if pass == 0 && !ts.is_empty() && ts.item == rest.item && ts.data == rest.data && ts.count < room {
+                let n = (room - ts.count).min(rest.count);
+                set(m, dim, player, t, ItemStack { count: ts.count + n, ..ts });
+                rest.count -= n;
+            } else if pass == 1 && ts.is_empty() {
+                let n = rest.count.min(room);
+                set(m, dim, player, t, ItemStack { count: n, ..rest });
+                rest.count -= n;
+            }
+        }
+    }
+    let moved = going - rest.count;
+    if moved > 0 {
+        let left = cur.count - moved;
+        set(m, dim, player, slot, if left == 0 { ItemStack::EMPTY } else { ItemStack { count: left, ..cur } });
+        call(m, dim, c, player, slot, |d| d.on_change);
+    }
+}
+
+/// Up to `n` items into `slot` from `other_side`, the last slots first (Mouse Tweaks'): of what
+/// it holds, or when empty of the first item that fits (the wheel up).
+fn pull_in(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, slot: u32, n: u32) {
+    let r = m.slots[slot as usize];
+    let mut left = n;
+    for i in other_side(m, dim, c, player, slot, None).into_iter().rev() {
+        let (here, s) = (get(m, dim, player, slot), get(m, dim, player, i));
+        let same = !here.is_empty() && s.item == here.item && s.data == here.data;
+        if left == 0 || s.is_empty() || !takeable(&m.slots[i as usize]) || !(same || here.is_empty() && fits(c, &r, s.item)) {
+            continue;
+        }
+        let k = cap(c, &r, &s)
+            .saturating_sub(here.count)
+            .min(s.count)
+            .min(left);
+        if k == 0 {
+            continue;
+        }
+        set(m, dim, player, i, if k == s.count { ItemStack::EMPTY } else { ItemStack { count: s.count - k, ..s } });
+        set(m, dim, player, slot, ItemStack { count: here.count + k, ..s });
+        left -= k;
+    }
+    if left < n {
+        call(m, dim, c, player, slot, |d| d.on_change);
+    }
+}
+
 /// Dragging the cursor stack over `slots`: button 0 splits it evenly, button 1 leaves one item in
-/// each. Slots that cannot take the item are skipped; whatever is left stays on the cursor.
+/// each, again each time a slot is passed over (Mouse Tweaks'). Slots that cannot take the item
+/// are skipped; whatever is left stays on the cursor.
 pub fn drag(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, slots: &[u32], button: u8) {
     let cur = m.cursor;
     if cur.is_empty() {
@@ -625,13 +887,13 @@ pub fn drag(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, s
     let valid: Vec<u32> = slots
         .iter()
         .copied()
-        .filter(|&s| seen.insert(s))
+        .filter(|&s| button == 1 || seen.insert(s))
         .filter(|&s| {
             let Some(r) = m.slots.get(s as usize) else { return false };
             let t = get(m, dim, player, s);
             r.flags & sf::OUTPUT == 0
                 && fits(c, r, cur.item)
-                && (t.is_empty() || (t.item == cur.item && t.data == cur.data && t.count < cap(c, r, cur.item)))
+                && (t.is_empty() || (t.item == cur.item && t.data == cur.data && t.count < cap(c, r, &cur)))
         })
         .take(cur.count as usize)
         .collect();
@@ -642,7 +904,7 @@ pub fn drag(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, s
     let mut left = cur.count;
     for &s in &valid {
         let t = get(m, dim, player, s);
-        let max = cap(c, &m.slots[s as usize], cur.item);
+        let max = cap(c, &m.slots[s as usize], &cur);
         let n = per.min(max - t.count.min(max)).min(left);
         if n > 0 {
             set(m, dim, player, s, ItemStack { count: t.count + n, ..cur });

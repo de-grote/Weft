@@ -79,6 +79,13 @@ pub enum Request {
     Rebind(String, crate::input::Slots),
     ResetBinds,
     StartWorld(WorldMeta),
+    /// Into a world from its picture in the list, `picture` (a GUI texture) growing from `from`
+    /// (GUI pixels) to the whole window first.
+    EnterWorld {
+        world: WorldMeta,
+        picture: String,
+        from: crate::ui::Rect,
+    },
     /// Without asking about mods that are missing.
     StartWorldAnyway(WorldMeta),
     LeaveWorld,
@@ -87,6 +94,28 @@ pub enum Request {
     Respawn,
     SendChat(String),
 }
+
+/// A world's picture growing from its place in the list to the whole window while the world
+/// loads under the list, then faded into the world, playable from then on: going into the world
+/// as into the picture.
+struct Entering {
+    picture: String,
+    /// Where it was, GUI pixels.
+    from: crate::ui::Rect,
+    started: Instant,
+    /// When the picture filled the window and the world took over.
+    shown: Option<Instant>,
+}
+
+/// Cubes about the player whose ground has to be drawn for the world to be there to see.
+const NEAR: i32 = 2;
+
+/// Seconds the HUD takes to come in when the world is there.
+const HUD_FADE: f32 = 0.5;
+
+/// Seconds the picture takes to fill the window, and to fade into the world.
+const ENTER_GROW: f32 = 0.35;
+const ENTER_FADE: f32 = 0.3;
 
 /// What UI actions and bindings can see and change.
 pub struct Ctx<'a> {
@@ -189,6 +218,8 @@ pub(crate) struct Running {
     window: Arc<Window>,
     depth: (TextureId, u32, u32),
     list: CommandList,
+    /// The button clicked last and when, for double clicks.
+    last_button: Option<(String, Instant)>,
     /// What goes in the world's pass this frame, while it is being made.
     world_list: CommandList,
     /// What is drawn over the world after its depth was taken (`Client::render`).
@@ -227,6 +258,17 @@ pub(crate) struct Running {
     pub(crate) stats: Stats,
     /// F1: the world alone, until a screen opens or F1 again.
     hud_off: bool,
+    /// The folder of the world played on this machine, for its picture in the list.
+    world_dir: Option<PathBuf>,
+    /// The world's picture being taken this frame, before the pause screen opens: where it goes,
+    /// and `hud_off` as it was.
+    preview_shot: Option<(PathBuf, bool)>,
+    /// Going into a world from its picture in the list (`Request::EnterWorld`).
+    entering: Option<Entering>,
+    /// When the world around the player was first loaded, the HUD coming in from then.
+    seen_since: Option<Instant>,
+    /// The HUD's quads among the cached ones.
+    hud_quads: std::ops::Range<usize>,
     reload_requested: bool,
     /// The settings in effect, and the config changes seen (`apply_settings`).
     applied: Applied,
@@ -428,6 +470,7 @@ impl App {
             window,
             depth,
             list: CommandList::default(),
+            last_button: None,
             world_list: CommandList::default(),
             after_list: CommandList::default(),
             input,
@@ -472,6 +515,11 @@ impl App {
                 ..Default::default()
             },
             hud_off: false,
+            world_dir: None,
+            preview_shot: None,
+            entering: None,
+            seen_since: None,
+            hud_quads: 0..0,
             reload_requested: false,
             packs_pending: false,
             applied: Applied { packs: packs_now, ..Default::default() },
@@ -637,6 +685,12 @@ impl Running {
     }
 
     fn start_world(&mut self, meta: WorldMeta) {
+        self.start_world_under(meta, false);
+    }
+
+    /// `start_world`, with `under` the screens staying over it for now (going into a world from
+    /// its picture: it loads while the picture grows).
+    fn start_world_under(&mut self, meta: WorldMeta, under: bool) {
         log::info!("opening world '{}' (seed {})", meta.name, meta.seed);
         if meta.format != saves::SAVE_FORMAT {
             log::error!("world '{}' was saved in format {}, this build reads {}", meta.name, meta.format, saves::SAVE_FORMAT);
@@ -668,11 +722,14 @@ impl Running {
         ) {
             Ok(mut client) => {
                 client.sent = load_chat_history(&self.settings.run_dir);
+                self.world_dir = Some(meta.dir.clone());
                 self.game = Some(Game { client, server: Some(server) });
-                self.screens.clear();
                 self.hud.invalidate();
                 self.quads_dirty = true;
-                self.set_capture(true);
+                if !under {
+                    self.screens.clear();
+                    self.set_capture(true);
+                }
             }
             Err(e) => {
                 log::error!("{e}");
@@ -683,6 +740,22 @@ impl Running {
         }
     }
 
+    /// Opens the pause screen over play. In a world of this machine the frame first goes without
+    /// the HUD and is kept as the world's picture in the list: the last it was seen.
+    fn pause(&mut self) {
+        match self.world_dir.clone() {
+            Some(dir) if !self.shot_pending && self.preview_shot.is_none() => {
+                self.preview_shot = Some((dir.join(saves::PREVIEW), self.hud_off));
+                self.hud_off = true;
+                self.quads_dirty = true;
+                self.gpu.request_capture();
+                self.shot_pending = true;
+            }
+            Some(_) => {}
+            None => self.open(screens::engine("core:pause")),
+        }
+    }
+
     fn leave_world(&mut self) {
         self.leave_world_silent();
         self.screens.clear();
@@ -690,6 +763,7 @@ impl Running {
     }
 
     fn leave_world_silent(&mut self) {
+        self.world_dir = None;
         if let Some(mut g) = self.game.take() {
             if g.server.is_none() {
                 // A remote server's synced settings were in force; back to our own.
@@ -796,6 +870,19 @@ impl Running {
                         self.open(Box::new(saves::MissingMods { world: meta, missing }));
                     }
                 }
+                Request::EnterWorld { world, picture, from } => {
+                    let missing = world.missing_mods(content());
+                    if self.entering.is_some() || self.game.is_some() {
+                    } else if missing.is_empty() {
+                        self.entering = Some(Entering { picture, from, started: Instant::now(), shown: None });
+                        self.start_world_under(world, true);
+                        if self.game.is_none() {
+                            self.entering = None;
+                        }
+                    } else {
+                        self.open(Box::new(saves::MissingMods { world, missing }));
+                    }
+                }
                 Request::StartWorldAnyway(meta) => self.start_world(meta),
                 Request::LeaveWorld => self.leave_world(),
                 Request::Host => {
@@ -851,6 +938,7 @@ impl Running {
     /// Mouse and keyboard for the top screen.
     fn screen_input(&mut self, scale: f32, requests: &mut Vec<Request>) {
         let cursor = self.input.cursor / scale;
+        let menu_screen = self.screens.last().is_some_and(|(s, _)| s.shows_menu());
         let Some((screen, ui)) = self.screens.last_mut() else { return };
         let mut ctx = Ctx {
             settings: &mut self.settings,
@@ -865,7 +953,12 @@ impl Running {
             self.quads_dirty = true;
             return;
         }
-        if self.input.scroll != 0.0 && ui.scroll_at(cursor, self.input.scroll) {
+        // The wheel over a slot moves items (`menu_input`), not the panel behind it.
+        let over_slot = menu_screen
+            && ui
+                .hit(cursor)
+                .is_some_and(|h| matches!(ui.nodes[h].kind, Kind::Custom { tag: crate::client::modui::TAG_SLOT, .. }));
+        if self.input.scroll != 0.0 && !over_slot && ui.scroll_at(cursor, self.input.scroll) {
             self.quads_dirty = true;
         }
         // A scroll bar takes the mouse before anything under it.
@@ -886,7 +979,6 @@ impl Running {
             ui.hovered = hovered;
             self.quads_dirty = true;
         }
-        let menu_screen = self.screens.last().is_some_and(|(s, _)| s.shows_menu());
         if menu_screen {
             self.menu_input(hovered, cursor);
         }
@@ -923,7 +1015,21 @@ impl Running {
             // Pressing with a stack on the cursor starts a drag; releasing over one slot is
             // a plain click, over several it spreads the stack.
             let holding = g.client.menu.as_ref().is_some_and(|m| !m.cursor.is_empty());
-            use crate::server::menu::{CLONE, GATHER, HOTBAR_SWAP};
+            use crate::server::menu::{
+                CLONE, GATHER, HOTBAR_SWAP, OFF_HAND_SWAP, PICK_SAME, THROW, THROW_ALL, TO_TRASH, WHEEL_DOWN, WHEEL_UP,
+            };
+            let typing = ui
+                .focused
+                .is_some_and(|f| matches!(ui.nodes[f].kind, Kind::Input { .. }));
+            // The wheel over a slot (Mouse Tweaks'): a notch up brings an item in from the other
+            // side, down sends one there; with shift a stack.
+            if let Some(s) = slot.filter(|_| self.input.scroll != 0.0) {
+                let button = if self.input.scroll > 0.0 { WHEEL_UP } else { WHEEL_DOWN };
+                for _ in 0..(self.input.scroll.abs().round() as u32).max(1) {
+                    g.client
+                        .send(net::ToServer::Click { slot: s, button, shift });
+                }
+            }
             for button in [0u8, 1] {
                 if self.input.pressed_button(button) {
                     let inside = ui
@@ -949,9 +1055,13 @@ impl Running {
                             g.client.last_click = None;
                         }
                         Some(s) if holding && !shift && g.client.drag.is_none() => g.client.drag = Some((button, vec![s])),
-                        Some(s) => g
-                            .client
-                            .send(net::ToServer::Click { slot: s, button, shift }),
+                        Some(s) => {
+                            g.client
+                                .send(net::ToServer::Click { slot: s, button, shift });
+                            if button == 0 && !shift {
+                                g.client.picking = vec![s];
+                            }
+                        }
                         None if !inside => g
                             .client
                             .send(net::ToServer::Click { slot: u32::MAX, button, shift: false }),
@@ -973,21 +1083,44 @@ impl Running {
             } else if !self.input.held_button(0) {
                 g.client.sweep.clear();
             }
-            // Number keys over a slot swap it with that hotbar slot, unless typing a search.
-            if let Some(s) = slot.filter(|_| {
-                !ui.focused
-                    .is_some_and(|f| matches!(ui.nodes[f].kind, Kind::Input { .. }))
-            }) {
+            // Picked a stack up and still holding the button: slots swept over give theirs.
+            if !self.input.held_button(0) {
+                g.client.picking.clear();
+            } else if let Some(s) = slot.filter(|s| !g.client.picking.is_empty() && !g.client.picking.contains(s)) {
+                g.client.picking.push(s);
+                g.client
+                    .send(net::ToServer::Click { slot: s, button: PICK_SAME, shift: false });
+            }
+            // Number keys over a slot swap it with that hotbar slot, the drop keys throw from
+            // it, unless typing a search.
+            if let Some(s) = slot.filter(|_| !typing) {
                 for (n, action) in crate::input::HOTBAR.into_iter().enumerate() {
                     if self.input.pressed(action) {
                         g.client
                             .send(net::ToServer::Click { slot: s, button: HOTBAR_SWAP + n as u8, shift: false });
                     }
                 }
+                let throw = if self.input.pressed("core:drop_all") {
+                    Some(THROW_ALL)
+                } else if self.input.pressed("core:drop") {
+                    Some(THROW)
+                } else if self.input.pressed("core:trash") {
+                    Some(TO_TRASH)
+                } else if self.input.pressed("core:swap_hands") {
+                    Some(OFF_HAND_SWAP)
+                } else {
+                    None
+                };
+                if let Some(button) = throw.filter(|_| !holding) {
+                    g.client
+                        .send(net::ToServer::Click { slot: s, button, shift: false });
+                }
             }
             if let Some((button, slots)) = &mut g.client.drag {
                 if self.input.held_button(*button) {
-                    if let Some(s) = slot.filter(|s| !slots.contains(s)) {
+                    // A right-button drag leaves one more each time it comes back onto a slot.
+                    let again = |s: &u32| if *button == 1 { slots.last() != Some(s) } else { !slots.contains(s) };
+                    if let Some(s) = slot.filter(again) {
                         slots.push(s);
                         self.quads_dirty = true;
                     }
@@ -1017,6 +1150,13 @@ impl Running {
                 if self.input.pressed_button(2) {
                     g.client
                         .send(net::ToServer::CreativeTake { item, button: 0 });
+                }
+                // Number keys: a stack of it in that hotbar slot.
+                for (n, action) in crate::input::HOTBAR.into_iter().enumerate() {
+                    if !typing && self.input.pressed(action) {
+                        g.client
+                            .send(net::ToServer::CreativeTake { item, button: HOTBAR_SWAP + n as u8 });
+                    }
                 }
             }
             // Tooltip with the hovered item's name; other custom nodes (an effect's icon) have their own.
@@ -1064,7 +1204,7 @@ impl Running {
     /// Buttons, sliders and text fields under the mouse. What they do runs once `ui` is let go.
     fn widgets_input(&mut self, hovered: Option<usize>, cursor: Vec2) -> UiCallbacks {
         let mut actions: Vec<crate::ui::Action> = Vec::new();
-        let mut slider: Option<(std::rc::Rc<dyn Fn(&mut Ctx, f32)>, f32)> = None;
+        let mut slider: Vec<(std::rc::Rc<dyn Fn(&mut Ctx, f32)>, f32)> = Vec::new();
         let mut text_changed: Option<(std::rc::Rc<dyn Fn(&mut Ctx, &str)>, String)> = None;
         let Some((_, ui)) = self.screens.last_mut() else { return UiCallbacks::default() };
         if self.input.pressed_button(0) {
@@ -1103,15 +1243,31 @@ impl Running {
                     let v = ((cursor.x - r.x) / r.w).clamp(0.0, 1.0);
                     if (v - *value).abs() > 1e-4 {
                         *value = v;
-                        slider = Some((on_change.clone(), v));
+                        slider.push((on_change.clone(), v));
                         self.quads_dirty = true;
                     }
                 }
             }
         } else if let Some(p) = ui.pressed.take() {
+            if let Kind::Slider { value, on_release: Some(f), .. } = &ui.nodes[p].kind {
+                slider.push((f.clone(), *value));
+            }
             if Some(p) == hovered {
-                if let Kind::Button { action: Some(a), enabled: true, .. } = &ui.nodes[p].kind {
-                    actions.push(a.clone());
+                if let Kind::Button { action, on_double, enabled: true, .. } = &ui.nodes[p].kind {
+                    actions.extend(action.clone());
+                    // The same button again soon, built anew between or not (a list that
+                    // shows what is selected): its id, or its place.
+                    let which = ui.nodes[p].id.clone().unwrap_or_else(|| format!("#{p}"));
+                    let again = self
+                        .last_button
+                        .as_ref()
+                        .is_some_and(|(w, t)| *w == which && t.elapsed() < crate::ui::DOUBLE_CLICK);
+                    if again {
+                        actions.extend(on_double.clone());
+                        self.last_button = None;
+                    } else {
+                        self.last_button = Some((which, Instant::now()));
+                    }
                 }
             }
             self.quads_dirty = true;
@@ -1130,7 +1286,7 @@ impl Running {
                         text_changed = Some((cb.clone(), value.clone()));
                     }
                 }
-            } else if let Kind::Slider { value, on_change, steps, .. } = &mut ui.nodes[f].kind {
+            } else if let Kind::Slider { value, on_change, on_release, steps, .. } = &mut ui.nodes[f].kind {
                 let by: f32 = [(KeyCode::ArrowLeft, -1.0), (KeyCode::ArrowRight, 1.0)]
                     .into_iter()
                     .filter(|(k, _)| self.input.pressed_or_repeated(Key::Code(*k)))
@@ -1140,7 +1296,8 @@ impl Running {
                     let n = (*steps).max(1) as f32;
                     let v = (((*value * n).round() + by) / n).clamp(0.0, 1.0);
                     *value = v;
-                    slider = Some((on_change.clone(), v));
+                    slider.push((on_change.clone(), v));
+                    slider.extend(on_release.clone().map(|f| (f, v)));
                     self.quads_dirty = true;
                 }
             }
@@ -1165,7 +1322,7 @@ impl Running {
 
     fn run_callbacks(&mut self, callbacks: UiCallbacks, requests: &mut Vec<Request>) {
         let UiCallbacks { actions, slider, text_changed } = callbacks;
-        let ran = !actions.is_empty() || slider.is_some() || text_changed.is_some();
+        let ran = !actions.is_empty() || !slider.is_empty() || text_changed.is_some();
         let mut ctx = Ctx {
             settings: &mut self.settings,
             client: self.game.as_mut().map(|g| &mut g.client),
@@ -1187,7 +1344,7 @@ impl Running {
         for a in actions {
             a(&mut ctx);
         }
-        if let Some((f, v)) = slider {
+        for (f, v) in slider {
             f(&mut ctx, v);
         }
         if let Some((f, v)) = text_changed {
@@ -1426,7 +1583,8 @@ impl Running {
         for ui in uis {
             let mut relayout = false;
             let mut redraw = false;
-            for n in &mut ui.nodes {
+            let held = ui.pressed;
+            for (i, n) in ui.nodes.iter_mut().enumerate() {
                 if let Some(tip) = &mut n.tooltip {
                     redraw |= text::refresh(tip, &test);
                 }
@@ -1466,6 +1624,8 @@ impl Running {
                             redraw = true;
                         }
                     }
+                    // One that applies when let go stays where it is dragged meanwhile.
+                    Kind::Slider { on_release: Some(_), .. } if held == Some(i) => {}
                     Kind::Slider { bind, value, .. } => {
                         let v = bind(&ctx);
                         if v.is_finite() && (v - *value).abs() > 1e-4 {
@@ -1544,7 +1704,7 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(false) if !self.opts.automated => {
                 r.input.release_all();
                 if r.game.is_some() && r.screens.is_empty() {
-                    r.open(screens::engine("core:pause"));
+                    r.pause();
                 }
                 r.set_capture(false);
             }
@@ -1619,7 +1779,7 @@ impl ApplicationHandler for App {
 #[derive(Default)]
 struct UiCallbacks {
     actions: Vec<crate::ui::Action>,
-    slider: Option<(std::rc::Rc<dyn Fn(&mut Ctx, f32)>, f32)>,
+    slider: Vec<(std::rc::Rc<dyn Fn(&mut Ctx, f32)>, f32)>,
     text_changed: Option<(std::rc::Rc<dyn Fn(&mut Ctx, &str)>, String)>,
 }
 
@@ -1667,6 +1827,7 @@ fn frame(r: &mut Running, opts: &Options) -> bool {
     client_events(r);
     world_keys(r);
     handle_disconnect(r);
+    enter_world(r);
     end_input(r);
     refresh_hud(r);
     r.poll_bindings();
@@ -1679,6 +1840,16 @@ fn frame(r: &mut Running, opts: &Options) -> bool {
     if (r.depth.1, r.depth.2) != (info.width, info.height) {
         r.gpu.destroy_texture(r.depth.0);
         r.depth = make_depth(&mut *r.gpu, info.width, info.height);
+    }
+    // Block items in slots take the colors of the biome the player is in.
+    let biome = r.game.as_ref().and_then(|g| {
+        g.client
+            .world
+            .biome_at(g.client.player.pos.floor().as_ivec3())
+    });
+    if biome != r.ui.biome {
+        r.ui.biome = biome;
+        r.quads_dirty = true;
     }
     if r.quads_dirty {
         build_ui_quads(r, scale);
@@ -1760,7 +1931,7 @@ fn escape(r: &mut Running, requests: &mut Vec<Request>) {
     } else if r.screens.len() > 1 || (r.game.is_some() && !r.screens.is_empty()) {
         requests.push(Request::Close);
     } else if r.game.is_some() && r.screens.is_empty() {
-        r.open(screens::engine("core:pause"));
+        r.pause();
     }
 }
 
@@ -2088,12 +2259,14 @@ fn build_ui_quads(r: &mut Running, scale: f32) {
     let preview_tex = r.preview_tex;
     let mut layers: Vec<&Ui> = Vec::new();
     let mut animated = Vec::new();
+    let mut hud_quads = 0..0;
     let hud = r
         .game
         .as_ref()
         .is_some_and(|g| g.client.camera_has(crate::tag_bits::camera::HUD))
         || !r.screens.is_empty();
-    if r.game.is_some() && hud && !hud_hidden() && !(r.hud_off && r.screens.is_empty()) {
+    let with_hud = r.game.is_some() && hud && !hud_hidden() && !(r.hud_off && r.screens.is_empty());
+    if with_hud {
         layers.push(&r.hud.ui);
     }
     // Only the top screen shows, like vanilla: the ones under it are not drawn through its
@@ -2115,6 +2288,9 @@ fn build_ui_quads(r: &mut Running, scale: f32) {
         };
         let base = all.len();
         r.ui.build(&mut *r.gpu, &r.assets, ui, &r.look, scale, game, &mut custom);
+        if with_hud && std::ptr::eq(ui, &r.hud.ui) {
+            hud_quads = base..base + r.ui.quads.len();
+        }
         all.append(&mut r.ui.quads);
         animated.extend(r.ui.animated.drain(..).map(|mut a| {
             a.quads = a.quads.start + base..a.quads.end + base;
@@ -2123,6 +2299,7 @@ fn build_ui_quads(r: &mut Running, scale: f32) {
     }
     r.ui_cached = all;
     r.ui_animated = animated;
+    r.hud_quads = hud_quads;
     r.previews = previews;
 }
 
@@ -2131,6 +2308,20 @@ fn draw_overlays(r: &mut Running, info: &weft_render::FrameInfo, scale: f32, tex
     r.ui.quads.clear();
     r.ui.quads.extend_from_slice(&r.ui_cached);
     crate::ui::render::animate(&mut r.ui.quads, &r.ui_animated);
+    // The HUD comes in once the world is there, not before it.
+    let shown = r
+        .seen_since
+        .map_or(0.0, |t| (t.elapsed().as_secs_f32() / HUD_FADE).min(1.0));
+    if shown < 1.0 {
+        for q in
+            r.ui.quads
+                .get_mut(r.hud_quads.clone())
+                .into_iter()
+                .flatten()
+        {
+            q.color = (q.color & !0xFF) | ((q.color & 0xFF) as f32 * shown) as u32;
+        }
+    }
     if let Some(g) = &mut r.game {
         g.client.collect_gizmos();
         let cl = &mut g.client;
@@ -2192,6 +2383,7 @@ fn draw_overlays(r: &mut Running, info: &weft_render::FrameInfo, scale: f32, tex
         let rect = crate::ui::Rect { x: p.x - 9.0 * scale, y: p.y - 9.0 * scale, w: 18.0 * scale, h: 18.0 * scale };
         crate::hud::stack_icon(&mut r.ui, &r.textures, rect, cursor, scale, text_unit);
     }
+    draw_entering(r, info, scale);
 }
 
 /// The player's own model, if `skins/avatar` has one: a Blockbench geometry and its picture, and
@@ -2344,6 +2536,27 @@ fn report_frame(r: &mut Running, dt: f64) {
 
 fn save_screenshot(r: &mut Running) {
     r.shot_pending = false;
+    if let Some((path, hud)) = r.preview_shot.take() {
+        if let Some(cap) = r.gpu.take_capture() {
+            // Whole for going into the world through it, small for the list; written aside, the
+            // pause screen doesn't wait for it.
+            let small = path.with_file_name(saves::PREVIEW_SMALL);
+            crate::background().spawn(move || {
+                let (rgba, w, h) = shrink(&cap.rgba, cap.width, cap.height, PREVIEW_WIDTH);
+                for (p, w, h, px) in [(&path, cap.width, cap.height, &cap.rgba), (&small, w, h, &rgba)] {
+                    if let Err(e) = crate::assets::encode_png(p, w, h, px) {
+                        log::warn!("world picture {}: {e}", p.display());
+                    }
+                }
+            });
+        }
+        r.hud_off = hud;
+        r.quads_dirty = true;
+        if r.game.is_some() && r.screens.is_empty() {
+            r.open(screens::engine("core:pause"));
+        }
+        return;
+    }
     if let Some(cap) = r.gpu.take_capture() {
         // The player's own (F2) says where it went; a mod's knows.
         let own = r.shot_path.is_none();
@@ -2376,6 +2589,86 @@ fn save_screenshot(r: &mut Running) {
             api::store_image(id, cap.width, cap.height, cap.rgba);
         }
     }
+}
+
+/// Going into a world from its picture (`Entering`): the world starts once the picture fills the
+/// window, which goes when the world is loaded around the player.
+fn enter_world(r: &mut Running) {
+    if r.game.is_none() {
+        r.seen_since = None;
+    } else if r.seen_since.is_none() && r.game.as_ref().is_some_and(|g| g.client.near_shown(NEAR)) {
+        r.seen_since = Some(Instant::now());
+    }
+    let Some(e) = &mut r.entering else { return };
+    if r.game.is_none() {
+        r.entering = None;
+        return;
+    }
+    // The picture fills the window: the list goes and the world is played, loaded as far as
+    // it got; the rest comes in as it does anyway.
+    if e.shown.is_none() && e.started.elapsed().as_secs_f32() >= ENTER_GROW {
+        e.shown = Some(Instant::now());
+        r.screens.clear();
+        r.quads_dirty = true;
+        r.set_capture(true);
+        return;
+    }
+    if e.shown
+        .is_some_and(|t| t.elapsed().as_secs_f32() >= ENTER_FADE)
+    {
+        r.entering = None;
+    }
+}
+
+/// The picture of `Entering` over everything: from its place in the list to the window, eased
+/// out, then fading.
+fn draw_entering(r: &mut Running, info: &weft_render::FrameInfo, scale: f32) {
+    let Some(e) = &r.entering else { return };
+    let grow = (e.started.elapsed().as_secs_f32() / ENTER_GROW).min(1.0);
+    let k = 1.0 - (1.0 - grow).powi(3);
+    let alpha = 1.0
+        - e.shown
+            .map_or(0.0, |t| (t.elapsed().as_secs_f32() / ENTER_FADE).min(1.0));
+    let (w, h) = (info.width as f32, info.height as f32);
+    let f = crate::ui::Rect { x: e.from.x * scale, y: e.from.y * scale, w: e.from.w * scale, h: e.from.h * scale };
+    let rect = crate::ui::Rect { x: f.x * (1.0 - k), y: f.y * (1.0 - k), w: f.w + (w - f.w) * k, h: f.h + (h - f.h) * k };
+    let picture = e.picture.clone();
+    if let Some((idx, ..)) = r.ui.texture(&mut *r.gpu, &r.assets, &picture) {
+        r.ui.image(rect, idx, [0.0, 0.0, 1.0, 1.0], 0xFFFFFF00 | (alpha * 255.0) as u32);
+    }
+}
+
+/// Pixels across a world's small picture, for the list.
+const PREVIEW_WIDTH: u32 = 384;
+
+/// `rgba` (`w` x `h`) made `to` wide, each pixel the average of those it covers.
+fn shrink(rgba: &[u8], w: u32, h: u32, to: u32) -> (Vec<u8>, u32, u32) {
+    if w <= to || h == 0 {
+        return (rgba.to_vec(), w, h);
+    }
+    let th = (h as u64 * to as u64 / w as u64).max(1) as u32;
+    let mut out = vec![0u8; (to * th * 4) as usize];
+    for y in 0..th {
+        let (y0, y1) = (y * h / th, ((y + 1) * h / th).max(y * h / th + 1));
+        for x in 0..to {
+            let (x0, x1) = (x * w / to, ((x + 1) * w / to).max(x * w / to + 1));
+            let mut sum = [0u32; 4];
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let i = ((sy * w + sx) * 4) as usize;
+                    for c in 0..4 {
+                        sum[c] += rgba[i + c] as u32;
+                    }
+                }
+            }
+            let n = (y1 - y0) * (x1 - x0);
+            let o = ((y * to + x) * 4) as usize;
+            for c in 0..4 {
+                out[o + c] = (sum[c] / n) as u8;
+            }
+        }
+    }
+    (out, to, th)
 }
 
 fn count_fps(r: &mut Running) {

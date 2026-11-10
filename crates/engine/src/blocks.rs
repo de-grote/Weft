@@ -95,6 +95,7 @@ pub(crate) fn freeze(
             states: 1,
             props: Vec::new(),
             opens: None,
+            sneak_use: abi::sneak_use::EMPTY_HANDS,
             cb: BlockCallbacks::default(),
             sides: 0,
         }],
@@ -155,7 +156,16 @@ pub(crate) fn freeze(
             let file = files
                 .entry((file_name.to_string(), own))
                 .or_insert_with_key(|(name, own)| model_file(name, own, read_model, errors));
-            let (info, head, raw, own_rules) = bake_state(&e.name, index, &s, &retexture, file.as_ref(), tex, errors);
+            let Baked { info, head, pieces: raw, rules: own_rules, tint } =
+                bake_state(&e.name, index, &s, &retexture, file.as_ref(), tex, errors);
+            // What its layers say of the tint is all there is of it.
+            s.0.retain(|v| v.name != abi::comp::TINT && v.name != abi::comp::TINT_FACES);
+            if let Some((kind, sides)) = tint {
+                let text =
+                    RawValue { name: abi::comp::TINT.into(), schema: "tint".into(), bytes: abi::data::bytes_of(&kind), text: Some(kind) };
+                let sides = RawValue { name: abi::comp::TINT_FACES.into(), schema: "u8".into(), bytes: vec![sides], text: None };
+                s.0.extend([Cow::Owned(text), Cow::Owned(sides)]);
+            }
             if !own_rules.is_empty() {
                 out.rules.push((out.states.len(), own_rules));
             }
@@ -241,7 +251,8 @@ pub(crate) fn freeze(
             on_signal: e.callback(b::ON_SIGNAL),
             signal_gate: e.callback(b::SIGNAL_GATE),
         };
-        let def = BlockDef { name: e.name, owner: e.owner, first_state: first, states: count, props, cb, opens: None, sides };
+        let sneak_use = e.or(b::SNEAK_USE, abi::sneak_use::EMPTY_HANDS);
+        let def = BlockDef { name: e.name, owner: e.owner, first_state: first, states: count, props, cb, opens: None, sneak_use, sides };
         // A piece's properties are of the state it is in.
         for (state, raw) in pieces {
             let to = |text: &str| def.changed_text(state as u32, text);
@@ -386,7 +397,7 @@ fn full_key(props: &[Prop], s: u32) -> String {
 }
 
 /// What only a block as a whole has: its states leave it out.
-const BLOCK_ONLY: [&str; 15] = [
+const BLOCK_ONLY: [&str; 16] = [
     b::PROPS,
     b::ON_USE,
     b::ON_NEIGHBOR,
@@ -399,6 +410,7 @@ const BLOCK_ONLY: [&str; 15] = [
     b::SIGNAL_GATE,
     b::SIGNAL_READ,
     b::OPENS,
+    b::SNEAK_USE,
     b::SHARES_CELL,
     b::SHAPES_OF,
     b::RETEXTURE,
@@ -525,6 +537,7 @@ struct BoxView<'a> {
     uv: [[f32; 4]; 6],
     turn: [u8; 6],
     tilt: abi::BoxTilt,
+    flat: bool,
 }
 
 impl<'a> BoxView<'a> {
@@ -539,7 +552,7 @@ impl<'a> BoxView<'a> {
             *t = read(r)?;
         }
         let tilt = abi::BoxTilt { origin: floats(r)?, axis: floats(r)?, degrees: read(r)? };
-        Some(BoxView { min, max, textures, uv, turn, tilt })
+        Some(BoxView { min, max, textures, uv, turn, tilt, flat: read(r)? })
     }
 }
 
@@ -594,7 +607,7 @@ fn bake_state(
     file: Option<&crate::block_model::FileModel>,
     tex: &mut dyn FnMut(&str) -> u32,
     errors: &mut Vec<String>,
-) -> (StateInfo, String, Vec<([f32; 6], String, String)>, Vec<abi::BlockRule>) {
+) -> Baked {
     let mut model = model_of(s.or(b::MODEL, BlockModel::Cube as u32));
     let own_layer = if model == BlockModel::Boxes { RenderLayer::Cutout } else { RenderLayer::Opaque };
     let mut layer = layer_of(s.or(b::LAYER, own_layer as u32));
@@ -610,14 +623,6 @@ fn bake_state(
     let mut boxes: Vec<BoxView> = s
         .read(b::BOXES, entries::schema::<Vec<abi::ModelBox>>(), |r| (0..read::<u32>(r)?).map(|_| BoxView::read(r)).collect())
         .unwrap_or_default();
-    for t in textures
-        .iter_mut()
-        .chain(boxes.iter_mut().flat_map(|b| b.textures.iter_mut()))
-    {
-        if let Some((_, to)) = retexture.iter().find(|r| r.0 == *t) {
-            *t = to;
-        }
-    }
     // A model file: its elements become the boxes (faces left to the block keep the state's
     // textures), a cube parent sets the face textures.
     let mut opacity = s.get::<u8>(b::LIGHT_OPACITY);
@@ -643,6 +648,7 @@ fn bake_state(
                     uv: x.uv,
                     turn: x.turn,
                     tilt: x.tilt,
+                    flat: x.flat,
                 })
                 .collect();
         }
@@ -683,18 +689,45 @@ fn bake_state(
         })
         .collect();
     let signal: abi::SignalDesc = s.get(b::SIGNAL).unwrap_or(abi::SignalDesc::DEFAULT);
+    // Its faces' layers, each tinted by a kind or not: what reads one kind of a block (particles,
+    // an item's icon) gets the first, on the sides any drawn face has one.
+    let mut kind = None;
+    let faces: [String; 6] = std::array::from_fn(|i| face_texture(textures[i], retexture));
+    let mut kinded = 0u8;
+    let mut note = |t: &str, side: usize| {
+        if let Some(k) = abi::layers(t).find_map(|l| l.kind) {
+            kind.get_or_insert_with(|| k.to_string());
+            kinded |= 1 << side;
+        }
+    };
     let mut boxes: Vec<ModelBox> = boxes
         .iter()
-        .map(|x| ModelBox {
-            turn: x.turn,
-            tilt: weft_abi::BoxTilt { origin: x.tilt.origin.map(|v| v / 16.0), ..x.tilt },
-            min: x.min.map(|v| v / 16.0),
-            max: x.max.map(|v| v / 16.0),
-            textures: std::array::from_fn(|i| tex(if x.textures[i].is_empty() { textures[i] } else { x.textures[i] })),
-            uv: x.uv,
+        .map(|x| {
+            let textures = std::array::from_fn(|i| {
+                let t = if x.textures[i].is_empty() { faces[i].clone() } else { face_texture(x.textures[i], retexture) };
+                if x.uv[i] != abi::UV_NO_FACE {
+                    note(&t, i);
+                }
+                tex(&t)
+            });
+            ModelBox {
+                turn: x.turn,
+                tilt: weft_abi::BoxTilt { origin: x.tilt.origin.map(|v| v / 16.0), ..x.tilt },
+                min: x.min.map(|v| v / 16.0),
+                max: x.max.map(|v| v / 16.0),
+                textures,
+                uv: x.uv,
+                flat: x.flat,
+            }
         })
         .map(|b| if turn == weft_abi::Turn::NONE { b } else { b.turned(turn) })
         .collect();
+    if model != BlockModel::Boxes && model != BlockModel::None {
+        for (i, t) in faces.iter().enumerate() {
+            note(t, i);
+        }
+    }
+    let tint = kind.map(|k| (k, kinded));
     boxes.shrink_to_fit();
     let of_model = || -> Vec<[f32; 6]> {
         boxes
@@ -735,7 +768,7 @@ fn bake_state(
     } else {
         vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]
     };
-    let own: [u32; 6] = if model == BlockModel::None { [0; 6] } else { std::array::from_fn(|i| tex(textures[i])) };
+    let own: [u32; 6] = if model == BlockModel::None { [0; 6] } else { std::array::from_fn(|i| tex(&faces[i])) };
     let info = StateInfo {
         liquid_walls: match s.or(b::LIQUID_WALLS, u8::MAX) {
             u8::MAX => u8::MAX,
@@ -785,7 +818,37 @@ fn bake_state(
         rules: Vec::new(),
         hazards: Vec::new(),
     };
-    (info, signal.head, pieces, rules)
+    Baked { info, head: signal.head, pieces, rules, tint }
+}
+
+/// A state as `bake_state` made it: also its piston head's name, its pieces with their properties
+/// still text, its rules, and the tint kind its faces' layers have and the sides they have it on.
+struct Baked {
+    info: StateInfo,
+    head: String,
+    pieces: Vec<([f32; 6], String, String)>,
+    rules: Vec<abi::BlockRule>,
+    tint: Option<(String, u8)>,
+}
+
+/// A face's layers (`abi::comp::LAYERS`) renamed by `retexture`, as one text.
+fn face_texture(spec: &str, retexture: &[(String, String)]) -> String {
+    let renamed = |n: &str| -> String {
+        retexture
+            .iter()
+            .find(|r| r.0 == n)
+            .map_or(n, |r| r.1.as_str())
+            .to_string()
+    };
+    if !spec.contains([' ', '#', '@']) {
+        return renamed(spec);
+    }
+    let names: Vec<String> = abi::layers(spec).map(|l| renamed(l.name)).collect();
+    abi::layers_text(
+        abi::layers(spec)
+            .zip(&names)
+            .map(|(l, n)| abi::Layer { name: n, ..l }),
+    )
 }
 
 /// A big block's other cells turned, each with its step toward the block's own cell, found
@@ -991,7 +1054,7 @@ fn expand_templates(
             if let Some(i) = item {
                 let mut it = Entry { name: name.clone(), cells: Vec::new(), ..i.clone() };
                 it.set(abi::comp::item::BLOCK, name.clone());
-                it.set(abi::comp::item::TEXTURE, String::new());
+                it.set(abi::comp::LAYERS, String::new());
                 made_items.entry(i.name.clone()).or_default().push(it);
             }
             made.push(Entry { name, owner: template.owner, cells: Vec::new(), values, callers: template.callers.clone(), parts });
@@ -1021,7 +1084,8 @@ fn expand_templates(
     (made, shapes)
 }
 
-/// `v` of a block made of `source` (its name) with `{source}` in its texts as that name and
+/// `v` of a block made of `source` (its name) with `{source}` in its texts as that name,
+/// `{source.name}` and `{source.mod}` as its parts (for paths: no `:` in them) and
 /// `{source.side}` (`top`, `bottom`, or a face: `north`..) as its texture there. Of texts with
 /// alternatives (`{source.side}_inner | {source.top}`) the first texture that exists is taken.
 fn of_source(v: RawValue, source: &str, textures: &[String; 6]) -> RawValue {
@@ -1035,7 +1099,12 @@ fn of_source(v: RawValue, source: &str, textures: &[String; 6]) -> RawValue {
         n => abi::FACE_NAMES.iter().position(|f| *f == n),
     };
     let one = |t: &str| -> String {
-        let mut out = t.trim().replace("{source}", source);
+        let (owner, path) = source.split_once(':').unwrap_or(("", source));
+        let mut out = t
+            .trim()
+            .replace("{source}", source)
+            .replace("{source.name}", path)
+            .replace("{source.mod}", owner);
         while let Some(at) = out.find("{source.") {
             let Some(end) = out[at..].find('}') else { break };
             let tex = face(&out[at + 8..at + end])

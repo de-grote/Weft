@@ -236,8 +236,9 @@ impl Dim {
             .get(player)
             .is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::NO_COSTS));
         if let Some(&(l, empty)) = c.item_liquid.get(&held.item) {
+            let reach = self.block_reach(c, player);
             let hit = self
-                .look_ray(c, player, self.block_reach(c, player), false)
+                .look_ray(c, player, reach, false)
                 .filter(|h| h.frame == 0)?;
             let source = c.liquids[l as usize].first_state;
             // Into what holds liquid, with the same say as placing a block.
@@ -281,8 +282,9 @@ impl Dim {
             }
             return Some(if creative || empty == 0 { held } else { ItemStack::new(empty, 1) });
         }
+        let reach = self.block_reach(c, player);
         let hit = self
-            .look_ray(c, player, self.block_reach(c, player), true)
+            .look_ray(c, player, reach, true)
             .filter(|h| h.frame == 0)?;
         let f = decode(c, hit.state).filter(|f| f.source)?;
         let filled = *c.containers.get(&(held.item, f.id))?;
@@ -318,12 +320,17 @@ impl Dim {
         let e = self.entities.get(id)?;
         let eye = e.pos + DVec3::Y * e.eye(c);
         let from = if self.frame != 0 { self.place.to_local(eye) } else { eye };
-        self.ray(c, from, crate::physics::look_dir(e.yaw, e.pitch), max, liquids)
+        let flags = if liquids { weft_abi::ray::LIQUIDS } else { weft_abi::ray::BLOCKS };
+        self.ray(c, from, crate::physics::look_dir(e.yaw, e.pitch), max, flags)
     }
 
     /// The first block along a ray from `from` (in this dimension's frame: a body's blocks when
-    /// asked from them), bodies included when asked from the world.
-    pub fn ray(&self, c: &Content, from: DVec3, dir: DVec3, max: f64, liquids: bool) -> Option<crate::physics::Hit> {
+    /// asked from them), bodies included when asked from the world; `flags` as `physics::pick`'s.
+    pub fn ray(&self, c: &Content, from: DVec3, dir: DVec3, max: f64, flags: u32) -> Option<crate::physics::Hit> {
+        // Asked from a body's blocks, it looks along those.
+        if self.frame != 0 {
+            return crate::physics::pick(c, &*self.space, &[], from, dir, max, flags);
+        }
         let structures: Vec<(u64, crate::physics::Transform, &dyn crate::physics::Blocks)> = self
             .bodies
             .iter()
@@ -333,10 +340,6 @@ impl Dim {
                     .map(|b| (sid, crate::physics::Transform::of(b.pos), &**s as &dyn crate::physics::Blocks))
             })
             .collect();
-        // Asked from a body's blocks, it looks along those.
-        if self.frame != 0 {
-            return crate::physics::pick(c, &*self.space, &[], from, dir, max, liquids);
-        }
-        crate::physics::pick(c, &*self.space, &structures, from, dir, max, liquids)
+        crate::physics::pick(c, &*self.space, &structures, from, dir, max, flags)
     }
 }

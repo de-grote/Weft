@@ -634,7 +634,7 @@ impl Dim {
     pub(super) fn broke_landing(&mut self, c: &'static Content, at: IVec3, state: u32, entity: Option<u64>) {
         if let Some(id) = entity {
             self.drop_inventory(c, id);
-            self.entities.remove(id);
+            self.entities.remove(id, super::dim::UNTOLD);
         }
         self.drop_block_loot(c, at, state, abi::ItemStack::EMPTY, false, 0);
     }
@@ -648,7 +648,7 @@ impl Dim {
         lingering.retain_mut(|(body, ticks)| {
             *ticks -= 1;
             if *ticks == 0 {
-                self.entities.remove(*body);
+                self.entities.remove(*body, super::dim::UNTOLD);
                 self.bodies.remove(body);
             }
             *ticks > 0
@@ -964,14 +964,14 @@ impl Dim {
     /// Bodies waiting to be shown go now.
     pub(super) fn finish_landings(&mut self) {
         for s in std::mem::take(&mut self.space.landings) {
-            self.entities.remove(s.body);
+            self.entities.remove(s.body, super::dim::UNTOLD);
             self.bodies.remove(&s.body);
         }
         for (at, _) in std::mem::take(&mut self.space.not_shown) {
             self.resend_cell(at);
         }
         for (body, _) in std::mem::take(&mut self.space.lingering) {
-            self.entities.remove(body);
+            self.entities.remove(body, super::dim::UNTOLD);
             self.bodies.remove(&body);
         }
     }

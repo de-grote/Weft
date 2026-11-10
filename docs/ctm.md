@@ -3,14 +3,14 @@
 CTM is connected and varied block textures like glass that merges with its neighbors, logs that look
 like one trunk, stone that doesn't repeat itself, etc.\
 Everything is almost identical to OptiFine/MCPatcher CTM, so packs made for
-those port with little more than renaming files.
+those port with little more than moving files.
 
 ## Note
 CTM is created without code and works from both mods and resource packs, a pack's file overrides the mod's one.\
 It works on blocks only, so no CTM on items or entities.\
 Every method works on every block except for liquids: a method looks at neighbors, not at what is drawn. A plant is one west face, so `vertical` and `top` are what it has most use for, and `horizontal` looks along z. The one exception is `compact`. Its tiles are cut for a cube's face: on a texture a plant or a model shows it logs `compact ctm doesn't support custom models` and stops the game. Use full `ctm`, or keep it off them with `blocks =`.\
 A tile can also [be a model](#models-as-tiles).\
-Examples to copy from are in `mods/base/assets/textures/block/`: `glass.ctm`, `stone.ctm`, `iron_ore.ctm`.
+Examples to copy from are in `mods/base/assets/textures/block/`: `glass/`, `stone/`, `iron_ore/`.
 
 Check [textures guide](textures.md) for more texturing options like overlays, glow and animation.
 
@@ -18,27 +18,28 @@ Check [textures guide](textures.md) for more texturing options like overlays, gl
 [method](#method) | [tiles](#tiles) | [connect](#connect) | [faces](#faces) | [inner_seams](#inner_seams) | [blocks](#blocks) | [heights](#heights) | [biomes](#biomes) | [weights](#weights) | [symmetry](#symmetry) | [width and height](#width-and-height)
 
 ## Where the files go
-`<texture>.ctm` goes next to the texture it changes, the file's name is the texture's name.\
-For example for `textures/block/glass.png` it's `textures/block/glass.ctm`:
+A texture with CTM is a folder instead of a picture: the rules `<name>.ctm` and the tiles go in
+`<name>/`, and blocks keep naming it `glass` as before.
 
 ### Base mod example:
 ```
 assets/textures/block/
-    glass.png          <- the plain texture, the one blocks use
-    glass.ctm          <- the rules
+    glass/glass.ctm    <- the rules
     glass/0.png        <- the tiles the rules point to
     glass/1.png
     ...
 ```
 
+Where nothing connects it (an item, breaking particles, distant terrain, a face no rule is for), the texture is the tile a block alone gets: tile `0` (all edges for `ctm` and `compact`, the first one for `random`, `repeat`, `fixed` and `top`), tile `3` (both ends) for `horizontal`, `vertical`, `h+v` and `v+h`. So there is no `glass.png` beside the folder; one mod or pack with both stops the game.
+
 The rules apply to every face that shows this texture on any block.\
 For example if a block uses glass texture as one of the faces, it will get the same CTM as glass block for that face.
 
-A mod can only add `.ctm` files for its own textures.\
-A resource pack can add them for any mod's texture, since packs keeps files in a folder per namespace:\
-`glass.ctm` for the base game's glass is `<pack>/base/textures/block/glass.ctm`, and its tiles go into `<pack>/base/textures/block/glass/`.
+A mod can only add rules for its own textures.\
+A resource pack can add them for any mod's texture, since packs keep files in a folder per namespace:\
+the base game's glass is `<pack>/base/textures/block/glass/glass.ctm` with its tiles beside it.
 
-A pack that replaces a texture and has no `.ctm` for it turns the mod's rules for it off: they were made for the mod's picture, so you get your picture as it is. A `.ctm` in a pack without the picture applies to the picture below it, and between packs the rules only count if they are in the same pack as the picture or above it.
+A pack that has a plain `glass.png` turns the mod's rules for it off: you get your picture as it is. A pack's folder goes over a mod's picture or folder, and a pack replacing only `glass/0.png` keeps the mod's rules with its own tile.
 
 The file uses `key = value` lines.\
 Comments are whole lines starting with `#`. A `#` after a value is a part of that value, so don't do it.
@@ -61,14 +62,13 @@ example: `method = compact`
 ### tiles
 Which textures the method uses, in order.
 
-A name is relative to the folder of the `.ctm` file (a full `namespace:path` also works).\
-`a-b` at the end of a name expands to numbers: `glass/0-4` is `glass/0 glass/1 glass/2 glass/3 glass/4`.\
-`<default>` is the plain texture itself.
+A name is a file in the folder (a full `namespace:path` also works).\
+`a-b` at the end of a name expands to numbers: `0-4` is `0 1 2 3 4`.
 
 examples:\
-`tiles = glass/0-4`\
-`tiles = <default> stone/1-3`\
-`tiles = log_oak/0 log_oak/1 log_oak/2 log_oak/3`
+`tiles = 0-4`\
+`tiles = 3 1 2`\
+`tiles = 0 1 2 3`
 
 A tile with a model file of the same name is that model, see [models as tiles](#models-as-tiles).
 
@@ -207,7 +207,7 @@ Check `mods/base/assets/textures/block/glass/` for a real example.
 ![v+h tiles](img/ctm_v_h.png)
 
 ### top
-1 tile. Side faces use it when the same block is above them (sandstone-like), top and bottom faces never do.
+2 tiles: the plain one, and the one side faces use when the same block is above them (sandstone-like). Top and bottom faces use the plain one.
 
 ### random
 Picks a tile from the position, so the same block always looks the same.\
@@ -225,18 +225,19 @@ A tile doesn't have to be a picture. If `models/block/<tile>.json` exists, a Jav
 
 A random cactus, one in five with a flower or a branch:
 ```
-textures/block/cactus_side.ctm
-textures/block/cactus/1.png        <- an unwrap, any size
-models/block/cactus/1.json
+textures/block/cactus_side/cactus_side.ctm
+textures/block/cactus_side/0.png   <- the plain side
+textures/block/cactus_side/1.png   <- an unwrap, any size
+models/block/cactus_side/1.json
 ...
 ```
 `cactus_side.ctm`:
 ```
 method = random
-tiles = <default> cactus/1-3
+tiles = 0-3
 weights = 12 1 1 1
 ```
-The method chooses the tile and the model shows its picture: a face the file gives no texture shows the picture named like the tile (`textures/block/cactus/1.png`), else the texture the `.ctm` belongs to. A file can name its own textures as usual, each face with its `uv` on them, in a model's 0 to 16 across the picture however big it is. Fractions are fine down to 1/8, that's what an unwrap on a 64x64 or 128x128 texture comes down to. The edge of a part can bleed a screen pixel into what is next to it on the picture, so leave a pixel of margin in the same color. `<default>` in the same list keeps the block as it was.
+The method chooses the tile and the model shows its picture: a face the file gives no texture shows the picture named like the tile (`textures/block/cactus_side/1.png`), else the texture the rules belong to. A file can name its own textures as usual, each face with its `uv` on them, in a model's 0 to 16 across the picture however big it is. Fractions are fine down to 1/8, that's what an unwrap on a 64x64 or 128x128 texture comes down to. The edge of a part can bleed a screen pixel into what is next to it on the picture, so leave a pixel of margin in the same color. A tile without a model file (`0` here) keeps the block as it was.
 
 Only the visual changes: collision, selection and light stay what the mod gave every player, since a server knows nothing of packs. Items show the block's plain model. A model is picked by its block's position, so `symmetry` has no say and all of its faces agree.
 
@@ -247,54 +248,55 @@ A block the mod made opaque keeps hiding the faces next to it. If a model leaves
 
 `hides_neighbors = false`
 
-The faces next to any block the rule goes for are then drawn. It goes on any rule, a `fixed` one with `tiles = <default>` is enough for a `models/block/<name>.json` of a pack. Light still treats the block as solid, so those faces take their light from what is around.
+The faces next to any block the rule goes for are then drawn. It goes on any rule, a `fixed` one with `tiles = 0` is enough for a `models/block/<name>.json` of a pack. Light still treats the block as solid, so those faces take their light from what is around.
 
 ## Examples
 ### Sugar cane
+`reeds/reeds.ctm`:
 ```
 method = vertical
-tiles = reeds/0-3
+tiles = 0-3
 ```
 
 ### Glass
-`glass.ctm`:
+`glass/glass.ctm`:
 ```
 method = compact
-tiles = glass/0-4
+tiles = 0-4
 inner_seams = true
 ```
-with `glass/0.png` ... `glass/4.png` next to it.
+with `glass/0.png` ... `glass/4.png` beside it.
 
 ### Logs that look like one trunk
-A pack's `log_oak.ctm`:
+A pack's `log_oak/log_oak.ctm`:
 ```
 method = vertical
-tiles = log_oak/0-3
+tiles = 0-3
 faces = sides
 ```
 
 ### Stone that doesn't repeat
-`stone.ctm`:
+`stone/stone.ctm`:
 ```
 method = random
-tiles = <default> stone/1-3
-weights = 4 2 2 2
+tiles = 1-3
+weights = 6 2 2
 ```
 
 ### Several rules in one file
 Only in deserts, a different one elsewhere:
 ```
 method = fixed
-tiles = sand_smooth
+tiles = smooth
 biomes = base:desert
 
 [the rest of the world]
 method = random
-tiles = <default> sand_1 sand_2
+tiles = 0 1 2
 ```
 
 ## Debugging
 The log says `connected textures: N rules, M models, T textures, K generated` when any rule is loaded.\
 `unknown method` or `needs N tiles` lines name the file and the rule that was skipped, and a skipped
-rule just shows the plain texture.\
+rule just shows the texture's alone tile.\
 A tile file that doesn't exist shows up as the "missing texture" pattern.

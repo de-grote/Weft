@@ -663,11 +663,63 @@ pub trait StackData: Sized {
     fn stacks(&self, storage: &Storage) -> Vec<ItemStack>;
     /// The stack keeping `list` in `storage`, as many as it has slots; the rest are emptied.
     fn with_stacks(self, storage: &Storage, list: &[ItemStack]) -> Self;
-    /// The stack showing these pictures one over the other, the first at the bottom, instead
-    /// of its item's icon: a tool made of parts (handle, head, binding). Texture names
-    /// (relative ones under `item/`), each tinted `0xRRGGBB` or not. Empty: its item's icon
+    /// The stack showing `layers` instead of its item's look: a tool made of parts
+    /// (`Layers::new().layer("handle").layer("head").tint(0xFF8800)`). Empty: its item's look
     /// again. In slots, in the hand and on the ground alike.
-    fn with_layers(self, layers: &[(&str, Option<u32>)]) -> Self;
+    fn with_layers(self, layers: Layers) -> Self;
+    /// The stack giving `list` while held or worn instead of its item's modifiers (an enchanted
+    /// sword's `Modifier::add(&attribute::ATTACK_DAMAGE, 2.0)`). Empty: its item's again.
+    fn with_modifiers(self, list: &[crate::Modifier]) -> Self;
+}
+
+/// How an item or a stack looks (`abi::comp::LAYERS`): pictures one over the other, the first
+/// at the bottom, each tinted or not. The same for an item (`ItemBuilder::layer`) and a stack
+/// (`with_layers`).
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct Layers(pub(crate) Vec<(String, Option<u32>, Option<String>)>);
+
+impl Layers {
+    pub fn new() -> Layers {
+        Layers::default()
+    }
+    /// One more picture on top (under `item/`, `"other:x"` another mod's).
+    pub fn layer(mut self, texture: &str) -> Layers {
+        self.0.push((crate::asset("item", texture), None, None));
+        self
+    }
+    /// Tints the layer just added `0xRRGGBB` (multiplied: white parts take the color).
+    pub fn tint(mut self, color: u32) -> Layers {
+        if let Some(last) = self.0.last_mut() {
+            last.1 = Some(color & 0xFF_FFFF);
+        }
+        self
+    }
+    /// Tints the layer just added by a tint kind's default color (`tints::GRASS`): an item
+    /// looking like the block it places away from any biome.
+    pub fn tint_kind(mut self, kind: &crate::TintKind) -> Layers {
+        if let Some(last) = self.0.last_mut() {
+            last.2 = Some(kind.name().to_string());
+        }
+        self
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub(crate) fn text(&self) -> String {
+        abi::layers_text(
+            self.0
+                .iter()
+                .map(|(name, tint, kind)| abi::Layer { name, tint: *tint, kind: kind.as_deref() }),
+        )
+    }
+    /// From `text` (full names, as `text` gives them).
+    pub(crate) fn parse(text: &str) -> Layers {
+        Layers(
+            abi::layers(text)
+                .map(|l| (l.name.to_string(), l.tint, l.kind.map(str::to_string)))
+                .collect(),
+        )
+    }
 }
 
 /// Bytes a stack takes in a storage's value: item, count, data.
@@ -702,10 +754,11 @@ impl StackData for ItemStack {
         if damage >= durability { ItemStack::EMPTY } else { self.with_wear(damage) }
     }
     fn room_for(&self, out: ItemStack) -> u32 {
+        let max = MAX_STACK.on_stack(&out).unwrap_or(64).max(1);
         let room = if self.is_empty() {
-            max_stack(out.item)
+            max
         } else if self.stacks_with(&out) {
-            max_stack(out.item).saturating_sub(self.count)
+            max.saturating_sub(self.count)
         } else {
             0
         };
@@ -732,20 +785,19 @@ impl StackData for ItemStack {
             })
             .collect()
     }
-    fn with_layers(self, layers: &[(&str, Option<u32>)]) -> Self {
-        let text = layers
-            .iter()
-            .map(|(t, tint)| {
-                let name = crate::asset("item", t);
-                tint.map_or(name.clone(), |c| format!("{name}#{:06X}", c & 0xFF_FFFF))
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+    fn with_layers(self, layers: Layers) -> Self {
+        let text = layers.text();
         let data = if text.is_empty() {
             unsafe { (host().stack_with)(self.data, LAYERS.id(), abi::Slice::EMPTY, 1) }
         } else {
             unsafe { (host().stack_with)(self.data, LAYERS.id(), abi::Slice::new(text.as_bytes()), 0) }
         };
+        ItemStack { data, ..self }
+    }
+    fn with_modifiers(self, list: &[crate::Modifier]) -> Self {
+        let raw: Vec<abi::Modifier> = list.iter().map(|m| m.0.clone()).collect();
+        let bytes = abi::data::bytes_of(&raw);
+        let data = unsafe { (host().stack_with)(self.data, MODIFIERS.id(), abi::Slice::new(&bytes), raw.is_empty() as u32) };
         ItemStack { data, ..self }
     }
     fn with_stacks(self, storage: &Storage, list: &[ItemStack]) -> Self {
@@ -789,6 +841,8 @@ pub static HARDNESS: Component<f32> = Component::named(abi::comp::HARDNESS);
 pub static FRICTION: Component<f32> = Component::named(abi::comp::FRICTION);
 pub static DRAG: Component<f32> = Component::named(abi::comp::DRAG);
 pub static LIGHT: Component<[u8; 3]> = Component::named(abi::comp::LIGHT);
+/// A block's tint kind and the sides it is on, to read: the engine sets them from its faces'
+/// layers (`tint_kind`).
 pub static TINT: Component<TintRef> = Component::named(abi::comp::TINT);
 pub static TINT_FACES: Component<u8> = Component::named(abi::comp::TINT_FACES);
 pub static SPREADS_TO: Component<Matcher> = Component::named(abi::comp::SPREADS_TO);

@@ -93,7 +93,7 @@ fn creative_panel(ui: &mut Ui, cx: &BuildCx, search: &Rc<RefCell<String>>, tab: 
             Style::default().h(14.0).w(162.0),
         );
         ui.set_id(input, "creative_search");
-        let grid = ui.container(Style::default().w(162.0).h(18.0 * 8.0).scroll(), |ui| {
+        let grid = ui.container(Style::default().h(18.0 * 8.0).scroll(), |ui| {
             for row in items.chunks(9) {
                 ui.container(Style::row(), |ui| {
                     for &i in row {
@@ -104,6 +104,21 @@ fn creative_panel(ui: &mut Ui, cx: &BuildCx, search: &Rc<RefCell<String>>, tab: 
         });
         ui.set_id(grid, "creative_grid");
     });
+}
+
+/// The place name of every menu's screen (`Registry::screen_part`): its areas `side` (beside the
+/// menu) and `corner` (in the top right corner inside its panel).
+pub const MENUS: &str = "core:menus";
+
+/// Whether mods add anything to these places (screen, area).
+fn has_parts(places: &[(&str, &str)]) -> bool {
+    let c = content();
+    places.iter().any(|(s, a)| {
+        c.game
+            .screen_parts
+            .iter()
+            .any(|p| p.screen == *s && p.area == *a)
+    })
 }
 
 /// The status effects shown and their levels.
@@ -203,6 +218,23 @@ impl Screen for MenuScreen {
                     if let Some((by, cb)) = def.screen {
                         let first = ui.nodes.len();
                         modui::build(ui, cx.lang, Some(cx.input), by, cb, cx.client);
+                        // What mods add in the top right corner inside the menu's panel: this
+                        // menu's place, then every menu's.
+                        let corner = [(def.name.as_str(), "corner"), (MENUS, "corner")];
+                        if first < ui.nodes.len() && has_parts(&corner) {
+                            ui.open_existing(first);
+                            ui.container(
+                                Style::row()
+                                    .gap(1.0)
+                                    .at_from([1.0, 0.0], 0.0, 0.0, [1.0, 0.0]),
+                                |ui| {
+                                    for (screen, area) in corner {
+                                        crate::client::modui::parts(ui, cx.lang, Some(cx.input), cx.client, screen, area);
+                                    }
+                                },
+                            );
+                            ui.close();
+                        }
                         // The arrows of a menu that makes recipes open them.
                         if !def.recipes.is_empty() {
                             let tip = cx.t("recipes.show", &[]);
@@ -212,6 +244,15 @@ impl Screen for MenuScreen {
                                 }
                             }
                         }
+                    }
+                    // What mods add beside a menu: this one's place, then every menu's.
+                    let places = [(def.name.as_str(), "side"), (MENUS, "side")];
+                    if has_parts(&places) {
+                        ui.container(Style::default().gap(4.0), |ui| {
+                            for (screen, area) in places {
+                                crate::screens::parts(ui, cx, screen, area);
+                            }
+                        });
                     }
                 }
             });
@@ -865,7 +906,8 @@ pub fn recipe_slot(
                 return;
             }
             let shown = items.clone();
-            let tag = if let Ingredient::Tag(t) = ing { Some(*t) } else { None };
+            // A tag only one item has goes straight to that item.
+            let tag = if let Ingredient::Tag(t) = ing { Some(*t).filter(|_| items.len() > 1) } else { None };
             let b = ui.button(
                 "recipe_slot",
                 size,

@@ -4,7 +4,9 @@
 //!
 //! ```ignore
 //! static JETPACK: Key = Key::named("jetpack");
-//! r.key(&JETPACK, "J").on_server(|p| { let w = p.world(); /* for p.player() */ });
+//! r.key(&JETPACK, "J").on_server(|w, player| { /* on the server, for that player */ });
+//! // Any action on the server, the mouse buttons too, with how long it was held:
+//! r.on_event(&KEY, |b| for k in b.iter() { /* k.player, k.key, k.down, k.held_ticks */ });
 //! static SCAN: Key = Key::named("scan");
 //! r.key(&SCAN, "K").on_client(|c| { /* on this client */ });
 //! ```
@@ -247,6 +249,13 @@ impl Client {
 
     pub fn menu_close(&self) {
         self.op(abi::client_op::CLOSE_SCREEN, "", 0.0);
+    }
+
+    /// Sorts the open menu's storage: slot `slot`'s group, or with `None` what the menu is
+    /// opened on (a chest), else the player's main inventory. Items of a kind come together,
+    /// stacked, in the order they were registered.
+    pub fn menu_sort(&self, slot: Option<u32>) -> bool {
+        self.op(abi::client_op::MENU_SORT, "", slot.map_or(-1.0, |s| s as f64)) != 0
     }
 
     pub fn reload_assets(&self) {
@@ -622,13 +631,28 @@ impl KeyBuilder<'_> {
         self
     }
 
-    /// On the server, for the player who pressed it (`p.player()`, `p.world()`): the engine
-    /// carries the press over, no channel of yours needed.
-    pub fn on_server(self, f: impl Fn(&Packet) + Send + Sync + 'static) -> Self {
+    /// On the server, for the player who pressed it (world, player): `crate::KEY` filtered to
+    /// this key going down.
+    pub fn on_server(self, f: impl Fn(&crate::World, u64) + Send + Sync + 'static) -> Self {
         let key = self.key;
-        let channel: &'static Channel<()> = Channel::generated(format!("{}.pressed", key.name()));
-        self.reg.packet(channel, move |p, ()| f(p));
-        self.on_client(move |c| c.send(channel, &()))
+        self.reg.on_event(&crate::KEY, move |b| {
+            let w = b.world();
+            for k in b.iter().filter(|k| k.down != 0 && k.key == key.id()) {
+                f(&w, k.player);
+            }
+        });
+        self
+    }
+    /// On the server, when the player lets it go (world, player, ticks it was held): a charge.
+    pub fn on_release_server(self, f: impl Fn(&crate::World, u64, u32) + Send + Sync + 'static) -> Self {
+        let key = self.key;
+        self.reg.on_event(&crate::KEY, move |b| {
+            let w = b.world();
+            for k in b.iter().filter(|k| k.down == 0 && k.key == key.id()) {
+                f(&w, k.player, k.held_ticks);
+            }
+        });
+        self
     }
 }
 
@@ -721,6 +745,9 @@ pub mod screens {
     pub static SOUND: Menu = Menu::named("core:sound");
     pub static HUD_EDITOR: Menu = Menu::named("core:hud_editor");
     pub static DEBUG_OPTIONS: Menu = Menu::named("core:debug_options");
+    /// Every menu's screen, for `Registry::screen_part`: its place `side` is beside any menu,
+    /// `corner` in the top right corner inside its panel (small icon buttons).
+    pub static MENUS: Menu = Menu::named("core:menus");
 }
 
 /// One entity in `Registry::client_entity_frame`.

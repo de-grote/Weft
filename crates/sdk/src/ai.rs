@@ -206,7 +206,9 @@ fn looks_at(w: &World, who: &EntityState, st: &EntityState) -> bool {
     let len = d.length_squared().sqrt().max(1e-6);
     let look = crate::look_dir(who.yaw, who.pitch);
     let dot = (look.x * d.x + look.y * d.y + look.z * d.z) / len;
-    dot > 1.0 - 0.025 / len && w.raycast(from, d * (1.0 / len), len, false).is_none()
+    dot > 1.0 - 0.025 / len
+        && w.raycast(from, d * (1.0 / len), len, crate::Ray::blocks())
+            .is_none()
 }
 
 /// The usual reactions.

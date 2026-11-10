@@ -163,7 +163,7 @@ pub fn roll(
             }
             match out
                 .iter_mut()
-                .find(|s| s.item == item && s.count + n <= c.max_stack(item))
+                .find(|s| s.item == item && s.data == 0 && s.count + n <= c.max_stack(s))
             {
                 Some(s) => s.count += n,
                 None => out.push(ItemStack::new(item, n)),

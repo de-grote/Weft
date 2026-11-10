@@ -554,8 +554,7 @@ gpu_struct! {
         pub ids: [u32; 4],
         /// Origins are relative to this cube.
         pub cam_cube: [i32; 4],
-        /// x start of the overlay table in `frames` (per texture: overlay texture + 1, or 0),
-        /// z tint kinds, w half the width of `lod_mask`.
+        /// x, y unused, z tint kinds, w half the width of `lod_mask`.
         pub extra: [u32; 4],
     }
 }
@@ -711,7 +710,8 @@ pub struct OcclusionView {
     pub cam_cube: [i32; 4],
     /// The depth's size.
     pub size: [u32; 2],
-    /// Records made by the CPU that aren't cubes.
+    /// Records made by the CPU that are distant terrain's tiles, tested by the boxes that follow
+    /// the draws' origins.
     pub skip: [u32; 2],
     pub levels: u32,
     /// Whether there is a last frame to go by.
@@ -724,7 +724,8 @@ pub struct OcclusionView {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CubeEntry {
     pub cube: [i32; 3],
-    /// `page * 4 + kind * 2 + layer`, `u32::MAX` for a free place.
+    /// `page * 8 + kind * 4 + layer` (`mesher::LAYERS`, not 2: translucent ones aren't here),
+    /// `u32::MAX` for a free place.
     pub bucket: u32,
     pub start: u32,
     /// Faces by direction rank, 16 bits each; quads: how many, in the first.
@@ -860,7 +861,7 @@ bindings! {
         BIOMES "biomes": "array<u32>",
         // Two words per texture, see `GameTextures::world_tables`.
         TEX_INFO "tex_info": "array<u32>",
-        // Animated frames: texture | ticks << 16; then the overlay table.
+        // Animated frames: texture | ticks << 16.
         FRAMES "frames": "array<u32>",
         // Camera-relative positions of moving structures drawn this frame (0: none, the
         // world's cubes): a cube's `origin.w` picks one, its `origin.xyz` is then the cube in

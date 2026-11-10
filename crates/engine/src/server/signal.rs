@@ -1071,11 +1071,7 @@ impl Signals {
         let mut any = false;
         for s in items.iter().filter(|s| !s.is_empty()) {
             any = true;
-            sum += s.count as f32
-                / c.items
-                    .get(s.item as usize)
-                    .map_or(64, |i| i.max_stack)
-                    .max(1) as f32;
+            sum += s.count as f32 / c.max_stack(s) as f32;
         }
         Some(if any { 1 + (sum / items.len() as f32 * 14.0) as u8 } else { 0 })
     }

@@ -37,8 +37,21 @@ impl Spawn {
                 velocity: [0.0; 3].into(),
                 yaw: 0.0,
                 pickup_delay: 0,
+                cause: abi::spawn_cause::MOD,
+                owner: 0,
             },
         }
+    }
+    /// Who it belongs to: a projectile's shooter, which it doesn't hit as it leaves them and
+    /// whose hits its hits are.
+    pub fn owner(mut self, id: u64) -> Self {
+        self.desc.owner = id;
+        self
+    }
+    /// Why it comes (`spawn_cause`, `MOD` unless said), what `actions::SPAWN` is told.
+    pub fn cause(mut self, cause: u32) -> Self {
+        self.desc.cause = cause;
+        self
     }
     /// What an item entity is.
     pub fn stack(mut self, s: ItemStack) -> Self {
@@ -61,6 +74,41 @@ impl Spawn {
     pub fn pickup_delay(mut self, ticks: u32) -> Self {
         self.desc.pickup_delay = ticks;
         self.desc.set |= abi::spawn_set::PICKUP_DELAY;
+        self
+    }
+}
+
+/// A hurt described (`World::damage`): `Damage::new(4.0, &damage_causes::ATTACK).by(shooter)
+/// .through(arrow)`. Steps see all of it (`Query::other`, `direct`, `item`, `crit`).
+#[derive(Clone, Copy, Debug)]
+pub struct Damage(pub(crate) abi::Damage);
+
+impl Damage {
+    pub fn new(amount: f32, cause: impl Into<Id<crate::DamageCause>>) -> Damage {
+        Damage(abi::Damage::new(amount, cause.into().raw()))
+    }
+    /// Who did it.
+    pub fn by(mut self, source: u64) -> Self {
+        self.0.source = source;
+        self
+    }
+    /// What hit, when not `by` itself (the arrow): knockback goes away from it.
+    pub fn through(mut self, direct: u64) -> Self {
+        self.0.direct = direct;
+        self
+    }
+    /// What it was done with.
+    pub fn with(mut self, item: ItemStack) -> Self {
+        self.0.item = item;
+        self
+    }
+    /// The way it pushes, instead of away from what hit.
+    pub fn knock(mut self, way: impl Into<Vec3>) -> Self {
+        self.0.knock = way.into();
+        self
+    }
+    pub fn crit(mut self) -> Self {
+        self.0.crit = 1;
         self
     }
 }
@@ -211,36 +259,36 @@ impl World {
     pub fn walk(&self, id: u64, w: Walk) {
         unsafe { (host().entity_walk)(self.raw(), id, &w.dir, w.speed, w.keys) }
     }
-    /// The first block a ray from `from` along `dir` hits within `max` blocks (liquids count if
-    /// `liquids`): position, face hit (-X, +X, -Y, +Y, -Z, +Z) and state. A turret's line, a
-    /// mob checking whether it sees a player, an arrow's next step.
-    pub fn raycast(&self, from: impl Into<Vec3>, dir: impl Into<Vec3>, max: f64, liquids: bool) -> Option<LookAt> {
-        let from = from.into();
-        let dir = dir.into();
-        let (mut pos, mut face, mut body) = (BlockPos::ZERO, 0, 0);
-        let s = unsafe { (host().raycast)(self.raw(), &from, &dir, max, liquids as u32, &mut pos, &mut face, &mut body) };
-        (s != 0).then(|| LookAt { pos, face, state: s - 1, body })
+    /// What a ray from `from` along `dir` hits first within `max` blocks, of what `ray` looks for
+    /// (`Ray::blocks()`, `.liquids()`, `.entities()`, `.skip(id)`): a block or an entity, the face
+    /// it went in by and where on it (`RayHit::local`). A turret's line, a mob checking whether it
+    /// sees a player, which part of a block a player clicked.
+    pub fn raycast(&self, from: impl Into<Vec3>, dir: impl Into<Vec3>, max: f64, ray: Ray) -> Option<abi::RayHit> {
+        let (from, dir) = (from.into(), dir.into());
+        let mut out = abi::RayHit::default();
+        let hit = unsafe { (host().raycast)(self.raw(), &from, &dir, max, ray.flags, ray.skip, &mut out) };
+        (hit != 0).then_some(out)
     }
-    /// The block `id` looks at within `max` blocks: `raycast` from its eyes along its look.
-    pub fn target_block(&self, id: u64, max: f64, liquids: bool) -> Option<LookAt> {
+    /// What `id` looks at within `max` blocks: `raycast` from its eyes along its look, past itself.
+    pub fn looked_at(&self, id: u64, max: f64, ray: Ray) -> Option<abi::RayHit> {
         let s = self.entity(id)?;
-        self.raycast(s.eye(), crate::look_dir(s.yaw, s.pitch), max, liquids)
+        self.raycast(s.eye(), crate::look_dir(s.yaw, s.pitch), max, ray.skip(id))
     }
     /// Up to its maximum: `damage` with a negative amount.
     pub fn heal(&self, id: u64, amount: f32) -> bool {
-        self.damage(id, -amount.max(0.0), 0, &crate::damage_causes::HEAL)
+        self.damage(id, Damage::new(-amount.max(0.0), &crate::damage_causes::HEAL))
     }
-    /// Hurts `id` (`source`: the entity that did it, 0 for none): the `HURT` question, the
-    /// `DAMAGE` chain, the `actions::HURT` event, armor and death as the cause says. A negative
-    /// `amount` heals instead, through the `HEAL` chain and the `ENTITY_HEALED` event, with none
-    /// of damage's consequences. True if health changed.
-    pub fn damage(&self, id: u64, amount: f32, source: u64, cause: impl Into<Id<crate::DamageCause>>) -> bool {
-        unsafe { (host().entity_damage)(self.raw(), id, amount, source, cause.into().raw()) != 0 }
+    /// Hurts `id` as `d` says: the `HURT` question, `question::RECOVERING`, the `DAMAGE` chain,
+    /// knockback, the `actions::HURT` event, death as the cause says. A negative amount heals
+    /// instead, through the `HEAL` chain and the `ENTITY_HEALED` event, with none of damage's
+    /// consequences. True if health changed.
+    pub fn damage(&self, id: u64, d: Damage) -> bool {
+        unsafe { (host().entity_damage)(self.raw(), id, &d.0) != 0 }
     }
     /// `id` hits `target` with what it holds, which wears, or bare handed with its kind's
     /// `.attack_damage(..)`, as strong as its swing is charged (`swing_strength`, by its
     /// `.attack_speed(..)` when bare handed). Other mods can forbid it (`question::ATTACK`) or
-    /// change it (`chain::ATTACK_DAMAGE`). True if it landed.
+    /// change it (`attribute::ATTACK_DAMAGE`, `chain::MELEE`, `question::CRIT`). True if it landed.
     pub fn attack(&self, id: u64, target: u64) -> bool {
         unsafe { (host().entity_attack)(self.raw(), id, target) != 0 }
     }
@@ -262,6 +310,11 @@ impl World {
     pub fn use_item(&self, id: u64, off_hand: bool) -> bool {
         unsafe { (host().entity_use_item)(self.raw(), id, off_hand as u32, std::ptr::null(), 0) != 0 }
     }
+    /// `id` lets go of what it is using, as a player's use button going up: a drawn bow shoots
+    /// (`on_release`, after how long it was held).
+    pub fn release_item(&self, id: u64) {
+        unsafe { (host().entity_release_use)(self.raw(), id) }
+    }
     /// `use_item` on the block at `pos`, from `face` (-X, +X, -Y, +Y, -Z, +Z): a bucket filled.
     pub fn use_item_on(&self, id: u64, off_hand: bool, pos: impl Into<BlockPos>, face: u32) -> bool {
         let pos = pos.into();
@@ -277,6 +330,14 @@ impl World {
     /// `id` stops breaking what it was.
     pub fn stop_mining(&self, id: u64) {
         unsafe { (host().entity_mine)(self.raw(), id, std::ptr::null()) };
+    }
+    /// What player `player` holds of action `key` (yours from `Registry::key`, or `keys::*`, the
+    /// mouse buttons' `keys::USE` and `keys::ATTACK` too): `held` and `held_ticks`, as its client
+    /// last said. Presses and releases come as `KEY` events.
+    pub fn key(&self, player: u64, key: &crate::Key) -> abi::KeyState {
+        let mut out = abi::KeyState::default();
+        unsafe { (host().entity_key)(self.raw(), player, Str::new(key.name()), &mut out) };
+        out
     }
     /// How charged `id`'s next swing is, 0..1, with what it holds now.
     pub fn swing_strength(&self, id: u64) -> f32 {
@@ -490,6 +551,13 @@ impl EntityModify {
     pub fn selected(self, slot: u32) -> Self {
         self.with(abi::entity_set::SELECTED, |s| s.selected = slot)
     }
+    /// Never despawns however far from players (a boss, a pet, a prisoner), or does again as its
+    /// category says. Naming it or it picking something up keeps it too.
+    pub fn persistent(self, on: bool) -> Self {
+        self.with(abi::entity_set::PERSISTENT, |s| {
+            s.flags = if on { s.flags | abi::entity_state::PERSISTENT } else { s.flags & !abi::entity_state::PERSISTENT }
+        })
+    }
 }
 
 impl Drop for EntityModify {
@@ -663,6 +731,30 @@ impl EntityEvent {
     pub fn other(&self) -> u64 {
         self.args.other
     }
+}
+
+/// An effect's tick (`EntityEffectBuilder::on_tick`): every entity that has it, with its level.
+pub struct EffectTick {
+    args: abi::EffectTickArgs,
+}
+
+impl EffectTick {
+    pub fn world(&self) -> World {
+        World::from_raw(self.args.world)
+    }
+    pub fn effect(&self) -> u32 {
+        self.args.effect
+    }
+    /// (entity, level).
+    pub fn iter(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        let ids = unsafe { std::slice::from_raw_parts(self.args.ids, self.args.count) };
+        let levels = unsafe { std::slice::from_raw_parts(self.args.levels, self.args.count) };
+        ids.iter().copied().zip(levels.iter().copied())
+    }
+}
+
+pub(crate) fn effect_tick_cb(f: impl Fn(&EffectTick) + Send + Sync + 'static) -> abi::Callback {
+    callback(move |a: &mut abi::EffectTickArgs| f(unsafe { &*(a as *const abi::EffectTickArgs as *const EffectTick) }))
 }
 
 fn tick_cb(f: impl Fn(&EntityTick) + Send + Sync + 'static) -> abi::Callback {
@@ -889,7 +981,7 @@ impl EntityBuilder<'_> {
     }
     /// Takes no damage (no hurt flash, health stays); `/clear` and the void still remove it.
     pub fn invulnerable(self) -> Self {
-        self.modifier(crate::Modifier::new(&crate::attribute::INVULNERABLE, abi::attr_op::SET, 1.0))
+        self.modifier(crate::Modifier::set(&crate::attribute::INVULNERABLE, 1.0))
     }
     /// Neither pushes nor is pushed by other entities (ghosts, projectiles).
     pub fn unpushable(self) -> Self {
@@ -975,9 +1067,10 @@ impl EntityBuilder<'_> {
     pub fn picks_up_items(self) -> Self {
         self.tag(abi::comp::entity::PICKS_UP)
     }
-    /// Damage of its melee hits (`World::attack`), like an item's.
+    /// Its own melee damage (`World::attack`), the base of its `attribute::ATTACK_DAMAGE`; what it
+    /// holds adds to it, as vanilla's.
     pub fn attack_damage(self, damage: f32) -> Self {
-        self.set(&crate::component::ATTACK_DAMAGE, damage)
+        self.attribute(&crate::attribute::ATTACK_DAMAGE, damage as f64)
     }
     /// Its melee hits per second (1), like an item's; `attribute::ATTACK_SPEED` multiplies it.
     pub fn attack_speed(self, per_second: f32) -> Self {
@@ -986,17 +1079,23 @@ impl EntityBuilder<'_> {
     /// How far it hits (the `ENTITY_REACH` attribute, from its eyes to the target's box); a
     /// modifier changes it like any attribute.
     pub fn reach(self, blocks: f64) -> Self {
-        self.attribute(abi::attribute::ENTITY_REACH, blocks)
+        self.attribute(&crate::attribute::ENTITY_REACH, blocks)
     }
     pub fn max_health(self, h: f32) -> Self {
-        self.attribute(abi::attribute::MAX_HEALTH, h as f64)
+        self.attribute(&crate::attribute::MAX_HEALTH, h as f64)
     }
-    /// The kind's own value of an attribute.
-    fn attribute(mut self, name: &str, v: f64) -> Self {
+    /// The kind's own base of an attribute: `.attribute(&attribute::GRAVITY, 0.625)` falls
+    /// like vanilla's arrow.
+    pub fn attribute(mut self, a: &crate::Attribute, v: f64) -> Self {
         self.e
             .ops
-            .push(Pending::value(name, "f64", crate::component::value_bytes(&v)));
+            .push(Pending::value(a.name(), "f64", crate::component::value_bytes(&v)));
         self
+    }
+    /// It flies as a projectile (`Projectile`): the engine moves it, a ray along its speed each
+    /// tick decides what it hits (`actions::PROJECTILE_HIT`), however fast.
+    pub fn projectile(self, p: Projectile) -> Self {
+        self.set(&comps::entity::PROJECTILE, p.0)
     }
     pub fn walk_speed(self, s: f32) -> Self {
         self.set(&comps::entity::SPEED, s)
@@ -1225,7 +1324,7 @@ pub const EQUIPMENT_GROUP: &str = "core:equipment";
 /// ```ignore
 /// r.menu(&MENU)
 ///     .group("input", Slots::row(2).holder())
-///     .group("fuel", Slots::single().accepts("fuel").background("flame_slot"))
+///     .group("fuel", Slots::single().accepts("#fuel").background("flame_slot"))
 ///     .group("output", Slots::single().output().large());
 /// ```
 #[derive(Clone)]
@@ -1294,6 +1393,13 @@ impl Slots {
         self.start = start;
         self
     }
+    /// The player's trash (`slot_flags::TRASH`), one slot: it keeps the last thing put in until the
+    /// next takes its place or the player leaves, and the trash key (Delete) over any slot sends
+    /// that stack there.
+    pub fn trash(mut self) -> Self {
+        self.flags |= abi::slot_flags::TRASH;
+        self
+    }
     /// Items only go in (a machine uses them up).
     pub fn input(mut self) -> Self {
         self.flags |= abi::slot_flags::INPUT;
@@ -1311,9 +1417,10 @@ impl Slots {
         self.flags |= abi::slot_flags::OUTPUT;
         self
     }
-    /// Only items with this tag or component (its full name, like `fuel` or `armor_head`).
-    pub fn accepts(mut self, tag: &str) -> Self {
-        self.accepts = tag.to_string();
+    /// Only these items, a reference like everywhere else: `#fuel` (anything with the component),
+    /// `#fuel #mymod:fire_starter` (either), `#fuel !base:lava_bucket` (but that one), names.
+    pub fn accepts(mut self, items: &str) -> Self {
+        self.accepts = items.to_string();
         self
     }
     /// At most this many items per slot.
@@ -1620,7 +1727,9 @@ impl Registry {
 
     /// Adds to place `area` of `screen` without replacing the screen: a button in the main menu is
     /// `r.screen_part(&screens::TITLE, "buttons", 0, |ui| ..)`. Lower `order` comes first. The
-    /// engine's places: `TITLE` `buttons` and `side`, `PAUSE` `buttons`, `SETTINGS` `buttons`. Named
+    /// engine's places: `TITLE` `buttons` and `side`, `PAUSE` `buttons`, `SETTINGS` `buttons`, and
+    /// beside menus: any menu's own `side` (`r.screen_part(&base::CHEST, "side", ..)`, another
+    /// mod's menu too) and `MENUS` `side` beside every one (a sort button). Named
     /// `<mod>:<screen>/<area>` (`base:pause/buttons`, the next `/2`..), other mods edit it by that.
     pub fn screen_part(
         &mut self,
@@ -2079,14 +2188,73 @@ pub mod entity_categories {
     pub static MISC: EntityCategory = EntityCategory::named("core:misc");
 }
 
-/// What an entity looks at (`World::target_block`): a block of the world (`body` 0) or of a
-/// moving body (`body` its entity, `pos` in its blocks).
+/// How a projectile flies (`EntityBuilder::projectile`): vanilla's arrow unless said otherwise,
+/// 2 damage per block a tick of speed, 0.99 of its speed kept a tick in the air and 0.6 in a
+/// liquid, gone where it hits a block.
+#[derive(Clone, Debug)]
+pub struct Projectile(abi::Projectile);
+
+impl Default for Projectile {
+    fn default() -> Self {
+        Projectile::new()
+    }
+}
+
+impl Projectile {
+    pub fn new() -> Projectile {
+        Projectile(abi::Projectile { damage: 2.0, drag: 0.99, liquid_drag: 0.6, sticks: false, stuck_ticks: 1200 })
+    }
+    /// Damage per block a tick of its speed, rounded up (`chain::PROJECTILE_DAMAGE`).
+    pub fn damage(mut self, per_speed: f32) -> Self {
+        self.0.damage = per_speed;
+        self
+    }
+    /// Shares of its speed kept each tick in the air and in a liquid.
+    pub fn drag(mut self, air: f32, liquid: f32) -> Self {
+        (self.0.drag, self.0.liquid_drag) = (air, liquid);
+        self
+    }
+    /// It stays stuck where it hits a block, for `ticks` (vanilla's arrow a minute).
+    pub fn sticks(mut self, ticks: u32) -> Self {
+        (self.0.sticks, self.0.stuck_ticks) = (true, ticks);
+        self
+    }
+}
+
+/// What a ray looks for (`World::raycast`): blocks unless said otherwise.
 #[derive(Clone, Copy, Debug)]
-pub struct LookAt {
-    pub pos: BlockPos,
-    pub face: u32,
-    pub state: u32,
-    pub body: u64,
+pub struct Ray {
+    flags: u32,
+    skip: u64,
+}
+
+impl Ray {
+    pub fn blocks() -> Ray {
+        Ray { flags: abi::ray::BLOCKS, skip: 0 }
+    }
+    /// Only what can be hit: bodies, not dropped stacks, the dead or spectators.
+    pub fn entities_only() -> Ray {
+        Ray { flags: abi::ray::ENTITIES, skip: 0 }
+    }
+    /// Liquids stop it too.
+    pub fn liquids(mut self) -> Ray {
+        self.flags |= abi::ray::LIQUIDS;
+        self
+    }
+    pub fn entities(mut self) -> Ray {
+        self.flags |= abi::ray::ENTITIES;
+        self
+    }
+    /// Blocks by what stops a body, not what is aimed at: through grass, as an arrow flies.
+    pub fn solid(mut self) -> Ray {
+        self.flags |= abi::ray::SOLID;
+        self
+    }
+    /// It goes through `id` (the one looking, the shooter).
+    pub fn skip(mut self, id: u64) -> Ray {
+        self.skip = id;
+        self
+    }
 }
 
 /// One tick of a mob's walking for `World::walk`: a direction and the keys a player would hold.

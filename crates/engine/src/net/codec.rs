@@ -357,6 +357,7 @@ mod tests {
                 look: [0.1, -0.5, 0.8],
                 sneak: true,
                 frame: 0,
+                placed: Some(IVec3::new(-5, 71, 3)),
             },
             ToServer::Move {
                 jumped: false,

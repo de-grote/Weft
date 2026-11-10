@@ -481,7 +481,8 @@ impl Folded {
         errors.extend(std::mem::take(&mut self.missing).into_iter().map(|m| m.1));
     }
 
-    /// Applies the pattern edits matching by name (`*`, `name[]`) or by a tag value (`#tag`):
+    /// Applies the pattern edits matching by name (`*`, `name[]`) or by a tag or component it
+    /// carries (`#tag`, `#fuel`):
     /// what fits every kind. Blocks handle states (`[prop=value]`) themselves, other kinds leave
     /// those out. Gives each pattern's mod and name, and whether it matched anything.
     pub fn apply_patterns(&mut self, errors: &mut Vec<String>) -> Vec<(ModId, String, bool)> {
@@ -496,7 +497,7 @@ impl Folded {
                         Some(t) => e
                             .values
                             .iter()
-                            .any(|v| v.schema.is_empty() && crate::components::matches(t, &v.name)),
+                            .any(|v| crate::components::matches(t, &v.name)),
                         None => crate::components::matches(name, &e.name),
                     };
                     if hit {

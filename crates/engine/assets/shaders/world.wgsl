@@ -12,9 +12,7 @@ struct VOut {
     @location(4) dist: f32,
     @location(5) @interpolate(flat) layer2: u32,
     @location(6) @interpolate(flat) blend: f32,
-    // Overlay texture + 1 (0: none) and the tint it takes; without an overlay the tint is also
-    // in `color` (`tint` then only colors emission).
-    @location(7) @interpolate(flat) overlay: u32,
+    // The face's tint, also in `color`; alone it colors emission.
     @location(8) tint: vec3<f32>,
     // Glow mask texture (LabPBR emission), all ones: none.
     @location(9) @interpolate(flat) glow: u32,
@@ -160,14 +158,7 @@ fn vs_face(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         tint = tint_color(tint_kind, w1 >> FACE_BIOME_SHIFT, o.x * 16 + i32(local.x), o.z * 16 + i32(local.z));
     }
     out.tint = tint;
-    let ov = frames[g.extra.x + tex_id];
-    if ov != 0u {
-        out.overlay = texture_frame(ov - 1u).a + 1u;
-        out.color = vec3(SHADE[dir] * AO[a[c]]);
-    } else {
-        out.overlay = 0u;
-        out.color = tint * SHADE[dir] * AO[a[c]];
-    }
+    out.color = tint * SHADE[dir] * AO[a[c]];
     return out;
 }
 
@@ -212,14 +203,7 @@ fn vs_quad(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
         tint = tint_color(tint_kind, w4 >> FACE_BIOME_SHIFT, o.x * 16 + i32(round(local.x)), o.z * 16 + i32(round(local.z)));
     }
     out.tint = tint;
-    let ov = frames[g.extra.x + tex_id];
-    if ov != 0u {
-        out.overlay = texture_frame(ov - 1u).a + 1u;
-        out.color = vec3(shade);
-    } else {
-        out.overlay = 0u;
-        out.color = tint * shade;
-    }
+    out.color = tint * shade;
     return out;
 }
 
@@ -229,7 +213,7 @@ fn shade(in: VOut, albedo: vec4<f32>) -> vec4<f32> {
     // emission), so they stay their own (tinted, unshaded) color in the dark.
     if in.glow != 0xffffffffu {
         let e = textureSampleLevel(textures[in.glow], nearest_clamp, in.uv, 0.0).r;
-        light = max(light, select(in.tint, vec3(1.0), in.overlay != 0u) * e);
+        light = max(light, in.tint * e);
     }
     var linear_light: vec3<f32>;
     if light.r == light.g && light.r == light.b {
@@ -267,21 +251,12 @@ fn sample(in: VOut, nuv: vec2<f32>, du: vec2<f32>, dv: vec2<f32>) -> vec4<f32> {
     return mix(a, b, in.blend);
 }
 
-// The tinted overlay over the base texture; its tint is a gamma-space factor like the others.
-fn with_overlay(in: VOut, albedo: vec4<f32>, nuv: vec2<f32>, du: vec2<f32>, dv: vec2<f32>) -> vec4<f32> {
-    if in.overlay == 0u {
-        return albedo;
-    }
-    let ov = textureSampleGrad(textures[in.overlay - 1u], linear_mipped, nuv, du, dv);
-    return vec4(mix(albedo.rgb, ov.rgb * pow(in.tint, vec3(2.2)), ov.a), albedo.a);
-}
-
 @fragment
 fn fs_opaque(in: VOut) -> @location(0) vec4<f32> {
     let du = dpdx(in.uv);
     let dv = dpdy(in.uv);
     let nuv = nearest_uv(in.size, in.uv, du, dv);
-    let albedo = with_overlay(in, sample(in, nuv, du, dv), nuv, du, dv);
+    let albedo = sample(in, nuv, du, dv);
     return vec4(shade(in, albedo).rgb, 1.0);
 }
 
@@ -304,7 +279,7 @@ fn fs_cutout(in: VOut) -> @location(0) vec4<f32> {
     let du = dpdx(in.uv);
     let dv = dpdy(in.uv);
     let nuv = nearest_uv(in.size, in.uv, du, dv);
-    let albedo = with_overlay(in, sample_cutout(in, nuv, du, dv), nuv, du, dv);
+    let albedo = sample_cutout(in, nuv, du, dv);
     // Vanilla's alpha test (GL_GREATER 0.1).
     if albedo.a <= 0.1 {
         discard;
@@ -317,7 +292,7 @@ fn fs_translucent(in: VOut) -> @location(0) vec4<f32> {
     let du = dpdx(in.uv);
     let dv = dpdy(in.uv);
     let nuv = nearest_uv(in.size, in.uv, du, dv);
-    let albedo = with_overlay(in, sample(in, nuv, du, dv), nuv, du, dv);
+    let albedo = sample(in, nuv, du, dv);
     return shade(in, albedo);
 }
 
@@ -377,15 +352,7 @@ fn vs_lod(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> V
         tint = unpack_rgb(biomes[(w1 >> FACE_BIOME_SHIFT) * g.extra.z + kind - 1u]);
     }
     out.tint = tint;
-    let shade = SHADE[dir] * AO[a[c]];
-    let ov = frames[g.extra.x + tex_id];
-    if ov != 0u {
-        out.overlay = texture_frame(ov - 1u).a + 1u;
-        out.color = vec3(shade);
-    } else {
-        out.overlay = 0u;
-        out.color = tint * shade;
-    }
+    out.color = tint * SHADE[dir] * AO[a[c]];
     return out;
 }
 
@@ -405,7 +372,7 @@ fn fs_lod(in: VOut) -> @location(0) vec4<f32> {
     }
     let uv = fract(in.uv);
     let nuv = nearest_uv(in.size, uv, du, dv);
-    var albedo = with_overlay(in, sample(in, nuv, du, dv), nuv, du, dv);
+    var albedo = sample(in, nuv, du, dv);
     let cover = smoothstep(0.1, 0.6, albedo.a);
     let tinted = any(in.tint != vec3(1.0));
     albedo = vec4(mix(select(albedo.rgb, vec3(1.0), tinted), albedo.rgb, cover), 1.0);

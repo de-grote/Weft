@@ -32,10 +32,15 @@ pub struct Neighborhood {
 
 #[derive(Default)]
 pub struct Mesh {
-    /// Per layer (opaque, cutout, translucent).
-    pub faces: [Vec<[u32; 4]>; 3],
-    pub quads: [Vec<[u32; 8]>; 3],
+    /// Per layer: opaque, cutout, translucent, then `UPPER`.
+    pub faces: [Vec<[u32; 4]>; 4],
+    pub quads: [Vec<[u32; 8]>; 4],
 }
+
+/// The layer a face's pictures over its first go in (`Content::layers`): drawn after the opaque
+/// and cutout ones on the same corners, blended over them. A translucent block's stay in order
+/// in its own.
+pub const UPPER: usize = 3;
 
 impl Neighborhood {
     /// The state a cell counts as to a liquid: the liquid in it, if any.
@@ -160,39 +165,50 @@ fn draw_block(
                     continue;
                 }
                 let (ao, light) = corner_data(c, n, ctm, opaque, x, y, z, dir);
-                let tex = ctm.resolve(c, n, x, y, z, dir, textures[dir] & face::TEX_MASK);
-                let tint = face_tint(info, ctm, dir, tex);
-                // All that is translucent is kept far to near as one list of quads.
-                if info.layer == RenderLayer::Translucent {
-                    let corners = CORNERS[dir].map(|k| [(x + k[0]) as f32, (y + k[1]) as f32, (z + k[2]) as f32]);
-                    let light = std::array::from_fn(|k| darker_by_ao(light[k], (ao >> (k * 2)) & 3));
-                    mesh.quads[RenderLayer::Translucent as usize].push(quad(corners, WHOLE, tex, biome, tint, light));
-                } else {
-                    mesh.faces[info.layer as usize].push(crate::gpu_layout::face_record(
-                        [x, y, z],
-                        dir as u32,
-                        ao,
-                        tint as u32,
-                        info.turns[dir] as u32,
-                        tex,
-                        biome,
-                        light,
-                    ));
+                for (k, l) in face_layers(c, info, textures[dir] & face::TEX_MASK, dir)
+                    .iter()
+                    .enumerate()
+                {
+                    // Each layer connects by its own picture's rules.
+                    let tex = ctm.resolve(c, n, x, y, z, dir, l.tex);
+                    // All that is translucent is kept far to near as one list of quads.
+                    if info.layer == RenderLayer::Translucent {
+                        let corners = CORNERS[dir].map(|k| [(x + k[0]) as f32, (y + k[1]) as f32, (z + k[2]) as f32]);
+                        let light = std::array::from_fn(|k| darker_by_ao(light[k], (ao >> (k * 2)) & 3));
+                        mesh.quads[RenderLayer::Translucent as usize].push(quad(corners, WHOLE, tex, biome, l.tint, light));
+                    } else {
+                        mesh.faces[if k == 0 { info.layer as usize } else { UPPER }].push(crate::gpu_layout::face_record(
+                            [x, y, z],
+                            dir as u32,
+                            ao,
+                            l.tint as u32,
+                            info.turns[dir] as u32,
+                            tex,
+                            biome,
+                            light,
+                        ));
+                    }
                 }
             }
         }
         BlockModel::Cross => {
             let l = light16(n.light[i]);
-            let t = ctm.resolve(c, n, x, y, z, 0, textures[0] & face::TEX_MASK);
             let b = [x as f32, y as f32, z as f32];
             let e = 0.15;
             let (a0, a1) = ([b[0] + e, b[1], b[2] + e], [b[0] + 1.0 - e, b[1] + 1.0, b[2] + 1.0 - e]);
             let (c0, c1) = ([b[0] + e, b[1], b[2] + 1.0 - e], [b[0] + 1.0 - e, b[1] + 1.0, b[2] + e]);
-            for (p0, p1) in [(a0, a1), (c0, c1)] {
-                let corners = [[p0[0], p0[1], p0[2]], [p1[0], p0[1], p1[2]], [p1[0], p1[1], p1[2]], [p0[0], p1[1], p0[2]]];
-                let back = [corners[1], corners[0], corners[3], corners[2]];
-                for q in [corners, back] {
-                    mesh.quads[RenderLayer::Cutout as usize].push(quad(q, WHOLE, t, biome, info.tint | FLAT, [l; 4]));
+            for (k, layer) in face_layers(c, info, textures[0] & face::TEX_MASK, 0)
+                .iter()
+                .enumerate()
+            {
+                let t = ctm.resolve(c, n, x, y, z, 0, layer.tex);
+                let to = if k == 0 { RenderLayer::Cutout as usize } else { UPPER };
+                for (p0, p1) in [(a0, a1), (c0, c1)] {
+                    let corners = [[p0[0], p0[1], p0[2]], [p1[0], p0[1], p1[2]], [p1[0], p1[1], p1[2]], [p0[0], p1[1], p0[2]]];
+                    let back = [corners[1], corners[0], corners[3], corners[2]];
+                    for q in [corners, back] {
+                        mesh.quads[to].push(quad(q, WHOLE, t, biome, layer.tint | FLAT, [l; 4]));
+                    }
                 }
             }
         }
@@ -220,8 +236,15 @@ fn draw_block(
                     let fl = if at_edge && !dark_inside { light16(nl) } else { l };
                     let Some((corners, uv)) = box_face(bx, dir) else { continue };
                     let corners = corners.map(|p| [p[0] + x as f32, p[1] + y as f32, p[2] + z as f32]);
-                    let tex = ctm.resolve(c, n, x, y, z, dir, bx.textures[dir] & face::TEX_MASK);
-                    mesh.quads[layer as usize].push(quad(corners, uv, tex, biome, face_tint(info, ctm, dir, tex), [fl; 4]));
+                    for (k, l) in face_layers(c, info, bx.textures[dir] & face::TEX_MASK, dir)
+                        .iter()
+                        .enumerate()
+                    {
+                        let tex = ctm.resolve(c, n, x, y, z, dir, l.tex);
+                        let tint = l.tint | if bx.flat { FLAT } else { 0 };
+                        let to = if k == 0 || layer == RenderLayer::Translucent { layer as usize } else { UPPER };
+                        mesh.quads[to].push(quad(corners, uv, tex, biome, tint, [fl; 4]));
+                    }
                 }
             }
         }
@@ -365,10 +388,30 @@ fn darker_by_ao(light: u32, ao: u32) -> u32 {
 /// A whole picture on a quad.
 const WHOLE: [f32; 4] = [0.0, 0.0, 16.0, 16.0];
 
-/// The tint the word of a face says; the shader gives it to the overlay when there is one.
-fn face_tint(info: &crate::content::StateInfo, ctm: &super::ctm::Ctm, dir: usize, tex: u32) -> u8 {
-    let paint = crate::content::face_paint(info, dir, ctm.has_overlay(tex));
-    if paint.base_tinted || paint.overlay_tinted { info.tint } else { 0 }
+/// What a face showing `tex` (toward `dir`) draws, bottom first. A texture not of the content's
+/// (a resource pack's, a connected tile's model) is one picture, tinted as the block's faces
+/// that way are.
+pub fn face_layers<'a>(c: &'a Content, info: &crate::content::StateInfo, tex: u32, dir: usize) -> Layers<'a> {
+    match c.layers(tex) {
+        [] => Layers::One(crate::content::FaceLayer { tex, tint: if info.tint_faces & 1 << dir != 0 { info.tint } else { 0 } }),
+        all => Layers::Many(all),
+    }
+}
+
+/// `face_layers`: borrowed, or the one made up for a texture outside the content's.
+pub enum Layers<'a> {
+    One(crate::content::FaceLayer),
+    Many(&'a [crate::content::FaceLayer]),
+}
+
+impl std::ops::Deref for Layers<'_> {
+    type Target = [crate::content::FaceLayer];
+    fn deref(&self) -> &[crate::content::FaceLayer] {
+        match self {
+            Layers::One(l) => std::slice::from_ref(l),
+            Layers::Many(all) => all,
+        }
+    }
 }
 
 fn quad(corners: [[f32; 3]; 4], uv: [f32; 4], texture: u32, biome: u32, tint: u8, light: [u32; 4]) -> [u32; 8] {

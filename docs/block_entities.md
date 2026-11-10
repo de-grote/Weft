@@ -28,7 +28,7 @@ r.block(&FURNACE)
     .opens(&FURNACE_MENU);
 r.menu(&FURNACE_MENU)
     .group("input", Slots::single().holder())
-    .group("fuel", Slots::single().accepts("fuel").holder())
+    .group("fuel", Slots::single().accepts("#fuel").holder())
     .group("output", Slots::single().output().holder())
     .player_inventory()
     .screen(|ui| { /* see below */ });
@@ -43,7 +43,7 @@ Slots come in named groups. The block entity's inventory holds all of its `holde
 | `Slots::single()`, `row(n)`, `column(n)`, `grid(cols, rows)`, `chest(rows)` | how many slots and how the screen lays them out |
 | `output()` | items only come out (results) |
 | `input()` | items only go in, nothing comes back out by hand (fuel it burns) |
-| `accepts("fuel")` | only items with that tag or component, any mod's |
+| `accepts("#fuel")` | only the items a reference names, any mod's: `"#fuel #mymod:fire_starter"`, `"#fuel !base:lava_bucket"` |
 | `liquid(capacity)` | a liquid slot of that many millibuckets |
 | `limit(16)` | at most this many items per slot |
 | `large()`, `size(px)` | a bigger slot, 18 GUI pixels by default |

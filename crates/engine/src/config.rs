@@ -417,6 +417,8 @@ pub fn engine_configs(keys: &[(String, String)]) -> Vec<RawEntry> {
         number("core:occlusion_culling", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
         number("core:allow_avatars", ck::BOOL, 1.0, 0.0, 1.0, 0.0).set(c::SCOPE, scope::WORLD),
         number("core:keep_inventory", ck::BOOL, 0.0, 0.0, 1.0, 0.0).set(c::SCOPE, scope::WORLD),
+        // Vanilla's: more than this many pushing on one hurt it (0: never).
+        rule("core:max_entity_cramming", ck::INT, 24.0, 0.0, 1000.0),
         // Deaths a player has before staying a spectator (0: no end); 1 is hardcore.
         rule("core:lives", ck::INT, 0.0, 0.0, 100.0),
         // Set when the world is made, nobody changes the rules after.
@@ -427,27 +429,18 @@ pub fn engine_configs(keys: &[(String, String)]) -> Vec<RawEntry> {
             .map(|(action, key)| string(&format!("core:key.{action}"), key)),
     );
     // The settings pages, in the order they show.
-    let pages: [(&str, &[&str]); 2] = [
-        (
-            "core:settings",
-            &[
-                "view_distance",
-                "lod_distance",
-                "cloud_height",
-                "fov",
-                "sensitivity",
-                "brightness",
-                "gui_scale",
-                "vsync",
-                "renderer",
-                "fov_effects",
-                "first_person_model",
-                "show_avatars",
-            ],
-        ),
+    let pages: [(&str, &[&str]); 6] = [
+        // What anyone changes now and then; the rest is a page away.
+        ("core:settings", &["fov", "view_distance"]),
+        ("core:video", &["gui_scale", "brightness", "lod_distance", "cloud_height", "vsync", "fullscreen", "renderer"]),
+        ("core:controls", &["sensitivity", "invert_y"]),
+        ("core:accessibility", &["fov_effects"]),
+        ("core:profile", &["first_person_model", "show_avatars"]),
         ("core:chat_settings", &["chat_width", "chat_height", "chat_height_closed", "chat_opacity", "chat_visibility"]),
     ];
     let percent = ["core:sensitivity", "core:brightness", "core:fov_effects"];
+    // Applied on the way, the scale would move the slider under the cursor.
+    let on_release = ["core:gui_scale"];
     out.into_iter()
         .map(|e| {
             let at = pages.iter().find_map(|(page, names)| {
@@ -457,6 +450,7 @@ pub fn engine_configs(keys: &[(String, String)]) -> Vec<RawEntry> {
                     .map(|i| (*page, i as i32))
             });
             let e = if percent.contains(&e.name.as_str()) { e.tag(c::PERCENT) } else { e };
+            let e = if on_release.contains(&e.name.as_str()) { e.tag(c::ON_RELEASE) } else { e };
             match at {
                 Some((page, order)) => e.set(c::PAGE, page.to_string()).set(c::ORDER, order),
                 None => e,

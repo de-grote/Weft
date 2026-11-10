@@ -40,7 +40,7 @@ pub async fn missing_dimension(t: T) -> R {
     t.screen("core:worlds").await?;
     t.frames(2).await?;
     // A click lasts 50 ms; buttons act on release.
-    t.click_ui(&format!("text:{name} |"), 0);
+    t.click_ui(&format!("text:{name}"), 0);
     t.secs(0.2).await?;
     t.click_ui("id:play", 0);
     t.screen("core:missing_mods").await?;
@@ -182,12 +182,12 @@ pub async fn entity_modify(t: T) -> R {
         (p.next().unwrap_or(f64::NAN), p.next().unwrap_or(f64::NAN))
     };
     t.check_eq(fell, 5.0, "the fall distance a mod set");
-    t.check_eq(dmg, 22.0, "a mace after five blocks: 6 + 4 * 3 + 2 * 2");
+    t.check_eq(dmg, 22.0, "a mace after five blocks: a hand's 1 and the mace's 5, + 4 * 3 + 2 * 2");
     let (plain, _) = {
         let s = t.op("attack_damage base:stick 5").await?;
         (s.split_whitespace().next().unwrap_or("").to_string(), ())
     };
-    t.check_eq(plain, "6".to_string(), "anything else doesn't care how far it fell");
+    t.check_eq(plain, "1".to_string(), "anything else doesn't care how far it fell");
     let ground = t.state().pos.y;
     t.check_eq(t.op("edit_me 1.5 4 1 60").await?, "4 60".to_string(), "slot and fire on the server");
     t.until("the client follows", Duration::from_secs(10), |t| {
@@ -845,9 +845,9 @@ pub async fn persistence(t: T) -> R {
     let made = STICK.stack(3).with_wear(5);
     t.check_eq((made.item, made.count, made.wear(), made.without(&DAMAGE).data), (STICK.id(), 3, 5, 0), "a stack made from a handle");
     t.check_eq(value(&t.op("attr me core:movement_speed").await?), 1.0, "speed without modifiers");
-    t.op("attr_mod me core:movement_speed testkit:haste 1 0.5 40")
+    t.op("attr_mod me core:movement_speed testkit:haste core:percent 0.5 40")
         .await?;
-    t.op("attr_mod me core:max_health testkit:vigor 0 10 0")
+    t.op("attr_mod me core:max_health testkit:vigor core:add 10 0")
         .await?;
     let speed = t.op("attr me core:movement_speed").await?;
     t.check_eq(value(&speed), 1.5, "speed with +50% of base");

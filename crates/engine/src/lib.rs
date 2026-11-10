@@ -41,6 +41,7 @@ pub mod settings;
 pub mod shaders;
 pub mod shape;
 pub mod stack;
+pub mod steps;
 pub mod tag_bits;
 pub mod ui;
 pub mod wire;
@@ -51,6 +52,27 @@ pub use app::{BackendFactory, Options, Renderers, run};
 
 /// Background workers (generation, meshing, region ticks) leave two cores to the render and
 /// server threads: a full pool starved the render thread during loading and frames missed vsync.
+/// `weft export-models <dir>`: every entity kind whose model is made in code, any mod's, as a
+/// `.geo.json` in `<dir>/<mod>/<name>.geo.json`, to go on with in Blockbench. How many.
+pub fn export_models(opts: &Options, out: &std::path::Path) -> Result<usize, String> {
+    let off = modloader::off_file(&opts.run_dir, false);
+    let _mods = modloader::load(&opts.mod_dirs, &opts.cache_dir, &off, &opts.mods_off)?;
+    let mut n = 0;
+    for k in content::content()
+        .game
+        .entities
+        .iter()
+        .filter(|k| !k.parts.is_empty())
+    {
+        let (ns, path) = k.name.split_once(':').unwrap_or(("core", &k.name));
+        let file = out.join(ns).join(format!("{path}.geo.json"));
+        std::fs::create_dir_all(file.parent().unwrap_or(out)).map_err(|e| e.to_string())?;
+        std::fs::write(&file, model::save_geo(&k.name, &k.parts, k.texture_size)).map_err(|e| format!("{}: {e}", file.display()))?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 pub fn init_workers() {
     // The frame's own parallel work (culling, taking terrain) runs here and the main thread
     // waits for it: above the bulk pools, which keep every core busy while loading.

@@ -56,7 +56,7 @@ pub static DIAMOND_BLOCK: Block = Block::named("diamond_block");
 pub static COAL_BLOCK: Block = Block::named("coal_block");
 pub static WOOL: Block = Block::named("wool");
 
-static HOE_TAG: Tag = Tag::named("tools/hoe");
+static TILLABLE: Tag = Tag::named("tillable");
 
 /// A log that grows into a tree of `leaves` (a cone, like a spruce, when `cone`).
 fn log(r: &mut Registry, handle: &'static Block, wood: &str, leaves: &str, cone: bool) {
@@ -74,9 +74,14 @@ fn log(r: &mut Registry, handle: &'static Block, wood: &str, leaves: &str, cone:
         .set(&FLAMMABLE, 5)
         .set(&FUEL, 300)
         .axis()
-        .textures(&top, &side, &top)
+        .texture(&side)
+        .ends(&top)
         .tab(&crate::tabs::NATURAL);
 }
+
+/// Dyed blocks' colors: name, glass tint, wool tint, the light the glass takes away per channel.
+const COLORS: &[(&str, u32, u32, [u8; 3])] =
+    &[("red", 0xED3737, 0xB02E26, [0, 12, 12]), ("green", 0x37C837, 0x5E7C16, [12, 0, 12]), ("blue", 0x375BFF, 0x3C44AA, [12, 12, 0])];
 
 fn leaves(r: &mut Registry, handle: &'static Block, tex: &str) {
     r.block(handle)
@@ -85,7 +90,7 @@ fn leaves(r: &mut Registry, handle: &'static Block, tex: &str) {
         .hardness(0.2)
         .cutout()
         .light_opacity(1)
-        .tint(&tints::FOLIAGE)
+        .tint_kind(&tints::FOLIAGE)
         .tag("leaves")
         .signal_blocker()
         .mined_by("shears", tool_tier::HAND)
@@ -163,8 +168,12 @@ pub fn register(r: &mut Registry) {
         .tab(&crate::tabs::NATURAL);
     r.block(&GRASS)
         .sound_group("grass")
-        .textures("grass_top", "grass_side", "dirt")
-        .tint_top(&tints::GRASS)
+        .texture("dirt")
+        .top("grass_top")
+        .tint_kind(&tints::GRASS)
+        .sides("dirt")
+        .layer("grass_side_overlay")
+        .tint_kind(&tints::GRASS)
         .hardness(0.6)
         .mined_by("shovel", tool_tier::HAND)
         .drops("dirt", 1)
@@ -176,7 +185,9 @@ pub fn register(r: &mut Registry) {
         .tab(&crate::tabs::NATURAL);
     r.block(&SNOWY_GRASS)
         .sound_group("grass")
-        .textures("snow", "grass_snow_side", "dirt")
+        .texture("grass_snow_side")
+        .top("snow")
+        .bottom("dirt")
         .hardness(0.6)
         .mined_by("shovel", tool_tier::HAND)
         .drops("dirt", 1)
@@ -212,7 +223,9 @@ pub fn register(r: &mut Registry) {
         .tab(&crate::tabs::NATURAL);
     r.block(&SANDSTONE)
         .sound_group("stone")
-        .textures("sandstone_top", "sandstone_side", "sandstone_bottom")
+        .texture("sandstone_side")
+        .top("sandstone_top")
+        .bottom("sandstone_bottom")
         .hardness(0.8)
         .mined_by("pickaxe", 0)
         .tab(&crate::tabs::BUILDING);
@@ -298,7 +311,7 @@ pub fn register(r: &mut Registry) {
     r.edit(&PLAYER).set_text(&SWIMS_IN, "#water");
     r.liquid(&WATER)
         .block(|b| {
-            b.tint(&tints::WATER)
+            b.tint_kind(&tints::WATER)
                 .translucent()
                 .set_text(&DRIP, abi::particle::DRIP)
                 .set_text(&SPLASH, abi::particle::SPLASH)
@@ -328,7 +341,7 @@ pub fn register(r: &mut Registry) {
         .plant()
         .replaceable()
         .needs_below("#plant_soil")
-        .tint(&tints::GRASS)
+        .tint_kind(&tints::GRASS)
         .no_item();
     r.loot(&TALL_GRASS)
         .pool(Pool::new().when(Cond::chance(0.125)).item("wheat_seeds"));
@@ -355,7 +368,8 @@ pub fn register(r: &mut Registry) {
     r.damage_cause(&PRICKED).death_message("death.base.cactus");
     r.block(&CACTUS)
         .sound_group("cloth")
-        .textures("cactus_top", "cactus_side", "cactus_top")
+        .texture("cactus_side")
+        .ends("cactus_top")
         .model_box([1.0, 0.0, 1.0], [15.0, 16.0, 15.0])
         .hitbox([1.0, 0.0, 1.0], [15.0, 16.0, 15.0])
         .hardness(0.4)
@@ -383,7 +397,8 @@ pub fn register(r: &mut Registry) {
         );
     r.block(&FARMLAND)
         .sound_group("gravel")
-        .textures("farmland", "dirt", "dirt")
+        .texture("dirt")
+        .top("farmland")
         .model_box([0.0, 0.0, 0.0], [16.0, 15.0, 16.0])
         .hardness(0.6)
         .mined_by("shovel", tool_tier::HAND)
@@ -399,15 +414,25 @@ pub fn register(r: &mut Registry) {
         .hardness(0.3)
         .drops_nothing()
         .tab(&crate::tabs::BUILDING);
-    for (name, col) in [("red", [0u8, 12, 12]), ("green", [12, 0, 12]), ("blue", [12, 12, 0])] {
+    // Every color of glass and wool is one white picture tinted: a color more is a line here.
+    for &(name, glass, wool, filter) in COLORS {
         r.block(Block::generated(format!("{name}_stained_glass")))
             .signal_blocker()
             .sound_group("glass")
             .tag(&format!("stained_glass/{name}"))
-            .texture(&format!("glass_{name}"))
+            .texture("stained_glass")
+            .tint(glass)
             .translucent()
-            .light_filter(col[0], col[1], col[2])
+            .light_filter(filter[0], filter[1], filter[2])
             .hardness(0.3)
+            .tab(&crate::tabs::COLORED);
+        r.block(Block::generated(format!("{name}_wool")))
+            .sound_group("cloth")
+            .tag(&format!("wool/{name}"))
+            .texture("wool_white")
+            .tint(wool)
+            .hardness(0.8)
+            .set(&FLAMMABLE, 30)
             .tab(&crate::tabs::COLORED);
     }
     for (name, rgb) in [("red", [15u8, 3, 2]), ("green", [2, 15, 4]), ("blue", [3, 6, 15])] {
@@ -421,14 +446,11 @@ pub fn register(r: &mut Registry) {
     }
     r.block(&CRAFTING_TABLE)
         .sound_group("wood")
-        .faces([
-            "crafting_table_side",
-            "crafting_table_side",
-            "crafting_table_bottom",
-            "crafting_table_top",
-            "crafting_table_front",
-            "crafting_table_front",
-        ])
+        .texture("crafting_table_side")
+        .bottom("crafting_table_bottom")
+        .top("crafting_table_top")
+        .north("crafting_table_front")
+        .south("crafting_table_front")
         .hardness(2.5)
         .mined_by("axe", tool_tier::HAND)
         .set(&FUEL, 300)
@@ -459,14 +481,24 @@ pub fn register(r: &mut Registry) {
         .hardness(0.3)
         .tab(&crate::tabs::NATURAL);
     r.block(&BRICKS)
-        .faces(["bricks_side_1", "bricks_side_4", "bricks_bottom", "bricks_top", "bricks_side_3", "bricks_side_2"])
+        .west("bricks_side_1")
+        .east("bricks_side_4")
+        .bottom("bricks_bottom")
+        .top("bricks_top")
+        .north("bricks_side_3")
+        .south("bricks_side_2")
         .sound_group("stone")
         .hardness(2.0)
         .mined_by("pickaxe", 0)
         .tab(&crate::tabs::BUILDING);
     r.block(&STONE_BRICKS)
         .sound_group("stone")
-        .faces(["stonebrick_side_1", "stonebrick_side_4", "stonebrick_bottom", "stonebrick_top", "stonebrick_side_3", "stonebrick_side_2"])
+        .west("stonebrick_side_1")
+        .east("stonebrick_side_4")
+        .bottom("stonebrick_bottom")
+        .top("stonebrick_top")
+        .north("stonebrick_side_3")
+        .south("stonebrick_side_2")
         .hardness(1.5)
         .mined_by("pickaxe", 0)
         .tab(&crate::tabs::BUILDING);
@@ -521,14 +553,15 @@ pub fn register(r: &mut Registry) {
     r.tag("grass_spreads_to", &["dirt"]);
     r.tag("animal_spawn", &["grass"]);
 
-    r.edit_pattern::<kind::Block>("#tillable").on_use(till_soil);
+    // A hoe's own use, as vanilla's, any mod's hoe: the soil stays a block nothing happens to
+    // when clicked, so a block placed on it shows at once.
+    r.edit_pattern::<kind::Item>("#tools/hoe").on_use(till_soil);
 }
 
-fn till_soil(u: &mut Use) -> bool {
-    let (w, pos, player) = (u.world(), u.pos(), u.player());
-    let held = w.inventory(player).get(w.selected_slot(player));
-
-    if HOE_TAG.on_item(held.item) {
+fn till_soil(u: &mut ItemUse) -> bool {
+    let w = u.world();
+    let Some((pos, _)) = u.target_block() else { return false };
+    if TILLABLE.on_block(w.block(pos)) {
         w.set_block(pos, FARMLAND.id());
         return true;
     }

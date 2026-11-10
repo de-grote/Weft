@@ -446,6 +446,12 @@ pub unsafe extern "C" fn client_command(c: *mut abi::ClientCtx, op: u32, text: S
             op_::BENCH => r.bench = Some(crate::bench::Bench::new(&text, num.max(0.1) as f32)),
             op_::RESPAWN => r.handle(vec![Request::Respawn]),
             op_::RUN_COMMAND => return r.run_command(&text) as u64,
+            op_::MENU_SORT => {
+                let Some(g) = r.game.as_mut().filter(|g| g.client.menu.is_some()) else { return 0 };
+                let slot = if num < 0.0 { u32::MAX } else { num as u32 };
+                g.client
+                    .send(crate::net::ToServer::Click { slot, button: crate::server::menu::SORT, shift: false });
+            }
             _ => return 0,
         }
         1

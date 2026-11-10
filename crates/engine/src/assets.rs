@@ -67,27 +67,55 @@ impl Assets {
         std::fs::read(self.path(name, kind, ext)?).ok()
     }
 
-    /// `<name>.<ext>` if what it says is about the picture `<name>.<of>` in effect: from the pack or
-    /// mod that has that picture, or from one above it. A mod's rules were made for the mod's
-    /// picture, and a pack that replaces it without bringing rules of its own has none.
-    pub fn sidecar(&self, name: &str, kind: &str, of: &str, ext: &str) -> Option<PathBuf> {
+    /// The connected texture rules of texture `name` (`client::ctm`): `<name>/<last part>.ctm`
+    /// beside its tiles, from the highest pack or mod with either them or a picture `<name>.png`
+    /// (a pack's plain picture has no rules). One with both stops the game.
+    pub fn ctm_rules(&self, name: &str) -> Option<PathBuf> {
         let (ns, rel) = name.split_once(':').unwrap_or(("core", name));
-        let (file, picture) = (format!("{kind}/{rel}.{ext}"), format!("{kind}/{rel}.{of}"));
+        let last = rel.rsplit('/').next().unwrap_or(rel);
+        let (rules, picture) = (format!("textures/{rel}/{last}.ctm"), format!("textures/{rel}.png"));
         for root in self
             .packs
             .iter()
             .map(|p| p.join(ns))
             .chain(self.mods.get(ns).cloned())
         {
-            let candidate = root.join(&file);
-            if self.files.contains(&candidate) {
-                return Some(candidate);
-            }
-            if self.files.contains(&root.join(&picture)) {
-                return None;
+            let (r, p) = (root.join(&rules), root.join(&picture));
+            match (self.files.contains(&r), self.files.contains(&p)) {
+                (true, true) => {
+                    let why = format!("{}: both a picture and connected texture rules {}: keep the folder", p.display(), r.display());
+                    log::error!("{why}");
+                    panic!("{why}");
+                }
+                (true, false) => return Some(r),
+                (false, true) => return None,
+                _ => {}
             }
         }
         None
+    }
+
+    /// The file texture `name` is drawn from where nothing connects it: its own picture, or the
+    /// tile its rules give a block with no neighbors (`ctm_alone`).
+    pub fn picture(&self, name: &str) -> String {
+        let Some(src) = self
+            .ctm_rules(name)
+            .and_then(|p| std::fs::read(p).ok())
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+        else {
+            return name.to_string();
+        };
+        let first = crate::kv::sections(&src)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        let get = |k: &str| first.iter().find(|p| p.1 == k).map(|p| p.2);
+        let tiles = ctm_tiles(get("tiles").unwrap_or(""), name);
+        let alone = ctm_alone(get("method").unwrap_or("ctm"));
+        tiles
+            .into_iter()
+            .nth(alone)
+            .unwrap_or_else(|| name.to_string())
     }
 
     /// `<name><suffix>.<ext>` from the same pack or mod as `<name>.<ext>` itself: a mask drawn
@@ -363,7 +391,36 @@ pub fn parse_anim(src: &str, size: [u32; 2], first: u32) -> Anim {
 
 /// A texture by name: animated ones are vertical strips of square frames (`.anim` next to it
 /// says how they play). A missing or malformed file gives the magenta checker and a warning.
+/// Tile names of a texture's connected rules (`tiles`), in its folder `<name>/` unless they name
+/// a mod; `a-b` at the end of an entry expands to numbers.
+pub fn ctm_tiles(v: &str, texture: &str) -> Vec<String> {
+    let full = |rel: &str| if rel.contains(':') { rel.to_string() } else { format!("{texture}/{rel}") };
+    let mut out = Vec::new();
+    for t in v.split_whitespace() {
+        let (prefix, last) = t.rsplit_once('/').map_or(("", t), |(p, l)| (p, l));
+        let prefix = if prefix.is_empty() { String::new() } else { format!("{prefix}/") };
+        match last
+            .split_once('-')
+            .and_then(|(a, b)| Some((a.parse::<u32>().ok()?, b.parse::<u32>().ok()?)))
+        {
+            Some((a, b)) => out.extend((a..=b).map(|i| full(&format!("{prefix}{i}")))),
+            None => out.push(full(t)),
+        }
+    }
+    out
+}
+
+/// The tile a connected texture method gives a block with no neighbors: all its edges (`ctm`,
+/// `compact`), both ends (`horizontal`, `vertical` and the two together), else the first.
+pub fn ctm_alone(method: &str) -> usize {
+    match method {
+        "horizontal" | "bookshelf" | "vertical" | "h+v" | "horizontal+vertical" | "v+h" | "vertical+horizontal" => 3,
+        _ => 0,
+    }
+}
+
 pub fn load_texture(assets: &Assets, name: &str) -> LoadedTexture {
+    let name = &assets.picture(name);
     let img = (name != "core:missing")
         .then(|| {
             assets
@@ -442,29 +499,45 @@ pub fn composite_texture(parts: [&LoadedTexture; 4]) -> LoadedTexture {
 }
 
 /// Pictures one over the other, the first at the bottom, each multiplied by its tint
-/// (0xRRGGBB): what a stack with `layers` shows. All are scaled to the biggest.
+/// (0xRRGGBB): what a stack with `layers` shows, and a block face of several. All are scaled to
+/// the biggest; a layer's glow mask glows where it shows, and covers what glows under it.
 pub fn layered_texture(parts: &[(&LoadedTexture, u32)]) -> LoadedTexture {
     let size = parts.iter().map(|p| p.0.size).max().unwrap_or(16);
     let mut out = vec![0u8; (size * size * 4) as usize];
+    let glows = parts
+        .iter()
+        .any(|p| p.0.glow.first().is_some_and(Option::is_some));
+    let mut glow = vec![0u8; if glows { (size * size) as usize } else { 0 }];
     for (p, tint) in parts {
         let Some(rgba) = p.frames.first().and_then(|f| f.first()) else { continue };
         let from = scale_nearest(rgba, p.size, size);
+        let own_glow = p.glow.first().and_then(Option::as_ref);
         let t = [(tint >> 16) & 255, (tint >> 8) & 255, tint & 255];
-        for (o, s) in out.chunks_exact_mut(4).zip(from.chunks_exact(4)) {
+        for (i, (o, s)) in out
+            .chunks_exact_mut(4)
+            .zip(from.chunks_exact(4))
+            .enumerate()
+        {
             let a = s[3] as u32;
             for k in 0..3 {
                 let c = s[k] as u32 * t[k] / 255;
                 o[k] = ((c * a + o[k] as u32 * (255 - a)) / 255) as u8;
             }
             o[3] = (a + o[3] as u32 * (255 - a) / 255) as u8;
+            if glows {
+                let (x, y) = (i as u32 % size, i as u32 / size);
+                let g = own_glow.map_or(0, |m| m[((y * p.size / size) * p.size + x * p.size / size) as usize] as u32);
+                glow[i] = ((g * a + glow[i] as u32 * (255 - a)) / 255) as u8;
+            }
         }
     }
-    LoadedTexture { size, frames: vec![mip_chain(out, size)], glow: vec![None], anim: None }
+    LoadedTexture { size, frames: vec![mip_chain(out, size)], glow: vec![glows.then_some(glow)], anim: None }
 }
 
 /// Fingerprint of the files a texture is made of (image, `.anim`, glow masks): changes when any of
 /// them is edited, added or removed, so a reload reads only what changed.
 pub fn texture_stamp(assets: &Assets, name: &str) -> u64 {
+    let name = &assets.picture(name);
     let mut h = weft_noise::FNV;
     for (n, ext) in [(name.to_string(), "png"), (name.to_string(), "anim"), (format!("{name}_e"), "png"), (format!("{name}_s"), "png")] {
         let meta = assets
@@ -617,47 +690,45 @@ mod tests {
 
     #[test]
     fn rules_go_with_their_picture() {
-        let root = std::env::temp_dir().join(format!("weft_sidecar_{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("weft_ctm_rules_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let put = |p: &str| {
             let p = root.join(p);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, b"x").unwrap();
         };
-        put("mod/textures/both.png");
-        put("mod/textures/both.ctm");
-        put("mod/textures/replaced.png");
-        put("mod/textures/replaced.ctm");
-        put("mod/textures/own_rules.png");
-        put("mod/textures/own_rules.ctm");
+        put("mod/textures/folder/folder.ctm");
+        put("mod/textures/replaced/replaced.ctm");
+        put("mod/textures/own_rules/own_rules.ctm");
         put("mod/textures/rules_only.png");
         put("mod/textures/low.png");
+        put("mod/textures/both.png");
+        put("mod/textures/both/both.ctm");
         put("top/m/textures/replaced.png");
-        put("top/m/textures/own_rules.png");
-        put("top/m/textures/own_rules.ctm");
-        put("top/m/textures/rules_only.ctm");
+        put("top/m/textures/own_rules/own_rules.ctm");
+        put("top/m/textures/rules_only/rules_only.ctm");
         put("top/m/textures/low.png");
-        put("low/m/textures/low.ctm");
+        put("low/m/textures/low/low.ctm");
         let a = Assets::new([("m".to_string(), root.join("mod"))], vec![root.join("top"), root.join("low")]);
         let found = |n: &str| {
-            a.sidecar(&format!("m:{n}"), "textures", "png", "ctm")
-                .map(|p| {
-                    p.strip_prefix(&root)
-                        .unwrap()
-                        .components()
-                        .next()
-                        .unwrap()
-                        .as_os_str()
-                        .to_string_lossy()
-                        .into_owned()
-                })
+            a.ctm_rules(&format!("m:{n}")).map(|p| {
+                p.strip_prefix(&root)
+                    .unwrap()
+                    .components()
+                    .next()
+                    .unwrap()
+                    .as_os_str()
+                    .to_string_lossy()
+                    .into_owned()
+            })
         };
-        assert_eq!(found("both").as_deref(), Some("mod"), "nothing replaced");
-        assert_eq!(found("replaced"), None, "a pack's picture without rules has none");
+        assert_eq!(found("folder").as_deref(), Some("mod"), "nothing replaced");
+        assert_eq!(found("replaced"), None, "a pack's plain picture has no rules");
         assert_eq!(found("own_rules").as_deref(), Some("top"), "its own rules");
-        assert_eq!(found("rules_only").as_deref(), Some("top"), "rules over the mod's picture");
+        assert_eq!(found("rules_only").as_deref(), Some("top"), "a pack's folder over the mod's picture");
         assert_eq!(found("low"), None, "rules under a pack's picture aren't for it");
         assert_eq!(found("none"), None);
+        assert!(std::panic::catch_unwind(|| found("both")).is_err(), "a picture and a folder of one mod");
         let _ = std::fs::remove_dir_all(&root);
     }
     use super::*;

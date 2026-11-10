@@ -34,7 +34,7 @@ pub fn register(r: &mut Registry) {
         .handheld()
         .tab(&TOOLS);
     // The damage: only what the numbers are, so asking the chain is no smash.
-    r.modify(&chain::ATTACK_DAMAGE, stage::ADD, |m| {
+    r.modify(&attribute::ATTACK_DAMAGE, &phase::ADD, |m| {
         let q = *m.query();
         if q.item != MACE.id() {
             return;

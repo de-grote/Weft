@@ -258,7 +258,7 @@ impl Dim {
                 .flat_map(|((_, p), ids)| ids.iter().map(|id| (*p, *id)))
                 .collect();
             for (_, id) in gone {
-                self.entities.remove(id);
+                self.entities.remove(id, super::dim::UNTOLD);
             }
             if emitted {
                 lost_light.push(cp);

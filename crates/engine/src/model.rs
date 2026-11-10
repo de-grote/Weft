@@ -299,6 +299,127 @@ pub fn load_geo(src: &str) -> Result<Geo, String> {
     Ok(Geo { parts, texture })
 }
 
+/// `parts` as a `.geo.json` (format 1.12) `load_geo` reads back the same, for a texture `texture`
+/// texels big: what Blockbench opens, to go on from a model made in code.
+pub fn save_geo(name: &str, parts: &[Part], texture: [u32; 2]) -> String {
+    use serde_json::json;
+    let deg = |r: [f32; 3]| [-r[0].to_degrees(), r[1].to_degrees(), -r[2].to_degrees()];
+    let round = |v: f32| (v as f64 * 1e4).round() / 1e4;
+    let r3 = |v: [f32; 3]| json!([round(v[0]), round(v[1]), round(v[2])]);
+    let bones: Vec<Value> = parts
+        .iter()
+        .map(|p| {
+            let mut b = serde_json::Map::new();
+            b.insert("name".into(), json!(p.name));
+            if let Some(parent) = p.parent.and_then(|i| parts.get(i as usize)) {
+                b.insert("parent".into(), json!(parent.name));
+            }
+            b.insert("pivot".into(), r3(p.pivot));
+            if p.rest != [0.0; 3] {
+                b.insert("rotation".into(), r3(deg(p.rest)));
+            }
+            let cubes: Vec<Value> = p
+                .cuboids
+                .iter()
+                .map(|c| {
+                    let origin = [c.origin[0] + p.pivot[0], c.origin[1] + p.pivot[1], c.origin[2] + p.pivot[2]];
+                    let mut o = serde_json::Map::new();
+                    o.insert("origin".into(), r3(origin));
+                    o.insert("size".into(), r3(c.size));
+                    if c.inflate != 0.0 {
+                        o.insert("inflate".into(), json!(round(c.inflate)));
+                    }
+                    if c.mirror {
+                        o.insert("mirror".into(), json!(true));
+                    }
+                    let uv = match c.faces {
+                        Some(rects) => {
+                            let mut faces = serde_json::Map::new();
+                            for (i, face) in ["east", "west", "down", "up", "north", "south"]
+                                .into_iter()
+                                .enumerate()
+                            {
+                                let [u, v, w, h] = rects[i];
+                                let (v, h) = if face == "down" { (v + h, -h) } else { (v, h) };
+                                faces.insert(face.into(), json!({ "uv": [round(u), round(v)], "uv_size": [round(w), round(h)] }));
+                            }
+                            Value::Object(faces)
+                        }
+                        None => json!([round(c.uv[0]), round(c.uv[1])]),
+                    };
+                    o.insert("uv".into(), uv);
+                    Value::Object(o)
+                })
+                .collect();
+            if !cubes.is_empty() {
+                b.insert("cubes".into(), Value::Array(cubes));
+            }
+            if !p.mesh.is_empty() {
+                let positions: Vec<Value> = p.mesh.iter().map(|v| r3(v.pos)).collect();
+                let uvs: Vec<Value> = p
+                    .mesh
+                    .iter()
+                    .map(|v| json!([round(v.uv[0]), round(v.uv[1])]))
+                    .collect();
+                let mut normals = Vec::new();
+                let mut polys = Vec::new();
+                for (t, tri) in p.mesh.chunks_exact(3).enumerate() {
+                    let [a, b2, c] = [Vec3::from(tri[0].pos), Vec3::from(tri[1].pos), Vec3::from(tri[2].pos)];
+                    let n = (b2 - a).cross(c - a).normalize_or_zero();
+                    normals.push(r3(n.to_array()));
+                    polys.push(json!(
+                        (0..3)
+                            .map(|k| [t * 3 + k, t, t * 3 + k])
+                            .collect::<Vec<_>>()
+                    ));
+                }
+                b.insert(
+                    "poly_mesh".into(),
+                    json!({ "normalized_uvs": false, "positions": positions, "normals": normals, "uvs": uvs, "polys": polys }),
+                );
+            }
+            Value::Object(b)
+        })
+        .collect();
+    let geo = json!({
+        "format_version": "1.12.0",
+        "minecraft:geometry": [{
+            "description": {
+                "identifier": format!("geometry.{}", name.rsplit(':').next().unwrap_or(name)),
+                "texture_width": texture[0],
+                "texture_height": texture[1],
+            },
+            "bones": bones,
+        }],
+    });
+    inline_numbers(&serde_json::to_string_pretty(&geo).unwrap_or_default())
+}
+
+/// Pretty JSON with lists of numbers on one line, as Blockbench writes them.
+fn inline_numbers(pretty: &str) -> String {
+    let mut out = String::with_capacity(pretty.len());
+    let mut rest = pretty;
+    while let Some(at) = rest.find('[') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at..];
+        match after.find(']') {
+            Some(end) if !after[1..end].contains(['[', '{']) => {
+                let items: Vec<&str> = after[1..end].split(',').map(str::trim).collect();
+                out.push('[');
+                out.push_str(&items.join(", "));
+                out.push(']');
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push('[');
+                rest = &after[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Bedrock `poly_mesh`: positions, uvs and polys of 3 or 4 corners `[position, normal, uv]`,
 /// made into triangles. With `normalized_uvs` the uvs are 0..1 of a texture `tex` texels big.
 fn poly_mesh(pm: &Value, tex: [f32; 2]) -> Vec<MeshVertex> {
@@ -765,7 +886,8 @@ pub fn pose(parts: &[Part], root: Mat4, m: &Motion, out: &mut Vec<Mat4>) {
                 offset = if replace { offset * (1.0 - c.w) + by } else { offset + by * c.w };
             }
             if let Some(k) = ch[2] {
-                scale *= Vec3::ONE.lerp(Vec3::from_array(c.bound.anim.channels[k].sample(c.t)), c.w);
+                let to = Vec3::from_array(c.bound.anim.channels[k].sample(c.t));
+                scale = if replace { scale.lerp(to, c.w) } else { scale * Vec3::ONE.lerp(to, c.w) };
             }
         }
         let pivot = Vec3::from_array(p.pivot);
@@ -804,6 +926,66 @@ mod tests {
             [role::LEG_RIGHT, role::LEG_LEFT, role::LEG_FRONT_RIGHT, role::LEG_FRONT_LEFT]
         );
         assert_eq!(role_of("leg3", 8), role::LEG_SWEEP);
+    }
+
+    #[test]
+    fn saved_files_read_back_the_same() {
+        let parts = vec![
+            Part {
+                role: 0,
+                name: "body".into(),
+                parent: None,
+                pivot: [0.0, 24.0, 0.0],
+                rest: [0.3, -0.2, 0.1],
+                cuboids: vec![Cuboid {
+                    origin: [-4.0, -12.0, -2.0],
+                    size: [8.0, 12.0, 4.0],
+                    uv: [16.0, 16.0],
+                    inflate: 0.5,
+                    mirror: true,
+                    faces: None,
+                }],
+                mesh: Vec::new(),
+            },
+            Part {
+                role: 0,
+                name: "ear".into(),
+                parent: Some(0),
+                pivot: [1.0, 26.0, -1.0],
+                rest: [0.0; 3],
+                cuboids: vec![Cuboid {
+                    origin: [0.0; 3],
+                    size: [1.0, 2.0, 3.0],
+                    uv: [0.0; 2],
+                    inflate: 0.0,
+                    mirror: false,
+                    faces: Some([
+                        [0.0, 0.0, 3.0, 2.0],
+                        [3.0, 0.0, 3.0, 2.0],
+                        [6.0, 4.0, 1.0, -3.0],
+                        [7.0, 1.0, 1.0, 3.0],
+                        [8.0, 0.0, 1.0, 2.0],
+                        [9.0, 0.0, 1.0, 2.0],
+                    ]),
+                }],
+                mesh: vec![
+                    MeshVertex { pos: [0.0, 0.0, 0.0], uv: [0.0, 0.0] },
+                    MeshVertex { pos: [1.0, 0.0, 0.0], uv: [4.0, 0.0] },
+                    MeshVertex { pos: [1.0, 1.0, 0.0], uv: [4.0, 4.0] },
+                ],
+            },
+        ];
+        let back = load_geo(&save_geo("t", &parts, [64, 32])).unwrap();
+        assert_eq!(back.texture, Some([64, 32]));
+        for (a, b) in parts.iter().zip(&back.parts) {
+            assert_eq!((&a.name, a.parent, a.pivot), (&b.name, b.parent, b.pivot));
+            assert!(a.rest.iter().zip(b.rest).all(|(x, y)| (x - y).abs() < 1e-4), "{:?} {:?}", a.rest, b.rest);
+            assert_eq!(a.cuboids.len(), b.cuboids.len());
+            for (x, y) in a.cuboids.iter().zip(&b.cuboids) {
+                assert_eq!((x.origin, x.size, x.uv, x.inflate, x.mirror, x.faces), (y.origin, y.size, y.uv, y.inflate, y.mirror, y.faces));
+            }
+            assert_eq!(a.mesh, b.mesh);
+        }
     }
 
     #[test]

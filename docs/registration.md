@@ -52,7 +52,7 @@ Block-level components (`comps::block`):
 | `RETEXTURE` | `[Retexture]` | none | texture renamed on its states and item (`.retexture`) |
 | `SHAPES_OF` | `ShapesOf` | none | makes it a template (`r.shapes_of`) |
 
-Shared components it carries per state: `HARDNESS` (`f32`, 1; `.hardness`, `.unbreakable`), `LIGHT` (`[u8;3]`; `.light`, `.light_rgb`), `FRICTION` (0.6), `DRAG` (1), `TINT` and `TINT_FACES` (`.tint`, `.tint_top`), `HARVEST_LEVEL` (`.mined_by`), `LOOT_ROLLS`, `SPREADS_TO` and the other spread ones (`.spreads`, `.spread_reach`), `AMBIENT_PARTICLE`, `SHADER`, `SOUND` (`.sound_group`).
+Shared components it carries per state: `HARDNESS` (`f32`, 1; `.hardness`, `.unbreakable`), `LIGHT` (`[u8;3]`; `.light`, `.light_rgb`), `FRICTION` (0.6), `DRAG` (1), `TINT` and `TINT_FACES` (from the faces' layers, `.tint_kind`), `HARVEST_LEVEL` (`.mined_by`), `LOOT_ROLLS`, `SPREADS_TO` and the other spread ones (`.spreads`, `.spread_reach`), `AMBIENT_PARTICLE`, `SHADER`, `SOUND` (`.sound_group`).
 
 Tags it carries: `mineable/<class>` (`.mined_by`), `tab/<tab>` (`.tab`), `plantable` (`.plant`), and anything you tag.
 
@@ -76,7 +76,7 @@ Per-state components (`comps::block`):
 | `LIGHT_OPACITY` | `u8` | 15 opaque, else 0 | light it takes away (`.light_opacity`) |
 | `LAYER` | `u32` (`RenderLayer`) | cutout for boxes, else opaque | `.cutout`, `.translucent` |
 | `MODEL` | `u32` (`BlockModel`) | cube | `.plant`, `.air`, boxes |
-| `TEXTURES` | `[str;6]` | `<ns>:block/<name>` | `.texture`, `.textures`, `.faces`, `.front_faces` |
+| `TEXTURES` | `[str;6]` | `<ns>:block/<name>` | by face, each `LAYERS` text: `.texture`, `.top`, `.sides`.., `.layer`, `.tint`, `.tint_kind` |
 | `TURNS` | `[u8;6]` | none | quarter turns of a cube's faces (`.face_turns`) |
 | `BOXES` | `[ModelBox]` | none | `.model_box`, `.model_box_faces` |
 | `TURN` | `u8` (`abi::Turn`) | none | how all of its model is turned (`.orientation`, by itself with `.facing`, `.axis`, `attach` and `front`) |
@@ -475,7 +475,7 @@ r.edit(&poses::CROUCH).speed(0.4);
 A set of abilities. `r.game_mode(&M)`, the engine's in `game_modes::*`. `comps::game_mode::MODIFIERS` (`[Modifier]`, `.modifier` pushes; flight is `attribute::CAN_FLY`, no damage, hunger or air `attribute::INVULNERABLE`, `.invulnerable()`); tags `game_mode.instant_break`, `no_break`, `no_place`, `no_costs`, `always_fly`, `noclip`, `no_interact`, `hidden`, `no_hud`, `creative_inventory` (presets `.breaks`, `.flight`, `.no_placing`...).
 
 ```rust
-r.edit(&game_modes::SURVIVAL).modifier(&attribute::MAX_HEALTH, abi::attr_op::ADD, 4.0);
+r.edit(&game_modes::SURVIVAL).modifier(Modifier::add(&attribute::MAX_HEALTH, 4.0));
 ```
 
 ## Damage cause
@@ -491,7 +491,7 @@ What is on a mob for a while (`w.entity_effect(id, &E, level, ticks)`), several 
 ```rust
 r.edit(&entity_effects::HURT).shader(&Shader::named("mymod:hurt_blue"));
 r.entity_effect(&POISON).unseen().hazard(Hazard::own(1.0, &MAGIC).every(25));
-r.entity_effect(&SWIFTNESS).modifier(Modifier::new(&attribute::MOVEMENT_SPEED, attr_op::MULTIPLY_BASE, 0.2));
+r.entity_effect(&SWIFTNESS).modifier(Modifier::percent(&attribute::MOVEMENT_SPEED, 0.2));
 ```
 
 ## Text place
@@ -530,10 +530,26 @@ r.edit(Handle::<kind::Config>::generated("core:fov".to_string())).set(&comps::co
 ```
 
 ## Attribute
-A value of living entities with timed modifiers. `r.attribute(&A, default, min, max)`, the engine's in `attribute::*`. `comps::attribute`: `DEFAULT` (`f64`), `RANGE` (`[f64;2]`).
+A value of living entities, worked out as a chain from its base, its modifiers among the steps. `r.attribute(&A, default, min, max)`, the engine's in `attribute::*`. `comps::attribute`: `DEFAULT` (`f64`), `RANGE` (`[f64;2]`).
 
 ```rust
 r.edit(&attribute::MAX_HEALTH).set(&comps::attribute::RANGE, [1.0, 2048.0]);
+```
+
+## Step
+Code that changes a value (`docs/modding.md`, Hooking into the game). `r.step(&S)`, `r.modify(&chain, &phase, ..)` and `r.before_event(..)` for one without a name of yours; the engine's are named `core:..`. `comps::step`: `CHAIN` (`str`, run in every computation of it; none: only where a modifier names it), `PHASE` (`str`), `AFTER`, `BEFORE` (`[str]`, steps of its phase), `CALL` (`callback`, `.run`, `.answer`).
+
+```rust
+r.step(&SHARP).on(&attribute::ATTACK_DAMAGE).phase(&phase::ADD).after("othermod:blunt").run(|m| m.value += 1.0);
+r.edit(&Step::named("core:charge")).run(|m| m.value *= 0.2 + 0.8 * m.query().charge as f64);
+r.remove(&Step::named("core:vanilla_sweep"));
+```
+
+## Phase
+A place in the order steps run in, right after another. `r.phase(&P, &after)`, the engine's in `phase::*`. `comps::phase`: `AFTER` (`str`).
+
+```rust
+r.phase(&CRITS, &phase::MULTIPLY);
 ```
 
 ## Equipment slot
@@ -573,7 +589,7 @@ r.edit(&FOOD).anchor(hud_anchor::TOP_RIGHT).order(2);
 ```
 
 ## Screen part
-Something added to a place of a screen, named `<mod>:<screen>/<area>`, `/2`... `r.screen_part(&screens::TITLE, "buttons", 0, |ui| ..)`. `comps::screen_part`: `SCREEN`, `AREA` (`str`), `ORDER` (`i32`), `CALL` (callback).
+Something added to a place of a screen, named `<mod>:<screen>/<area>`, `/2`... `r.screen_part(&screens::TITLE, "buttons", 0, |ui| ..)`. Menus: a menu's own `corner` (top right inside its panel) and `side` (beside it), `r.screen_part(&base::CHEST_MENU, "side", ..)` for any mod's menu, and `screens::MENUS` `corner` and `side` for every menu (base's sort and put away icons are in its `corner`; sorting is `c.client().menu_sort(None)`). `comps::screen_part`: `SCREEN`, `AREA` (`str`), `ORDER` (`i32`), `CALL` (callback).
 
 ```rust
 static PAUSE_BUTTONS: ScreenPart = ScreenPart::named("base:pause/buttons");

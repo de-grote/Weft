@@ -288,6 +288,12 @@ impl ClientWorld {
         self.cubes.get(&p).map(|s| &s.cube)
     }
 
+    /// The biome of the column a block is in, if its cube is here.
+    pub fn biome_at(&self, p: IVec3) -> Option<u16> {
+        self.cube(p >> 4i32)
+            .map(|cube| cube.biome((p.x & 15) as usize, (p.z & 15) as usize))
+    }
+
     /// With a number that changes whenever its blocks do (`Slot::rev`).
     pub fn cube_rev(&self, p: IVec3) -> Option<(&Arc<Cube>, u32)> {
         self.cubes.get(&p).map(|s| (&s.cube, s.rev))

@@ -181,7 +181,7 @@ fn events(r: &mut Registry) {
     });
     // r.on_event(&actions::BREAK_BLOCK, |b| for e in b.iter() { /* e.player, e.pos, e.state */ });
     // r.before_event(&actions::BREAK_BLOCK, |q| if q.pos().y < -60 { Verdict::Deny } else { Verdict::Abstain });
-    // r.modify(&chain::DAMAGE, stage::MULTIPLY, |m| m.value *= 0.9);
+    // r.modify(&chain::DAMAGE, &phase::MULTIPLY, |m| m.value *= 0.9);
 }
 
 /// Chat commands
@@ -208,7 +208,7 @@ fn client(_r: &mut Registry) {
     // static DASH: Key = Key::named("dash");
     // static ABOUT: Menu = Menu::named("about");
     // static MANA: HudElement = HudElement::named("mana");
-    // r.key(&DASH, "R").on_server(|p| { let w = p.world(); info!("{} dashes", p.player()); w.game_time(); });
+    // r.key(&DASH, "R").on_server(|w, player| { info!("{player} dashes"); w.game_time(); });
     // r.menu(&ABOUT).screen(|ui| ui.panel("background", S::column().pad(8.0), |ui| ui.text("examplemod.about")));
     // r.hud_element(&MANA, hud_anchor::HOTBAR_RIGHT, 2, |ui| ui.text_bind(|c, out| { /* ... */ }));
     //

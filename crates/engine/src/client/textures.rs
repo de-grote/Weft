@@ -20,6 +20,9 @@ enum Source {
     Composite([u32; 4]),
     /// Pictures one over the other, each tinted (a stack's `layers`).
     Layers(Vec<(String, u32)>),
+    /// Another entry, every frame multiplied by a color (`0xRRGGBB`): a block face's layer of a
+    /// fixed tint, or a connected tile of one.
+    Tinted(u32, u32),
 }
 
 struct Entry {
@@ -53,8 +56,6 @@ struct Inner {
 
 pub struct GameTextures {
     inner: RefCell<Inner>,
-    /// Per block texture id: its overlay texture id + 1, or 0 (see `ctm::Ctm::overlay`).
-    pub overlays: Vec<u32>,
     /// Fully transparent, drawn for a texture until it has loaded.
     blank: (TextureId, u32),
 }
@@ -83,7 +84,6 @@ impl GameTextures {
     pub fn new(gpu: &mut dyn Backend, c: &Content, assets: &Assets) -> GameTextures {
         let (looks, names) = super::looks::load(assets, c);
         let (ctm, extra) = super::ctm::load(assets, c, &looks, names);
-        let overlays = ctm.overlay.clone();
         super::ctm::set(ctm);
         let mut entries: Vec<Entry> = Vec::new();
         let mut by_name: FxHashMap<String, u32> = FxHashMap::default();
@@ -107,12 +107,29 @@ impl GameTextures {
             .textures
             .iter()
             .chain(&extra.names)
-            .map(|n| add(n.clone(), Source::File, &mut entries))
+            .map(|n| match crate::content::tinted_copy(n) {
+                Some((of, rgb)) => {
+                    let of = add(of.to_string(), Source::File, &mut entries);
+                    add(n.clone(), Source::Tinted(of, rgb), &mut entries)
+                }
+                None => add(n.clone(), Source::File, &mut entries),
+            })
             .collect();
+        // A face of several layers, drawn one by one, is its first anywhere it is one picture.
+        for (t, layers) in c.face_layers.iter().enumerate() {
+            if let Some(first) = layers.first().filter(|l| l.tex as usize != t) {
+                ids[t] = ids[first.tex as usize];
+            }
+        }
         for parts in &extra.composites {
             let parts = parts.map(|p| ids.get(p as usize).copied().unwrap_or(0));
             let name = composite_name(&parts.map(|i| entries[i as usize].name.clone()));
             ids.push(add(name, Source::Composite(parts), &mut entries));
+        }
+        for &(tile, rgb) in &extra.tinted {
+            let of = ids.get(tile as usize).copied().unwrap_or(0);
+            let name = format!("{}#{rgb:06X}", entries[of as usize].name);
+            ids.push(add(name, Source::Tinted(of, rgb), &mut entries));
         }
         super::looks::set(looks);
         let blank = gpu.create_texture(
@@ -136,7 +153,6 @@ impl GameTextures {
                 assets: assets.clone(),
                 layered: FxHashMap::default(),
             }),
-            overlays,
             blank,
         };
         t.flush_glow(gpu);
@@ -226,19 +242,16 @@ impl GameTextures {
         self.inner.borrow().generation
     }
 
-    /// Block textures `ids` (and their overlays) loaded now: a mesh about to be drawn uses them.
+    /// Block textures `ids` loaded now: a mesh about to be drawn uses them.
     pub fn ensure_blocks(&self, gpu: &mut dyn Backend, ids: impl IntoIterator<Item = u32>) {
         {
             let mut i = self.inner.borrow_mut();
             for id in ids {
-                let over = self.overlays.get(id as usize).copied().unwrap_or(0);
-                for id in [Some(id), over.checked_sub(1)].into_iter().flatten() {
-                    let Some(&e) = i.ids.get(id as usize) else { continue };
-                    let en = &mut i.entries[e as usize];
-                    if en.frames.is_empty() && !en.requested {
-                        en.requested = true;
-                        i.requests.push(e);
-                    }
+                let Some(&e) = i.ids.get(id as usize) else { continue };
+                let en = &mut i.entries[e as usize];
+                if en.frames.is_empty() && !en.requested {
+                    en.requested = true;
+                    i.requests.push(e);
                 }
             }
         }
@@ -286,9 +299,8 @@ impl GameTextures {
     /// worked out from the table's length (on macOS, MoltenVK, `arrayLength` came back longer
     /// than it, and every block drew in one flat color): static -> (index, 0, size, 0), animated
     /// -> (offset into `frames`, count | total ticks << 16 | interpolate << 31, size, 0).
-    /// `frames`: animation frames (index | ticks << 16), then from `overlays` per block texture
-    /// its overlay id + 1 or 0.
-    pub fn world_tables(&self) -> (Vec<u32>, Vec<u32>, u32) {
+    /// `frames`: animation frames (index | ticks << 16).
+    pub fn world_tables(&self) -> (Vec<u32>, Vec<u32>) {
         let i = self.inner.borrow();
         let mut info: Vec<u32> = Vec::with_capacity(i.ids.len() * 4);
         let mut frames: Vec<u32> = Vec::new();
@@ -309,9 +321,11 @@ impl GameTextures {
                 (_, true) => info.extend([self.blank.1, 0, size, 0]),
             }
         }
-        let overlays = frames.len() as u32;
-        frames.extend((0..i.ids.len()).map(|b| self.overlays.get(b).copied().unwrap_or(0)));
-        (info, frames, overlays)
+        // An empty storage buffer can't be bound.
+        if frames.is_empty() {
+            frames.push(0);
+        }
+        (info, frames)
     }
 
     /// Takes assets that may have changed on disk: block, item and particle lists and connected
@@ -347,7 +361,7 @@ impl GameTextures {
                         .get(&e.name)
                         .is_some_and(|&o| composite_stamp(assets, entries, *parts) == old.entries[o as usize].stamp),
                     // Made again when next asked for.
-                    Source::Layers(_) => false,
+                    Source::Layers(_) | Source::Tinted(..) => false,
                 })
                 .collect();
             for k in 0..n.entries.len() {
@@ -418,27 +432,41 @@ fn set_glow(map: &mut Vec<u32>, color: u32, glow: u32) {
     map[color as usize] = glow;
 }
 
-/// Reads and prepares entries in parallel (composites read their parts again).
+/// Reads and prepares entries in parallel (composites and tinted copies read their sources again).
 fn load(entries: &[Entry], assets: &Assets, ids: &[u32]) -> Vec<Loaded> {
     ids.par_iter()
         .map(|&e| {
-            let en = &entries[e as usize];
-            match &en.source {
-                Source::File => {
-                    Loaded { entry: e, tex: assets::load_texture(assets, &en.name), stamp: assets::texture_stamp(assets, &en.name) }
-                }
-                Source::Layers(parts) => Loaded { entry: e, tex: layered(assets, parts), stamp: 0 },
-                &Source::Composite(ids) => {
-                    let parts = ids.map(|p| assets::load_texture(assets, &entries[p as usize].name));
-                    Loaded {
-                        entry: e,
-                        tex: assets::composite_texture([&parts[0], &parts[1], &parts[2], &parts[3]]),
-                        stamp: composite_stamp(assets, entries, ids),
-                    }
-                }
-            }
+            let (tex, stamp) = load_one(entries, assets, e);
+            Loaded { entry: e, tex, stamp }
         })
         .collect()
+}
+
+fn load_one(entries: &[Entry], assets: &Assets, e: u32) -> (LoadedTexture, u64) {
+    let en = &entries[e as usize];
+    match &en.source {
+        Source::File => (assets::load_texture(assets, &en.name), assets::texture_stamp(assets, &en.name)),
+        Source::Layers(parts) => (layered(assets, parts), 0),
+        &Source::Composite(ids) => {
+            let parts = ids.map(|p| assets::load_texture(assets, &entries[p as usize].name));
+            (assets::composite_texture([&parts[0], &parts[1], &parts[2], &parts[3]]), composite_stamp(assets, entries, ids))
+        }
+        &Source::Tinted(of, rgb) => {
+            let (mut tex, stamp) = load_one(entries, assets, of);
+            let t = [(rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255];
+            for px in tex
+                .frames
+                .iter_mut()
+                .flatten()
+                .flat_map(|m| m.chunks_exact_mut(4))
+            {
+                for k in 0..3 {
+                    px[k] = (px[k] as u32 * t[k] / 255) as u8;
+                }
+            }
+            (tex, stamp)
+        }
+    }
 }
 
 fn upload(gpu: &mut dyn Backend, i: &mut Inner, l: Loaded) {

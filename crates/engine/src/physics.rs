@@ -51,16 +51,17 @@ pub fn gravity_per_tick(gravity: f64) -> f64 {
     gravity * crate::world::TICK * crate::world::TICK
 }
 
-/// Vanilla's knockback, in blocks per tick: half the speed, 0.4 away (`away` is flat and of length
-/// 1) and on the ground up, never more than that up; `resist` (`KNOCKBACK_RESISTANCE`) takes its
-/// share off, all of it leaving the speed alone.
-pub fn knock(vel: DVec3, away: DVec3, on_ground: bool, resist: f64) -> DVec3 {
-    let strength = 0.4 * (1.0 - resist.clamp(0.0, 1.0));
+/// Vanilla's knockback, in blocks per tick: half the speed, `push` away (flat, its length the
+/// strength, a hurt's 0.4) and on the ground as much up, never more than 0.4 up; `resist`
+/// (`KNOCKBACK_RESISTANCE`) takes its share off, all of it leaving the speed alone.
+pub fn knock(vel: DVec3, push: DVec3, on_ground: bool, resist: f64) -> DVec3 {
+    let push = push.with_y(0.0) * (1.0 - resist.clamp(0.0, 1.0));
+    let strength = push.length();
     if strength <= 0.0 {
         return vel;
     }
-    let y = if on_ground { (vel.y / 2.0 + strength).min(strength) } else { vel.y };
-    DVec3::new(vel.x / 2.0 + away.x * strength, y, vel.z / 2.0 + away.z * strength)
+    let y = if on_ground { (vel.y / 2.0 + strength).min(0.4) } else { vel.y };
+    DVec3::new(vel.x / 2.0 + push.x, y, vel.z / 2.0 + push.z)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -496,7 +497,7 @@ pub fn sweep(c: &Content, block: &impl Cells, from: DVec3, to: DVec3, half: f64)
         let grown = Aabb { min: b.min - h, max: b.max + h };
         let inside = from.cmpgt(grown.min).all() && from.cmplt(grown.max).all();
         if !inside {
-            if let Some(hit) = ray_aabb(from, d, &grown, 1.0) {
+            if let Some((hit, _)) = ray_aabb(from, d, &grown, 1.0) {
                 t = t.min(hit);
             }
         }
@@ -632,7 +633,7 @@ pub struct Hit {
 /// The one way to find what a ray from `eye` hits within `reach`: the nearest selection box of
 /// the world's blocks and of moving structures (`(entity, where its blocks are, its blocks)`), by
 /// where the ray enters it. The client's crosshair, the server's and mods'
-/// `look_at` all ask this.
+/// `look_at` all ask this. `flags`: `abi::ray::LIQUIDS`, `SOLID`.
 pub fn pick(
     c: &Content,
     world: &impl Cells,
@@ -640,11 +641,11 @@ pub fn pick(
     eye: DVec3,
     dir: DVec3,
     reach: f64,
-    liquids: bool,
+    flags: u32,
 ) -> Option<Hit> {
-    let mut best = raycast(c, world, eye, dir, reach, liquids);
+    let mut best = raycast(c, world, eye, dir, reach, flags);
     for &(id, place, blocks) in structures {
-        if let Some(mut h) = raycast(c, &BodyCells(blocks), place.to_local(eye), dir, reach, liquids) {
+        if let Some(mut h) = raycast(c, &BodyCells(blocks), place.to_local(eye), dir, reach, flags) {
             if best.is_none_or(|b| h.dist < b.dist) {
                 h.frame = id;
                 best = Some(h);
@@ -654,29 +655,48 @@ pub fn pick(
     best
 }
 
-/// Where a ray enters box `b` (0 when it starts inside), within `max`: entities picked by the
-/// crosshair.
-pub fn ray_aabb(o: DVec3, d: DVec3, b: &Aabb, max: f64) -> Option<f64> {
-    let (mut t0, mut t1) = (0.0f64, max);
+/// Where a ray enters box `b` (0 when it starts inside), within `max`, and the face it went in
+/// through (-X, +X, -Y, +Y, -Z, +Z; inside: the one it looks most toward).
+pub fn ray_aabb(o: DVec3, d: DVec3, b: &Aabb, max: f64) -> Option<(f64, u8)> {
+    let (t0, t1, face) = slab(o, d, b.min, b.max, max)?;
+    if t0 < 0.0 {
+        let axis = (0..3)
+            .max_by(|&a, &b| d[a].abs().total_cmp(&d[b].abs()))
+            .unwrap_or(0);
+        return (t1 >= 0.0).then_some((0.0, (axis * 2) as u8 + (d[axis] < 0.0) as u8));
+    }
+    Some((t0, face))
+}
+
+/// The slab test: along `d`, where the ray enters and leaves the box, and the face it enters by.
+fn slab(o: DVec3, d: DVec3, lo: DVec3, hi: DVec3, max: f64) -> Option<(f64, f64, u8)> {
+    let (mut t0, mut t1, mut face) = (f64::NEG_INFINITY, max, 0u8);
     for i in 0..3 {
         if d[i].abs() < 1e-12 {
-            if o[i] < b.min[i] || o[i] > b.max[i] {
+            if o[i] < lo[i] || o[i] > hi[i] {
                 return None;
             }
             continue;
         }
-        let a = (b.min[i] - o[i]) / d[i];
-        let c = (b.max[i] - o[i]) / d[i];
-        t0 = t0.max(a.min(c));
-        t1 = t1.min(a.max(c));
+        let a = (lo[i] - o[i]) / d[i];
+        let c = (hi[i] - o[i]) / d[i];
+        let (near, far) = if a < c { (a, c) } else { (c, a) };
+        if near > t0 {
+            t0 = near;
+            // Entering through the low side means the -axis face.
+            face = (i * 2) as u8 + if d[i] > 0.0 { 0 } else { 1 };
+        }
+        t1 = t1.min(far);
     }
-    (t0 <= t1).then_some(t0)
+    (t0 <= t1).then_some((t0, t1, face))
 }
 
 /// Amanatides-Woo traversal. Blocks are hit where the ray crosses their selection boxes; of
 /// blocks the ray starts inside, only what is solid where it starts (a head stuck in a block).
-/// First targetable block along the ray; with `liquids` liquids stop it too.
-pub fn raycast(c: &Content, block: &impl Cells, origin: DVec3, dir: DVec3, max: f64, liquids: bool) -> Option<Hit> {
+/// First targetable block along the ray; with `abi::ray::LIQUIDS` liquids stop it too, with
+/// `SOLID` blocks are hit by their collision instead, what stops a body.
+pub fn raycast(c: &Content, block: &impl Cells, origin: DVec3, dir: DVec3, max: f64, flags: u32) -> Option<Hit> {
+    let (liquids, solid) = (flags & weft_abi::ray::LIQUIDS != 0, flags & weft_abi::ray::SOLID != 0);
     let dir = dir.normalize();
     let mut p = origin.floor().as_ivec3();
     let step = dir.signum().as_ivec3();
@@ -698,7 +718,7 @@ pub fn raycast(c: &Content, block: &impl Cells, origin: DVec3, dir: DVec3, max: 
             for state in std::iter::once(main).chain(extras.iter().copied()) {
                 let s = &c.states[state as usize];
                 let wanted = liquids && s.liquid.is_some();
-                if s.flags & bf::NOT_TARGETABLE != 0 && !wanted {
+                if s.flags & bf::NOT_TARGETABLE != 0 && !wanted && !solid {
                     continue;
                 }
                 let stuck = t == 0.0
@@ -712,7 +732,8 @@ pub fn raycast(c: &Content, block: &impl Cells, origin: DVec3, dir: DVec3, max: 
                         .unwrap_or(0);
                     Some((0.0, (axis * 2) as u8 + (dir[axis] < 0.0) as u8))
                 } else {
-                    s.selection
+                    let boxes = if solid && !wanted { &s.collision } else { &s.selection };
+                    boxes
                         .iter()
                         .filter_map(|b| ray_box(local, dir, b, max))
                         .min_by(|a, b| a.0.total_cmp(&b.0))
@@ -746,28 +767,11 @@ pub fn raycast(c: &Content, block: &impl Cells, origin: DVec3, dir: DVec3, max: 
 
 /// Entry distance and entered face, `None` if missed or if the ray starts inside.
 fn ray_box(o: DVec3, d: DVec3, b: &[f32; 6], max: f64) -> Option<(f64, u8)> {
-    let mut t0 = f64::NEG_INFINITY;
-    let mut t1 = max;
-    let mut face = 0u8;
-    for i in 0..3 {
-        let (lo, hi) = (b[i] as f64, b[i + 3] as f64);
-        if d[i].abs() < 1e-12 {
-            if o[i] < lo || o[i] > hi {
-                return None;
-            }
-            continue;
-        }
-        let a = (lo - o[i]) / d[i];
-        let c = (hi - o[i]) / d[i];
-        let (near, far) = if a < c { (a, c) } else { (c, a) };
-        if near > t0 {
-            t0 = near;
-            // Entering through the low side means the -axis face.
-            face = (i * 2) as u8 + if d[i] > 0.0 { 0 } else { 1 };
-        }
-        t1 = t1.min(far);
-    }
-    (t0 <= t1 && t0 >= 0.0).then_some((t0, face))
+    let lo = DVec3::new(b[0] as f64, b[1] as f64, b[2] as f64);
+    let hi = DVec3::new(b[3] as f64, b[4] as f64, b[5] as f64);
+    slab(o, d, lo, hi, max)
+        .filter(|s| s.0 >= 0.0)
+        .map(|s| (s.0, s.2))
 }
 
 /// Whether liquid fills the block `level` above the feet at `pos` (0 the feet, the eye height for
@@ -833,6 +837,8 @@ pub struct Control {
     pub ground: f64,
     /// Acceleration in the air.
     pub air: f64,
+    /// Acceleration in liquids (vanilla's 0.02, times `SWIM_SPEED`).
+    pub liquid: f64,
     /// Jump speed when it jumps off the ground, 0 = not jumping.
     pub jump: f64,
     /// Added to the velocity with a jump (a sprinting player's leap).
@@ -847,15 +853,54 @@ pub struct Control {
     pub careful: bool,
 }
 
-/// The walker's box and the world's pull.
+/// Vanilla's acceleration in liquids.
+pub const SWIM: f64 = 0.02;
+
+/// The walker's box, the world's pull, and what its attributes say of how it moves.
 #[derive(Clone, Copy)]
 pub struct Frame {
     pub half_width: f64,
     pub height: f64,
-    /// Blocks it walks up without jumping (0.6).
-    pub step: f64,
     /// Blocks per tick squared.
     pub gravity: f64,
+    pub moves: Moves,
+}
+
+/// What a body's attributes say of how it moves, the same on its client and the server.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Moves {
+    /// Blocks it walks up without jumping (0.6).
+    pub step: f64,
+    /// Multipliers (1): on its dimension's gravity, its own push in liquids, its flight, its push
+    /// in the air, how slippery the ground is under it, its climbing.
+    pub gravity: f64,
+    pub swim: f64,
+    pub fly: f64,
+    pub air: f64,
+    pub slip: f64,
+    pub climb: f64,
+}
+
+impl Default for Moves {
+    fn default() -> Self {
+        Moves { step: 0.6, gravity: 1.0, swim: 1.0, fly: 1.0, air: 1.0, slip: 1.0, climb: 1.0 }
+    }
+}
+
+impl Moves {
+    /// From its attributes, by id.
+    pub fn of(mut attr: impl FnMut(u32) -> f64) -> Moves {
+        use crate::registry::attr as a;
+        Moves {
+            step: attr(a::STEP_HEIGHT),
+            gravity: attr(a::GRAVITY),
+            swim: attr(a::SWIM_SPEED),
+            fly: attr(a::FLYING_SPEED),
+            air: attr(a::AIR_CONTROL),
+            slip: attr(a::SLIPPERINESS),
+            climb: attr(a::CLIMB_SPEED),
+        }
+    }
 }
 
 pub struct Walked {
@@ -888,10 +933,12 @@ pub fn walk(
         .liquid(c, feet)
         .or(block.main(feet))
         .map_or(1.0, |s| c.states[s as usize].drag as f64);
+    // Never quite all of the speed kept, however slippery it is made.
     let slip_at = |y: f64| {
-        block
+        let ground = block
             .main(IVec3::new(feet.x, (y - 0.5).floor() as i32, feet.z))
-            .map_or(0.6, |s| c.states[s as usize].friction as f64)
+            .map_or(0.6, |s| c.states[s as usize].friction as f64);
+        (ground * f.moves.slip).min(0.999)
     };
     let accelerate = |vel: &mut DVec3, k: f64| {
         let len2 = ctl.wish.length_squared();
@@ -901,7 +948,7 @@ pub fn walk(
     };
     let mut jumped = false;
     if liquid {
-        accelerate(vel, 0.02 * drag);
+        accelerate(vel, ctl.liquid * drag);
         if ctl.swim {
             vel.y += 0.04;
         }
@@ -916,7 +963,7 @@ pub fn walk(
         }
     } else {
         let slip = slip_at(pos.y);
-        let accel = if on_ground { ctl.ground * (0.216 / (slip * slip * slip)) } else { ctl.air };
+        let accel = if on_ground { ctl.ground * (0.216 / (slip * slip * slip)) } else { ctl.air * f.moves.air };
         if ctl.jump > 0.0 && on_ground {
             vel.y = ctl.jump;
             *vel += ctl.jump_boost;
@@ -924,9 +971,10 @@ pub fn walk(
         }
         accelerate(vel, accel * drag);
         if climbing {
-            vel.x = vel.x.clamp(-0.15, 0.15);
-            vel.z = vel.z.clamp(-0.15, 0.15);
-            vel.y = vel.y.max(if ctl.careful { 0.0 } else { -0.15 });
+            let most = 0.15 * f.moves.climb;
+            vel.x = vel.x.clamp(-most, most);
+            vel.z = vel.z.clamp(-most, most);
+            vel.y = vel.y.max(if ctl.careful { 0.0 } else { -most });
         }
     }
     // Careful at an edge (vanilla's sneaking): each horizontal component is cut back in 0.05
@@ -952,7 +1000,7 @@ pub fn walk(
         }
     }
     let before = *pos;
-    let r = move_box_with(c, block, bodies, skip, *pos, f.half_width, f.height, *vel, if on_ground { f.step } else { 0.0 });
+    let r = move_box_with(c, block, bodies, skip, *pos, f.half_width, f.height, *vel, if on_ground { f.moves.step } else { 0.0 });
     *pos = r.pos;
     for i in 0..3 {
         if r.hit[i] {
@@ -960,7 +1008,7 @@ pub fn walk(
         }
     }
     if (r.hit[0] || r.hit[2] || ctl.jump > 0.0) && climbing {
-        vel.y = 0.2;
+        vel.y = 0.2 * f.moves.climb;
     }
     if liquid {
         let keep = if ctl.sprint { 0.9 } else { 0.8 };
@@ -1062,7 +1110,7 @@ mod knock_tests {
 
     #[test]
     fn knock_is_vanillas() {
-        let away = DVec3::X;
+        let away = DVec3::X * 0.4;
         // On the ground: half the speed, away and up, never more than that up.
         assert_eq!(knock(DVec3::new(0.2, 0.0, 0.1), away, true, 0.0), DVec3::new(0.5, 0.4, 0.05));
         assert_eq!(knock(DVec3::new(0.0, 0.3, 0.0), away, true, 0.0).y, 0.4);

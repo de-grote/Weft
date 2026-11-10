@@ -19,7 +19,7 @@ use weft_abi::{BlockModel, FACE_DIRS};
 
 use crate::background;
 use crate::config;
-use crate::content::{Content, StateInfo, content, face_paint};
+use crate::content::{Content, StateInfo, content};
 use crate::gpu_layout::terrain::lod as lod_gpu;
 use crate::gpu_layout::{CORNERS, face, lod_box, lod_record};
 use crate::server::lod_tops::{LodColumn, Span, shows};
@@ -189,21 +189,21 @@ pub fn mesh(c: &Content, key: TileKey, words: &[u32], columns: &Columns) -> (Vec
     let h = height_grid(words);
     let looks = super::looks::current();
     let ctm = super::ctm::current();
+    // Far off a face is its first layer.
     let face_of = |state: u32, dir: usize| {
         let info = &c.states[state as usize];
         let tex = looks.drawn(state, info).textures[dir] & face::TEX_MASK;
-        let paint = face_paint(info, dir, ctm.has_overlay(tex));
-        let tint = if paint.base_tinted || paint.overlay_tinted { info.tint as u32 } else { 0 };
-        (tex, tint)
+        let first = super::mesher::face_layers(c, info, tex, dir)[0];
+        (first.tex, first.tint as u32)
     };
-    let mut out = Vec::new();
+    let mut faces = Vec::new();
     let (mut lo, mut hi) = (i32::MAX, i32::MIN);
     for j in 0..CELLS {
         for i in 0..CELLS {
             let y = column(&h, i, j);
             let (top, biome, _, light) = at(i, j);
             let (tex, tint) = face_of(top, 3);
-            out.push(quad(3, i * s, y, j * s, (s, 1, s), tex, tint, biome, ao_bits(&h, i, j, 3, y), light));
+            faces.push(Face { dir: 3, at: [i * s, y, j * s], size: [s, 1, s], tex, tint, biome, ao: ao_bits(&h, i, j, 3, y), light });
             (lo, hi) = (lo.min(y), hi.max(y + 1));
         }
     }
@@ -224,20 +224,84 @@ pub fn mesh(c: &Content, key: TileKey, words: &[u32], columns: &Columns) -> (Vec
                     continue;
                 }
                 let skirt = ny.min(y - 1) - s - 2;
+                let dir = dir as u32;
                 if ny < y {
-                    let (tex, tint) = face_of(top, dir);
-                    out.push(quad(dir as u32, i * s, y, j * s, (s, 1, s), tex, tint, biome, ao_bits(&h, i, j, dir, y), light));
+                    let (tex, tint) = face_of(top, dir as usize);
+                    let ao = ao_bits(&h, i, j, dir as usize, y);
+                    faces.push(Face { dir, at: [i * s, y, j * s], size: [s, 1, s], tex, tint, biome, ao, light });
                 }
-                let (tex, tint) = face_of(under, dir);
+                let (tex, tint) = face_of(under, dir as usize);
                 let top_y = if ny < y { y - 1 } else { y };
-                let ao = ao_span(&h, i, j, dir, top_y, (ny + 1).min(top_y));
-                out.push(quad(dir as u32, i * s, skirt + 1, j * s, (s, y - 1 - skirt, s), tex, tint, biome, ao, light));
+                let ao = ao_span(&h, i, j, dir as usize, top_y, (ny + 1).min(top_y));
+                faces.push(Face { dir, at: [i * s, skirt + 1, j * s], size: [s, y - 1 - skirt, s], tex, tint, biome, ao, light });
                 lo = lo.min(skirt + 1);
             }
         }
     }
+    let mut out: Vec<[u32; 4]> = merged(faces)
+        .into_iter()
+        .map(|f| quad(f.dir, f.at[0], f.at[1], f.at[2], (f.size[0], f.size[1], f.size[2]), f.tex, f.tint, f.biome, f.ao, f.light))
+        .collect();
     add_structures(&mut out, &mut lo, &mut hi, c, key, words, columns, &h, &face_of, &ctm);
     (out, (lo, hi))
+}
+
+/// A face of a tile before it is packed.
+#[derive(Clone, Copy, PartialEq)]
+struct Face {
+    dir: u32,
+    at: [i32; 3],
+    size: [i32; 3],
+    tex: u32,
+    tint: u32,
+    biome: u32,
+    ao: u32,
+    light: u32,
+}
+
+/// `faces` with each run of neighbors alike along a row made one face: a flat stretch of ground
+/// or a straight cliff is a few quads, not one a cell. Walls facing x run along z, the others
+/// along x; a face stretches only where its shading would (the corners at both ends of the
+/// stretch shaded alike), and no further than a quad's size field holds.
+fn merged(mut faces: Vec<Face>) -> Vec<Face> {
+    let along = |f: &Face| if f.dir <= 1 { 2 } else { 0 };
+    // Alike but for where along the row: sorted together, in order along it.
+    let key = |f: &Face| {
+        let a = along(f);
+        let mut pos = f.at;
+        pos[a] = 0;
+        (f.dir, pos, f.size, f.tex, f.tint, f.biome, f.ao, f.light, f.at[a])
+    };
+    faces.sort_unstable_by_key(key);
+    let most = (1 << crate::gpu_layout::lod_face::SIZE_BITS) - 1;
+    let mut out: Vec<Face> = Vec::with_capacity(faces.len());
+    for f in faces {
+        if let Some(last) = out.last_mut() {
+            let a = along(&f);
+            let (mut a_pos, mut f_pos) = (last.at, f.at);
+            (a_pos[a], f_pos[a]) = (0, 0);
+            let mut a_size = last.size;
+            a_size[a] = f.size[a];
+            let alike = Face { at: f_pos, ..f } == Face { at: a_pos, size: a_size, ..*last };
+            if alike && last.at[a] + last.size[a] == f.at[a] && last.size[a] + f.size[a] <= most && stretches(f.dir, f.ao, a) {
+                last.size[a] += f.size[a];
+                continue;
+            }
+        }
+        out.push(f);
+    }
+    out
+}
+
+/// Whether a face's shading holds when it is stretched along axis `along`: each corner shaded
+/// like the one at the other end of the face.
+fn stretches(dir: u32, ao: u32, along: usize) -> bool {
+    let corners = &CORNERS[dir as usize];
+    let shade = |k: usize| (ao >> (2 * k)) & 3;
+    (0..4).all(|k| {
+        let other = (0..4).find(|&m| m != k && (0..3).all(|ax| ax == along || corners[m][ax] == corners[k][ax]));
+        other.is_none_or(|m| shade(m) == shade(k))
+    })
 }
 
 fn height_grid(words: &[u32]) -> [[i32; GRID]; GRID] {

@@ -85,7 +85,8 @@ pub async fn reach_and_mining_attributes(t: T) -> R {
     t.press("core:attack");
     t.secs(0.3).await?;
     t.check_eq(t.block(far).await?, "base:stone".to_string(), "out of reach at first");
-    t.op("attr_mod me core:block_reach reach 0 10 0").await?;
+    t.op("attr_mod me core:block_reach reach core:add 10 0")
+        .await?;
     t.secs(0.2).await?;
     t.press("core:attack");
     t.until("reached", Duration::from_secs(2), |t| t.c().block(far).is_some_and(|s| s == 0))
@@ -101,7 +102,8 @@ pub async fn reach_and_mining_attributes(t: T) -> R {
         .await?;
     t.look_at(near);
     t.frames(3).await?;
-    t.op("attr_mod me core:mining_speed haste 0 49 0").await?;
+    t.op("attr_mod me core:mining_speed haste core:add 49 0")
+        .await?;
     t.secs(0.2).await?;
     // Dirt takes 0.75 s by hand, and the server must not call this too soon.
     t.hold("core:attack", 0.3);

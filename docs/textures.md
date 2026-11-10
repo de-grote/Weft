@@ -74,13 +74,16 @@ If both files exist, `_e` overrides `_s`.\
 Glow works for blocks and for entity skins (`_e` next to the skin png).
 
 ## Overlays
-If `<texture>.png` has a `<texture>_overlay.png` next to it, the overlay is drawn over the face
-and takes the block's tint instead of the face itself.\
-There is exactly one overlay per texture and it is always tinted, (there are no `_overlay1` or conditions).\
-That's how grass sides are done: the dirt side stays brown, the grass fringe gets the biome's color.\
+A block's face is layers, pictures one over the other, set in code:
+`.sides("dirt").layer("grass_side_overlay").tint_kind(&tints::GRASS)`.\
+That's how grass sides are done: the dirt stays brown, the grass fringe gets the biome's color.\
+Each layer is drawn by itself over the one under it, with its own animation, `.ctm` and tint.\
+A fixed tint (`.tint(0x303038)`) makes a tinted copy of the picture when the game loads, every
+frame and connected tile too, so one picture is many blocks. A pack changes them by replacing
+the pictures, like any other.\
 Different looks for different block states (a lit furnace) are different textures, not overlays.
 
-The overlay has no `_e` of its own, the glow of a face comes from the base texture's `_e`.
+Each layer's `_e` glows where that layer shows.
 
 ## Debugging
 A broken picture never stops the game: a texture that is missing or has a wrong size shows the missing

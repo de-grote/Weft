@@ -1,4 +1,0 @@
-method = compact
-tiles = bricks_top/0-4
-inner_seams = true
-blocks = base:bricks

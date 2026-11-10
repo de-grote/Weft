@@ -32,6 +32,10 @@ impl ClientView {
     pub fn attribute(&self, a: &crate::Attribute) -> f64 {
         unsafe { (host().client_attribute)(self.raw, abi::Str::new(a.name())) }
     }
+    /// The level of `effect` on the local player, 0 without it (poisoned hearts).
+    pub fn effect_level(&self, effect: &crate::EntityEffect) -> u32 {
+        unsafe { (host().client_effect_level)(self.raw, effect.id()) }
+    }
     /// How charged the next swing is, 0..1: for a bar of your own.
     pub fn swing_strength(&self) -> f32 {
         unsafe { (host().client_swing_strength)(self.raw) }
@@ -601,6 +605,35 @@ impl Ui {
         self.button_args(key, &[], s, f)
     }
 
+    /// A button that does something more when clicked twice in a row (a world in a list: once
+    /// selects, twice plays).
+    pub fn button_double(
+        &mut self,
+        key: &str,
+        s: S,
+        f: impl Fn(&ClientView) + Send + Sync + 'static,
+        double: impl Fn(&ClientView) + Send + Sync + 'static,
+    ) {
+        let mut n = node(k::BUTTON, s);
+        n.on_click = callback(move |a: &mut abi::UiArgs| f(&ClientView { raw: a.client }));
+        n.on_double_click = callback(move |a: &mut abi::UiArgs| double(&ClientView { raw: a.client }));
+        if n.class.len == 0 {
+            n.class = Str::new("button");
+        }
+        self.with(n, |ui| ui.text_styled(S::column().class("button").no_wrap(), key, &[]));
+    }
+
+    /// A button showing a picture (a texture like `image`'s, `"mymod:gui/sort"`, `w` by `h` GUI
+    /// pixels) and nothing else: what it does goes in its tooltip (`S::tooltip`).
+    pub fn icon_button(&mut self, texture: &str, w: f32, h: f32, s: S, f: impl Fn(&ClientView) + Send + Sync + 'static) {
+        let mut n = node(k::BUTTON, s.size(w + 2.0, h + 2.0).pad(1.0));
+        n.on_click = callback(move |a: &mut abi::UiArgs| f(&ClientView { raw: a.client }));
+        if n.class.len == 0 {
+            n.class = Str::new("button");
+        }
+        self.with(n, |ui| ui.image(texture, w, h));
+    }
+
     /// A button whose label has arguments (`settings.gui_scale` with the scale).
     pub fn button_args(&mut self, key: &str, args: &[Arg], s: S, f: impl Fn(&ClientView) + Send + Sync + 'static) {
         let mut n = node(k::BUTTON, s);
@@ -730,7 +763,14 @@ impl Icons<'_> {
     /// Any `abi::icon_effect` by `f`'s value (none: 1).
     pub fn effect(mut self, kind: u32, amount: f32, f: Option<Box<dyn Fn(&ClientView) -> f32 + Send + Sync>>) -> Self {
         let bind = f.map_or(abi::Callback::NONE, |f| bind_cb(move |c| f(c)));
-        self.effects.push(abi::IconEffect { kind, bind, amount });
+        self.effects
+            .push(abi::IconEffect { kind, bind, amount, class: Str::EMPTY });
+        self
+    }
+    /// Drawn in `class`'s icons instead while `f` is above 0 (food turned green by hunger).
+    pub fn look_while(mut self, class: &'static str, f: impl Fn(&ClientView) -> f32 + Send + Sync + 'static) -> Self {
+        self.effects
+            .push(abi::IconEffect { kind: abi::icon_effect::LOOK, bind: bind_cb(f), amount: 0.0, class: Str::new(class) });
         self
     }
 }

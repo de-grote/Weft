@@ -1,7 +1,6 @@
 //! Vanilla's status effects, each a few attribute modifiers or hazards with an icon, and a potion
 //! for each: drunk, it gives the effect and leaves the bottle.
 
-use weft_sdk::abi::attr_op as op;
 use weft_sdk::attribute as a;
 use weft_sdk::*;
 
@@ -72,20 +71,20 @@ pub fn register(r: &mut Registry) {
 
     status(r, &SPEED, 0x33EBFF)
         .beneficial()
-        .modifier(Modifier::new(&a::MOVEMENT_SPEED, op::MULTIPLY_BASE, 0.2));
+        .modifier(Modifier::percent(&a::MOVEMENT_SPEED, 0.2));
     status(r, &SLOWNESS, 0x8BAFE0)
         .harmful()
-        .modifier(Modifier::new(&a::MOVEMENT_SPEED, op::MULTIPLY_BASE, -0.15));
+        .modifier(Modifier::percent(&a::MOVEMENT_SPEED, -0.15));
     status(r, &HASTE, 0xD9C043)
         .beneficial()
-        .modifier(Modifier::new(&a::MINING_SPEED, op::MULTIPLY_BASE, 0.2))
-        .modifier(Modifier::new(&a::ATTACK_SPEED, op::MULTIPLY_BASE, 0.1));
+        .modifier(Modifier::percent(&a::MINING_SPEED, 0.2))
+        .modifier(Modifier::percent(&a::ATTACK_SPEED, 0.1));
     // Vanilla's steep steps: a third, a ninth, then next to nothing.
     let mut fatigue = status(r, &MINING_FATIGUE, 0x4A4217)
         .harmful()
-        .modifier(Modifier::new(&a::ATTACK_SPEED, op::MULTIPLY_BASE, -0.1));
+        .modifier(Modifier::percent(&a::ATTACK_SPEED, -0.1));
     for (level, share) in [(1, 0.3), (2, 0.09), (3, 0.0027), (4, 0.00081)] {
-        fatigue = fatigue.modifier_at(level, Modifier::new(&a::MINING_SPEED, op::MULTIPLY_TOTAL, share - 1.0));
+        fatigue = fatigue.modifier_at(level, Modifier::mul(&a::MINING_SPEED, share));
     }
     // Past IV as at IV.
     drop(fatigue);
@@ -102,13 +101,13 @@ pub fn register(r: &mut Registry) {
         .modifier(Modifier::add(&a::SAFE_FALL, 1.0));
     status(r, &SLOW_FALLING, 0xF3CFB9)
         .beneficial()
-        .modifier(Modifier::new(&a::GRAVITY, op::SET, 0.125))
-        .modifier(Modifier::new(&a::FALL_DAMAGE_MULTIPLIER, op::SET, 0.0));
+        .modifier(Modifier::set(&a::GRAVITY, 0.125))
+        .modifier(Modifier::set(&a::FALL_DAMAGE_MULTIPLIER, 0.0));
     // Up at a twentieth of a block a tick a level, as vanilla's, what drag leaves of a gravity
     // turned around.
     let mut levitation = status(r, &LEVITATION, 0xCEFFFF).harmful();
     for level in 1..=5 {
-        levitation = levitation.modifier_at(level, Modifier::new(&a::GRAVITY, op::SET, -0.0125 * level as f64));
+        levitation = levitation.modifier_at(level, Modifier::set(&a::GRAVITY, -0.0125 * level as f64));
     }
     drop(levitation);
     // Vanilla's: a heal or a hurt every so many ticks, half as many with every level.
@@ -129,13 +128,13 @@ pub fn register(r: &mut Registry) {
         .modifier(Modifier::add(&a::DAMAGE_RESISTANCE, 0.2));
     status(r, &FIRE_RESISTANCE, 0xFF9900)
         .beneficial()
-        .modifier(Modifier::new(&a::FIRE_RESISTANCE, op::SET, 1.0));
+        .modifier(Modifier::set(&a::FIRE_RESISTANCE, 1.0));
     status(r, &HEALTH_BOOST, 0xF87D23)
         .beneficial()
         .modifier(Modifier::add(&a::MAX_HEALTH, 4.0));
     status(r, &NIGHT_VISION, 0xC2FF66)
         .beneficial()
-        .modifier(Modifier::new(&a::NIGHT_VISION, op::SET, 1.0));
+        .modifier(Modifier::set(&a::NIGHT_VISION, 1.0));
     status(r, &BLINDNESS, 0x1F1F23)
         .harmful()
         .screen(&BLINDNESS_SCREEN);
@@ -143,7 +142,7 @@ pub fn register(r: &mut Registry) {
     status(r, &INVISIBILITY, 0xF6F6F6)
         .beneficial()
         .hides()
-        .modifier(Modifier::new(&a::VISIBILITY, op::MULTIPLY_TOTAL, -0.93));
+        .modifier(Modifier::mul(&a::VISIBILITY, 0.07));
     // Twice as much a level, as vanilla's, up to VIII.
     for (e, color, amount, cause, harmful) in
         [(&INSTANT_HEALTH, 0xF82423, -4.0, &damage_causes::HEAL, false), (&INSTANT_DAMAGE, 0xA9656A, 6.0, &MAGIC, true)]
@@ -159,7 +158,7 @@ pub fn register(r: &mut Registry) {
         .modifier(Modifier::add(&EXHAUSTION, 0.005));
     status(r, &WATER_BREATHING, 0x98DAC0)
         .beneficial()
-        .modifier(Modifier::new(&BREATHES_UNDER_WATER, op::SET, 1.0));
+        .modifier(Modifier::set(&BREATHES_UNDER_WATER, 1.0));
     status(r, &NAUSEA, 0x551D4A)
         .harmful()
         .screen(&NAUSEA_SCREEN);

@@ -9,7 +9,9 @@
 //! - an idol from a Blockbench model file (bones, a mesh pair of wings) that idles by keyframes
 //!   and bows when used, and an orb whose model is built in code (a sphere mesh and a ring of
 //!   stones on a child bone) but animated from a file,
-//! - the player waves when using the rune: keyframes for the player's model, seen from anywhere.
+//! - the player waves when using the rune: keyframes for the player's model, seen from anywhere,
+//! - items drawn from layers: a ruby that is base's diamond tinted red (one picture, many
+//!   colors), and a wand put together from a stick and a tinted diamond on top of it.
 
 use weft_sdk::*;
 
@@ -108,14 +110,15 @@ pub fn register(r: &mut Registry) {
     r.tint_kind(&GLOW, 0xc080ff);
     r.edit(&PLAINS).tint(&GLOW, 0x40e0c0);
     r.block(&GLOW_MOSS)
-        .tint(&GLOW)
+        .tint_kind(&GLOW)
         .hardness(0.6)
         .mined_by("shovel", tool_tier::HAND);
     // A glowing birch (a log's `tree` component grows it from a sapling or worldgen) and
     // flower; not generated in the world, only from the creative tabs.
     static TREE_LEAVES: Component<BlockRef> = Component::named("tree_leaves");
     r.block(&GLOW_LOG)
-        .textures("glow_log_top", "glow_log", "glow_log_top")
+        .texture("glow_log")
+        .ends("glow_log_top")
         .hardness(2.0)
         .mined_by("axe", tool_tier::HAND)
         .tag("logs")
@@ -123,7 +126,7 @@ pub fn register(r: &mut Registry) {
     r.block(&GLOW_LEAVES)
         .cutout()
         .light_opacity(1)
-        .tint(&GLOW)
+        .tint_kind(&GLOW)
         .hardness(0.2)
         .tag("leaves")
         .mined_by("shears", tool_tier::HAND);
@@ -137,7 +140,7 @@ pub fn register(r: &mut Registry) {
     r.block(&GLOW_FLOWER)
         .plant()
         .needs_below("#plant_soil")
-        .tint(&GLOW);
+        .tint_kind(&GLOW);
     r.block(&GLOW_CRYSTAL)
         .hardness(1.5)
         .mined_by("pickaxe", tool_tier::HAND)
@@ -200,6 +203,42 @@ pub fn register(r: &mut Registry) {
 
     r.set_animations(&PLAYER, "testmod:player");
     r.item(&TOTEM).max_stack(1);
+    // An item's look is layers, a stack's the same (`stack.with_layers(Layers::new()...)`
+    // replaces it per stack). `tint` colors the layer just before it, multiplying: white
+    // parts take the color. A plain item is one layer.
+    static RUBY: Item = Item::named("ruby");
+    static WAND: Item = Item::named("wand");
+    r.item(&RUBY).texture("base:diamond").tint(0xE0204A);
+    r.item(&WAND)
+        .layer("base:stick")
+        .layer("base:diamond")
+        .tint(0x40E0FF)
+        .max_stack(1)
+        .handheld();
+    // A block's faces are layers the same way, picked by `texture`, `top`, `sides` and the
+    // like: wool dyed by a tint baked in as the game loads, and stone with grass over it that
+    // the biome colors, as a grass block's sides.
+    static BLACK_WOOL: Block = Block::named("black_wool");
+    static MOSSY_STONE: Block = Block::named("mossy_stone");
+    r.block(&BLACK_WOOL)
+        .texture("base:wool_white")
+        .tint(0x303038)
+        .hardness(0.8);
+    // Tinted glass keeps the glass's connected edges, the tiles tinted too, and joins plain
+    // glass: `glass.ctm` connects by tile, whatever the tint.
+    static RED_GLASS: Block = Block::named("red_glass");
+    r.block(&RED_GLASS)
+        .texture("base:glass")
+        .tint(0xE04040)
+        .cutout()
+        .cull_same()
+        .hardness(0.3);
+    r.block(&MOSSY_STONE)
+        .texture("base:stone")
+        .layer("base:grass_side_overlay")
+        .tint_kind(&tints::GRASS)
+        .hardness(1.5)
+        .mined_by("pickaxe", tool_tier::HAND);
     // Goes before what the other hand holds, and leaves it its turn with nothing to shoot.
     static LONG_BOW: Item = Item::named("long_bow");
     r.item(&LONG_BOW)

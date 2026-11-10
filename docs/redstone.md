@@ -87,7 +87,7 @@ r.block(&AND_GATE)
 
 // Wire that doesn't join base's. Textures: the dot on top, the line on the sides, in gray; power
 // colors it.
-r.block(&BLUE_WIRE).wire().textures("blue_dot", "blue_line", "blue_dot");
+r.block(&BLUE_WIRE).wire().texture("blue_line").ends("blue_dot");
 
 // Glass-like, and something a piston can't move.
 r.block(&CASING).signal_blocker();

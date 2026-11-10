@@ -111,6 +111,7 @@ pub mod entity_effect {
     pub static INSTANT: crate::Tag<EntityEffect> = crate::Tag::named(crate::abi::comp::ENTITY_EFFECT_INSTANT);
     pub static SCREEN: Component<Text, EntityEffect> = Component::named(crate::abi::comp::ENTITY_EFFECT_SCREEN);
     pub static HIDES: crate::Tag<EntityEffect> = crate::Tag::named(crate::abi::comp::ENTITY_EFFECT_HIDES);
+    pub static ON_TICK: Component<crate::abi::Callback, EntityEffect> = Component::named(crate::abi::comp::ENTITY_EFFECT_ON_TICK);
 }
 
 /// What a sound event is made of (`abi::comp::sound`).
@@ -262,6 +263,25 @@ pub mod sky {
     pub static HEIGHT: Component<f32, SkyObject> = Component::named(s::HEIGHT);
     pub static DRIFT: Component<f32, SkyObject> = Component::named(s::DRIFT);
     pub static ORDER: Component<i32, SkyObject> = Component::named(s::ORDER);
+}
+
+/// What a step is made of (`Registry::step`).
+pub mod step {
+    use crate::abi::comp::step as s;
+    use crate::kind::Step;
+    use crate::{Component, Text};
+    pub static CHAIN: Component<Text, Step> = Component::named(s::CHAIN);
+    pub static PHASE: Component<Text, Step> = Component::named(s::PHASE);
+    pub static AFTER: Component<Vec<String>, Step> = Component::named(s::AFTER);
+    pub static BEFORE: Component<Vec<String>, Step> = Component::named(s::BEFORE);
+    pub static CALL: Component<crate::abi::Callback, Step> = Component::named(s::CALL);
+}
+
+/// What a phase is made of (`Registry::phase`).
+pub mod phase {
+    use crate::kind::Phase;
+    use crate::{Component, Text};
+    pub static AFTER: Component<Text, Phase> = Component::named(crate::abi::comp::phase::AFTER);
 }
 
 /// What a HUD element is made of.
@@ -454,9 +474,11 @@ pub mod item {
     use crate::abi::comp::item as i;
     use crate::kind::Item;
     use crate::{Component, Text};
-    pub static TEXTURE: Component<Text, Item> = Component::named(i::TEXTURE);
+    /// How it and its stacks look (`abi::comp::LAYERS`); `ItemBuilder::texture`, `layers`, `tint`.
+    pub static LAYERS: Component<Text, Item> = Component::named(crate::abi::comp::LAYERS);
     pub static BLOCK: Component<Text, Item> = Component::named(i::BLOCK);
     pub static ON_USE: Component<crate::abi::Callback, Item> = Component::named(i::ON_USE);
+    pub static ON_RELEASE: Component<crate::abi::Callback, Item> = Component::named(i::ON_RELEASE);
     pub static CONDITION: Component<crate::abi::Callback, Item> = Component::named(i::CONDITION);
 }
 
@@ -520,6 +542,7 @@ pub mod block {
     pub static SIGNAL_GATE: Component<Callback, Block> = Component::named(b::SIGNAL_GATE);
     pub static SIGNAL_READ: Component<Callback, Block> = Component::named(b::SIGNAL_READ);
     pub static OPENS: Component<Text, Block> = Component::named(b::OPENS);
+    pub static SNEAK_USE: Component<u32, Block> = Component::named(b::SNEAK_USE);
     pub static SHARES_CELL: Component<crate::Matcher, Block> = Component::named(b::SHARES_CELL);
     pub static MODEL_FILE: Component<Text, Block> = Component::named(b::MODEL_FILE);
     pub static MODEL_TEXTURES: Component<Vec<abi::ModelTexture>, Block> = Component::named(b::MODEL_TEXTURES);
@@ -564,6 +587,7 @@ pub mod entity {
     pub static TEMPLATE: Component<Text, Entity> = Component::named(e::TEMPLATE);
     pub static BLOCK: Component<Text, Entity> = Component::named(e::BLOCK);
     pub static SEATS: Component<Vec<abi::Seat>, Entity> = Component::named(e::SEATS);
+    pub static PROJECTILE: Component<abi::Projectile, Entity> = Component::named(e::PROJECTILE);
     pub static LIGHT_AT: Component<[f32; 3], Entity> = Component::named(e::LIGHT_AT);
     pub static SHOWN_SLOTS: Component<Vec<u32>, Entity> = Component::named(e::SHOWN_SLOTS);
     pub static ATTACH: Component<Vec<abi::Attach>, Entity> = Component::named(e::ATTACH);

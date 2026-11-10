@@ -142,9 +142,44 @@ impl Server {
                     r.stop_mining(id);
                 }
             }
-            ToServer::StopUsing => {
-                if let Some((r, entity)) = self.region(pi) {
-                    r.stop_using(entity);
+            ToServer::Keys { down, up } => {
+                let Some((r, entity)) = self.region(pi) else { return };
+                let now = r.time;
+                let mut told = Vec::new();
+                if let Some(e) = r.entities.get_mut(entity) {
+                    // Downs first: a tap comes down and up in one message.
+                    for key in down
+                        .into_iter()
+                        .filter(|&k| (k as usize) < c.game.keys.len())
+                    {
+                        if !e.keys.iter().any(|k| k.0 == key) {
+                            e.keys.push((key, now));
+                            told.push(abi::KeyChange { player: entity, key, down: 1, held_ticks: 0, pad: 0 });
+                        }
+                    }
+                    for key in up.into_iter().filter(|&k| (k as usize) < c.game.keys.len()) {
+                        if let Some(i) = e.keys.iter().position(|k| k.0 == key) {
+                            let (_, since) = e.keys.swap_remove(i);
+                            told.push(abi::KeyChange {
+                                player: entity,
+                                key,
+                                down: 0,
+                                held_ticks: now.saturating_sub(since) as u32,
+                                pad: 0,
+                            });
+                        }
+                    }
+                }
+                // Letting go of the use button is the end of using what it held (a bow shoots).
+                let use_key = c.game.keys.iter().position(|k| k.name == "core:use");
+                if told
+                    .iter()
+                    .any(|k| k.down == 0 && Some(k.key as usize) == use_key)
+                {
+                    r.release_use(c, entity);
+                }
+                for k in told {
+                    r.emit_engine(c, abi::event::KEY, &k);
                 }
             }
             ToServer::SwapHands => {
@@ -212,7 +247,7 @@ impl Server {
                 e.in_liquid = here.in_liquid;
                 r.fall_effects(c, entity, fell, splash);
                 if let Some(amount) = fell.and_then(|f| r.fall_damage(c, entity, f)) {
-                    r.damage(c, entity, amount, 0, abi::damage_cause::FALL);
+                    r.damage(c, entity, &abi::Damage::new(amount, abi::damage_cause::FALL));
                 }
             }
 
@@ -262,8 +297,14 @@ impl Server {
                 }
             }
 
-            ToServer::Use { pos, part, face, look, hit, sneak, frame } => {
+            ToServer::Use { pos, part, face, look, hit, sneak, frame, placed } => {
                 let Some((r, _)) = self.region(pi) else { return };
+                // What the client shows there is set right at the end of the tick, placed or not.
+                if let Some(p) = placed.filter(|_| frame == 0) {
+                    if r.get(p).is_some() {
+                        r.resend_cell(p);
+                    }
+                }
                 let (frame, pos) = r.landed_as(frame, pos);
                 let Some((r, entity)) = self.region(pi) else { return };
                 let Some(e) = r.entities.get(entity) else { return };
@@ -274,7 +315,7 @@ impl Server {
                     if !within(o.to_local(eye), pos, reach) {
                         return None;
                     }
-                    Some(!sneak && d.player_use(c, pos, part, face, entity))
+                    Some(d.player_use(c, pos, part, face, entity, sneak))
                 });
                 match used {
                     Some(Some(true)) => {
@@ -338,8 +379,7 @@ impl Server {
 
             ToServer::Attack(target) => {
                 let Some((r, entity)) = self.region(pi) else { return };
-                let (Some(me), Some(t)) = (r.entities.get(entity), r.entities.get(target)) else { return };
-                if !in_reach(c, r, me, t) {
+                if !in_reach(c, r, entity, target) {
                     return;
                 }
                 r.melee(c, entity, target);
@@ -354,12 +394,7 @@ impl Server {
             ToServer::Interact(target) => {
                 let Some((r, entity)) = self.region(pi) else { return };
                 let Some(kind) = r.entities.get(target).map(|e| e.kind) else { return };
-                if !r
-                    .entities
-                    .get(entity)
-                    .zip(r.entities.get(target))
-                    .is_some_and(|(me, t)| in_reach(c, r, me, t))
-                {
+                if !in_reach(c, r, entity, target) {
                     return;
                 }
                 let held = r.entities.held(entity);
@@ -403,10 +438,15 @@ impl Server {
                 let creative = dims[p.dim as usize]
                     .entity(p.entity)
                     .is_some_and(|e| e.mode.has(crate::tag_bits::game_mode::CREATIVE_INVENTORY));
-                if let (true, Some(m), true) = (creative, &mut p.menu, item != 0 && (item as usize) < c.items.len()) {
+                let hot = button.wrapping_sub(menu::HOTBAR_SWAP);
+                if let (true, Some(m), true, true) = (creative, &mut p.menu, item != 0 && (item as usize) < c.items.len(), hot < 9) {
+                    if let Some(r) = dims[p.dim as usize].entity_region(p.entity) {
+                        menu::creative_to_hotbar(m, r, c, p.entity, hot as u32, item);
+                    }
+                } else if let (true, Some(m), true) = (creative, &mut p.menu, item != 0 && (item as usize) < c.items.len()) {
                     // Like vanilla: the same item adds one, anything else held is thrown away
                     // first, an empty hand takes a stack (left) or one (right).
-                    let max = c.max_stack(item);
+                    let max = c.max_stack(&ItemStack::new(item, 1));
                     m.cursor = if m.cursor.is_empty() {
                         ItemStack::new(item, if button == 1 { 1 } else { max })
                     } else if m.cursor.item == item && m.cursor.data == 0 {
@@ -453,9 +493,14 @@ impl Server {
                 let spawn = self.dims[c.spawn_dim as usize].spawn_point(c);
                 self.change_dim(c, pi, c.spawn_dim, spawn);
                 if let Some((r, entity)) = self.region(pi) {
-                    r.entities.reset_components(c, entity);
                     // A death ends every effect, as vanilla's.
                     let effect = c.game.fields.effect;
+                    let had: Vec<_> = crate::world::effects_on(r.entities.comps.get(&(entity, effect)).map(|b| &b[..]), r.time).collect();
+                    for f in had {
+                        let end = abi::EffectChange { entity, effect: f.id, level: f.level, ticks: 0, pad: 0 };
+                        r.emit_engine(c, abi::event::EFFECT_ENDED, &end);
+                    }
+                    r.entities.reset_components(c, entity);
                     r.entities.comps.insert((entity, effect), Box::default());
                     r.entities.dirty_comp.insert((entity, effect));
                     // The game mode's modifiers went with the rest.
@@ -574,7 +619,16 @@ impl Server {
                     if let Some(s) = storage {
                         save_player(&s.lock(), p, r);
                     }
-                    r.entities.remove(p.entity);
+                    // What it held it lets go of as it leaves.
+                    let held = r
+                        .entities
+                        .get(p.entity)
+                        .map_or(Vec::new(), |e| e.keys.clone());
+                    for (key, since) in held {
+                        let up = abi::KeyChange { player: p.entity, key, down: 0, held_ticks: r.time.saturating_sub(since) as u32, pad: 0 };
+                        r.emit_engine(c, abi::event::KEY, &up);
+                    }
+                    r.entities.remove(p.entity, abi::removal::LEFT);
                 }
                 p.conn.send(ToClient::Disconnect("bye".into()));
                 p.joined = false;
@@ -585,12 +639,41 @@ impl Server {
 
 /// Within its `ENTITY_REACH`, from the eyes to the nearest point of the target's box, like
 /// modern's; a player's with room for what its client saw last.
-pub(crate) fn in_reach(c: &Content, d: &Dim, me: &Entity, target: &Entity) -> bool {
+pub(crate) fn in_reach(c: &'static Content, d: &mut Dim, me: u64, target: u64) -> bool {
+    let reach = d.attribute(c, me, crate::registry::attr::ENTITY_REACH, false);
+    let (Some(me), Some(target)) = (d.entities.get(me), d.entities.get(target)) else { return false };
     let eye = me.pos + DVec3::Y * me.eye(c);
     let b = target.aabb(c);
-    let slack = if me.player { ENTITY_SLACK } else { 0.0 };
-    let reach = d.attribute(c, me.id, crate::registry::attr::ENTITY_REACH, false) + slack;
-    (eye.clamp(b.min, b.max) - eye).length_squared() <= reach * reach
+    let reach = reach + if me.player { ENTITY_SLACK } else { 0.0 };
+    (eye.clamp(b.min, b.max) - eye).length_squared() <= reach * reach && (me.player || sees(c, d, eye, target))
+}
+
+/// Whether nothing solid stands between `eye` and the middle or the top of `target`'s box, as
+/// vanilla's line of sight: a mob doesn't hit through a wall or a staircase's ceiling.
+/// Players aim by what their crosshair hits, which a wall already stops.
+fn sees(c: &Content, d: &Dim, eye: DVec3, target: &Entity) -> bool {
+    let b = target.aabb(c);
+    let middle = (b.min + b.max) / 2.0;
+    [middle, DVec3::new(middle.x, b.max.y - 0.1, middle.z)]
+        .into_iter()
+        .any(|to| {
+            let (mut from, mut left) = (eye, (to - eye).length());
+            let dir = (to - eye) / left.max(1e-9);
+            // Plants and the like are seen through: only what stops a walker blocks the view.
+            for _ in 0..16 {
+                let Some(hit) = d.ray(c, from, dir, left, abi::ray::BLOCKS) else { return true };
+                if c.states[hit.state as usize].flags & weft_abi::block_flags::SOLID != 0 {
+                    return false;
+                }
+                let gone = hit.dist + 1e-3;
+                from += dir * gone;
+                left -= gone;
+                if left <= 0.0 {
+                    return true;
+                }
+            }
+            false
+        })
 }
 
 pub(super) fn within(eye: DVec3, block: IVec3, reach: f64) -> bool {
@@ -706,6 +789,7 @@ impl Dim {
                 face: face as u32,
                 has_target: target.is_some() as u32,
                 handled: 0,
+                held_ticks: 0,
             });
             if a.handled != 0 && a.stack != held && crate::host::known_item("on_use", &a.stack) {
                 self.entities.set_slot(entity, slot, a.stack);
@@ -753,6 +837,37 @@ impl Dim {
             } else if let Some(e) = self.entities.get_mut(id) {
                 e.use_done = Some((item, left - 1, slot));
             }
+        }
+    }
+
+    /// `id` let go of the use button: what it was using hears after how long (its
+    /// `comp::item::ON_RELEASE`: a bow shoots), then it stops.
+    pub fn release_use(&mut self, c: &'static Content, id: u64) {
+        let Some(e) = self.entities.get(id) else { return };
+        let (Some((item, left, slot)), total) = (e.use_done, e.using.0) else { return self.stop_using(id) };
+        self.stop_using(id);
+        let held = self.entities.inventory_slot(id, slot);
+        let Some((by, cb)) = c
+            .items
+            .get(item as usize)
+            .and_then(|d| d.on_release)
+            .filter(|_| held.item == item)
+        else {
+            return;
+        };
+        let a = self.call(by, cb, |w| abi::ItemUseArgs {
+            world: w,
+            entity: id,
+            stack: held,
+            slot,
+            pos: abi::BlockPos::ZERO,
+            face: 0,
+            has_target: 0,
+            handled: 0,
+            held_ticks: total.saturating_sub(left),
+        });
+        if a.handled != 0 && a.stack != held && crate::host::known_item("on_release", &a.stack) {
+            self.entities.set_slot(id, slot, a.stack);
         }
     }
 

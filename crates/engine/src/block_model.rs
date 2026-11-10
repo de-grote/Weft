@@ -22,6 +22,8 @@ pub struct FileBox {
     pub uv: [[f32; 4]; 6],
     pub turn: [u8; 6],
     pub tilt: weft_abi::BoxTilt,
+    /// `shade: false`: no shading by side.
+    pub flat: bool,
 }
 
 impl FileBox {
@@ -34,6 +36,7 @@ impl FileBox {
             max: self.max.map(|v| v / 16.0),
             textures: std::array::from_fn(|i| texture(&self.textures[i], i)),
             uv: self.uv,
+            flat: self.flat,
         }
     }
 }
@@ -163,6 +166,7 @@ pub fn load_with(name: &str, read: &dyn Fn(&str) -> Option<String>, own: &[(Stri
                 uv: [weft_abi::UV_NO_FACE; 6],
                 turn: [0; 6],
                 tilt: tilt(e),
+                flat: e.get("shade").and_then(Value::as_bool) == Some(false),
             };
             let faces = e.get("faces").and_then(Value::as_object);
             for (d, face) in FACES.iter().enumerate() {

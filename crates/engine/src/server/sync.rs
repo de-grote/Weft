@@ -373,7 +373,7 @@ fn send_own_state(c: &'static Content, p: &mut Player, dim: &mut DimSet) {
     let Some(reg) = dim.entity_region(p.entity) else { return };
     for &(_, told) in reg.entities.told.iter().filter(|h| h.0 == p.entity) {
         p.conn.send(match told {
-            entity::Told::Knock(away) => ToClient::Knock { away },
+            entity::Told::Knock(push) => ToClient::Knock { push },
             entity::Told::Add(add) => ToClient::Velocity { add },
             entity::Told::Velocity(v) => ToClient::SetVelocity(v),
             entity::Told::Look(look) => ToClient::Look(look),

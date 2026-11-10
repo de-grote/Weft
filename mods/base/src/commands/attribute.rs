@@ -14,7 +14,7 @@ pub fn register(r: &mut Registry) {
         match cmd.float("value") {
             Some(value) => {
                 for &id in &targets {
-                    w.attribute_add_modifier(id, &attr, MODIFIER, attr_op::SET, value, 0);
+                    w.attribute_add_modifier(id, MODIFIER, &Modifier::set(attr, value), 0);
                 }
                 cmd.reply("command.base.attribute.done", &[Arg::Text(&name), Arg::Float(value, 2), Arg::Int(targets.len() as i64)]);
             }

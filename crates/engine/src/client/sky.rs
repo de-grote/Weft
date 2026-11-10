@@ -140,7 +140,7 @@ fn average_color(assets: &Assets, l: &crate::content::LiquidDef) -> Vec3 {
     let img = c
         .textures
         .get(st.textures[0] as usize)
-        .and_then(|n| assets.read(n, "textures", "png"))
+        .and_then(|n| assets.read(&assets.picture(weft_abi::layers(n).next()?.name), "textures", "png"))
         .and_then(|b| decode_png(&b));
     let Some(img) = img else { return Vec3::splat(0.5) };
     let (mut sum, mut weight) = (Vec3::ZERO, 0.0);

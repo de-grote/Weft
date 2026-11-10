@@ -53,8 +53,8 @@ pub const ENGINE_KEYS: &[(&str, &str, u32)] = {
         // Vanilla's double tap of forward is a second way to sprint.
         ("core:sprint", "ControlLeft, double KeyW", MOVEMENT),
         ("core:crawl", "KeyC", MOVEMENT),
-        // And of jump to fly.
-        ("core:fly", "KeyF, double Space", MOVEMENT),
+        // A double tap of jump flies, as vanilla's; F is the other hand's.
+        ("core:fly", "double Space", MOVEMENT),
         // A spectator's wheel, where others have the hotbar's.
         ("core:fly_faster", "wheel_up", MOVEMENT),
         ("core:fly_slower", "wheel_down", MOVEMENT),
@@ -74,7 +74,9 @@ pub const ENGINE_KEYS: &[(&str, &str, u32)] = {
         // In a screen with a search field (the creative inventory, the recipe viewer).
         ("core:focus_search", "Tab", SCREEN),
         ("core:hide_hud", "F1", 0),
-        ("core:swap_hands", "KeyG", HANDS),
+        ("core:swap_hands", "KeyF", HANDS),
+        // Over a slot: its stack into the trash.
+        ("core:trash", "Delete", SCREEN),
         ("core:reload", "F8, F3+KeyT", 0),
         ("core:cycle_game_mode", "F3+F4", DEBUG),
         ("core:debug_options", "F3+F6", DEBUG),

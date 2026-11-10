@@ -103,7 +103,9 @@ pub fn named(name: &str) -> Option<Box<dyn Screen>> {
     Some(match name.as_str() {
         "core:title" => Box::new(Title),
         "core:pause" => Box::new(Pause),
-        "core:settings" | "core:chat_settings" | "core:sound" => Box::new(ConfigScreen { shown: Shown::Page(name) }),
+        "core:settings" | "core:video" | "core:accessibility" | "core:chat_settings" | "core:sound" => {
+            Box::new(ConfigScreen { shown: Shown::Page(name) })
+        }
         "core:language" => Box::new(LanguageScreen),
         "core:controls" => Box::new(Controls::default()),
         "core:mod_settings" => Box::new(ModSettings),
@@ -345,6 +347,8 @@ impl Screen for Profile {
                 label(ui, cx, "profile.avatar_hint", &[], "dim");
                 let dir = cx.settings.run_dir.join("skins");
                 button(ui, cx, "profile.skins_folder", &[], 120.0, move |_| crate::packs::open_folder(&dir));
+                ui.add(Kind::Container { class: None }, Style::default().h(4.0));
+                config_rows(ui, cx, "core:profile");
             });
             button(ui, cx, "menu.done", &[], 200.0, |c| c.requests.push(Request::Close));
         });
@@ -658,13 +662,15 @@ const LINKS_AT: i32 = 9;
 /// screen); some only in a world, the rules only for who may change them.
 fn settings_links(cx: &BuildCx) -> Vec<(&'static str, &'static str)> {
     let mut v = vec![
-        ("settings.language", "core:language"),
+        ("settings.video", "core:video"),
         ("settings.controls", "core:controls"),
         ("settings.sound", "core:sound"),
-        ("settings.mods", "core:mod_settings"),
+        ("settings.chat", "core:chat_settings"),
+        ("settings.accessibility", "core:accessibility"),
+        ("settings.language", "core:language"),
         ("settings.resource_packs", "core:resource_packs"),
         ("settings.shader_packs", "core:shader_packs"),
-        ("settings.chat", "core:chat_settings"),
+        ("settings.mods", "core:mod_settings"),
     ];
     if cx.in_game {
         v.push(("settings.hud", "core:hud_editor"));
@@ -676,6 +682,158 @@ fn settings_links(cx: &BuildCx) -> Vec<(&'static str, &'static str)> {
         }
     }
     v
+}
+
+/// A setting's row: a toggle or a choice as a button, a number as a label over a slider; locked
+/// (shown, not changed) when the server has its say or the world's rules are fixed.
+fn config_row(ui: &mut Ui, cx: &BuildCx, id: u32, d: &crate::config::ConfigDef, rules_locked: bool) {
+    use weft_abi::config_kind as ck;
+    let key = text::lang_key("config", &d.name);
+    let locked = (d.synced() && cx.remote) || rules_locked;
+    // A value's own name where it has one (a choice, gui scale 0), else the
+    // number through `.value`; looked up now, the bindings run without the language.
+    let small = d.kind != ck::FLOAT && d.max - d.min <= 64.0;
+    let names: Rc<Vec<String>> = Rc::new(
+        d.choices
+            .iter()
+            .cloned()
+            .chain(
+                small
+                    .then(|| (d.min as i64..=d.max as i64).map(|n| n.to_string()))
+                    .into_iter()
+                    .flatten(),
+            )
+            .filter(|n| cx.lang.has(&format!("{key}.{n}")))
+            .collect(),
+    );
+    let template = cx.lang.has(&format!("{key}.value"));
+    let show = move |d: &crate::config::ConfigDef, key: &str, v: f64| -> Arg {
+        let percent = d.flags & crate::tag_bits::config::PERCENT != 0;
+        let named = match d.kind {
+            ck::BOOL => return on_off(v != 0.0),
+            ck::CHOICE => d.choices.get(v as usize).cloned().unwrap_or_default(),
+            _ => d.show(if percent { (v * 100.0).round() } else { v }),
+        };
+        if names.contains(&named) {
+            Arg::Key(format!("{key}.{named}"))
+        } else if template {
+            Arg::Msg(text::Msg::new(&format!("{key}.value"), vec![Arg::Text(named)]))
+        } else {
+            Arg::Text(named)
+        }
+    };
+    let row = match d.kind {
+        ck::BOOL | ck::CHOICE => {
+            let (key2, d2, show) = (key.clone(), d.clone(), show.clone());
+            let (kind, count) = (d.kind, d.choices.len().max(1) as f64);
+            let b = ui.button(
+                "button",
+                Style::default().min_h(20.0).pad_xy(6.0, 4.0).stretch(),
+                Rc::new(move |_: &mut Ctx| {
+                    let v = crate::config::get(id);
+                    let next = if kind == ck::BOOL { 1.0 - v } else { (v + 1.0) % count };
+                    crate::config::set(id, next);
+                }),
+                |ui| {
+                    let (k, d3, show) = (key2.clone(), d2.clone(), show.clone());
+                    ui.text_bound(
+                        "button",
+                        Box::new(move |_: &Ctx| {
+                            ("settings.config_value".into(), vec![Arg::Key(k.clone()), show(&d3, &k, crate::config::get(id))])
+                        }),
+                    );
+                },
+            );
+            if let Kind::Button { enabled, .. } = &mut ui.nodes[b].kind {
+                *enabled = !locked;
+            }
+            b
+        }
+        _ => ui.container(Style::default().gap(2.0).stretch(), |ui| {
+            // Where a slider applied when let go is being dragged to, shown
+            // meanwhile.
+            let dragged: Rc<std::cell::Cell<Option<f64>>> = Rc::default();
+            let (k, d2, show, shown) = (key.clone(), d.clone(), show.clone(), dragged.clone());
+            ui.text_bound(
+                "default",
+                Box::new(move |_: &Ctx| {
+                    let v = shown.get().unwrap_or_else(|| crate::config::get(id));
+                    ("settings.config_value".into(), vec![Arg::Key(k.clone()), show(&d2, &k, v)])
+                }),
+            );
+            if !locked {
+                let (min, range) = (d.min, (d.max - d.min).max(1e-9));
+                let unit = if d.kind == weft_abi::config_kind::INT { 1.0 } else { range / 100.0 };
+                let steps = d.steps(unit);
+                // A slider's place as a value its steps allow.
+                let at = move |f: f32| {
+                    let n = steps.max(1) as f64;
+                    min + (f as f64 * n).round() / n * range
+                };
+                let set: Rc<dyn Fn(&mut Ctx, f32)> = Rc::new(move |_: &mut Ctx, f: f32| crate::config::set(id, min + f as f64 * range));
+                let (on_change, on_release) = if d.flags & crate::tag_bits::config::ON_RELEASE != 0 {
+                    let (show, done) = (dragged.clone(), dragged.clone());
+                    let shown: Rc<dyn Fn(&mut Ctx, f32)> = Rc::new(move |_: &mut Ctx, f: f32| show.set(Some(at(f))));
+                    let apply: Rc<dyn Fn(&mut Ctx, f32)> = Rc::new(move |_: &mut Ctx, f: f32| {
+                        done.set(None);
+                        crate::config::set(id, at(f));
+                    });
+                    (shown, Some(apply))
+                } else {
+                    (set, None)
+                };
+                ui.add(
+                    Kind::Slider {
+                        value: 0.0,
+                        bind: Box::new(move |_: &Ctx| ((crate::config::get(id) - min) / range) as f32),
+                        on_change,
+                        on_release,
+                        steps,
+                    },
+                    Style::default().h(20.0).stretch(),
+                );
+            }
+        }),
+    };
+    let tip = format!("{key}.tooltip");
+    let mut spans = if cx.lang.has(&tip) { cx.t(&tip, &[]) } else { Vec::new() };
+    for (on, note) in
+        [(locked, "settings.config_synced"), (d.flags & crate::tag_bits::config::RESTART_REQUIRED != 0, "settings.config_restart")]
+    {
+        if on {
+            if !spans.is_empty() {
+                spans.push(Span::text("\n", None));
+            }
+            spans.extend(cx.t(note, &[]));
+        }
+    }
+    if !spans.is_empty() {
+        ui.nodes[row].tooltip = Some(spans);
+    }
+}
+
+/// The rows of the settings on `page` (`config.page`), in their order.
+fn config_rows(ui: &mut Ui, cx: &BuildCx, page: &str) {
+    let c = crate::content::content();
+    let mut listed: Vec<_> = c
+        .game
+        .configs
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.page == page)
+        .collect();
+    listed.sort_by(|a, b| (a.1.order, &a.1.name).cmp(&(b.1.order, &b.1.name)));
+    ui.container(
+        Style::default()
+            .gap(6.0)
+            .stretch()
+            .self_align(crate::ui::Align::Stretch),
+        |ui| {
+            for (id, d) in listed {
+                config_row(ui, cx, id as u32, d, false);
+            }
+        },
+    );
 }
 
 /// Settings built from their declarations: toggles, sliders, choices.
@@ -697,7 +855,6 @@ impl Screen for ConfigScreen {
     }
 
     fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
-        use weft_abi::config_kind as ck;
         let c = crate::content::content();
         let shown = &self.shown;
         let page = text::lang_key("page", self.name());
@@ -753,110 +910,7 @@ impl Screen for ConfigScreen {
                         if d.order >= LINKS_AT {
                             links(ui, &mut linked);
                         }
-                        let id = id as u32;
-                        let key = text::lang_key("config", &d.name);
-                        let locked = (d.synced() && cx.remote) || rules_locked;
-                        // A value's own name where it has one (a choice, gui scale 0), else the
-                        // number through `.value`; looked up now, the bindings run without the language.
-                        let small = d.kind != ck::FLOAT && d.max - d.min <= 64.0;
-                        let names: Rc<Vec<String>> = Rc::new(
-                            d.choices
-                                .iter()
-                                .cloned()
-                                .chain(
-                                    small
-                                        .then(|| (d.min as i64..=d.max as i64).map(|n| n.to_string()))
-                                        .into_iter()
-                                        .flatten(),
-                                )
-                                .filter(|n| cx.lang.has(&format!("{key}.{n}")))
-                                .collect(),
-                        );
-                        let template = cx.lang.has(&format!("{key}.value"));
-                        let show = move |d: &crate::config::ConfigDef, key: &str, v: f64| -> Arg {
-                            let percent = d.flags & crate::tag_bits::config::PERCENT != 0;
-                            let named = match d.kind {
-                                ck::BOOL => return on_off(v != 0.0),
-                                ck::CHOICE => d.choices.get(v as usize).cloned().unwrap_or_default(),
-                                _ => d.show(if percent { (v * 100.0).round() } else { v }),
-                            };
-                            if names.contains(&named) {
-                                Arg::Key(format!("{key}.{named}"))
-                            } else if template {
-                                Arg::Msg(text::Msg::new(&format!("{key}.value"), vec![Arg::Text(named)]))
-                            } else {
-                                Arg::Text(named)
-                            }
-                        };
-                        let row = match d.kind {
-                            ck::BOOL | ck::CHOICE => {
-                                let (key2, d2, show) = (key.clone(), d.clone(), show.clone());
-                                let (kind, count) = (d.kind, d.choices.len().max(1) as f64);
-                                let b = ui.button(
-                                    "button",
-                                    Style::default().min_h(20.0).pad_xy(6.0, 4.0).stretch(),
-                                    Rc::new(move |_: &mut Ctx| {
-                                        let v = crate::config::get(id);
-                                        let next = if kind == ck::BOOL { 1.0 - v } else { (v + 1.0) % count };
-                                        crate::config::set(id, next);
-                                    }),
-                                    |ui| {
-                                        let (k, d3, show) = (key2.clone(), d2.clone(), show.clone());
-                                        ui.text_bound(
-                                            "button",
-                                            Box::new(move |_: &Ctx| {
-                                                (
-                                                    "settings.config_value".into(),
-                                                    vec![Arg::Key(k.clone()), show(&d3, &k, crate::config::get(id))],
-                                                )
-                                            }),
-                                        );
-                                    },
-                                );
-                                if let Kind::Button { enabled, .. } = &mut ui.nodes[b].kind {
-                                    *enabled = !locked;
-                                }
-                                b
-                            }
-                            _ => ui.container(Style::default().gap(2.0).stretch(), |ui| {
-                                let (k, d2, show) = (key.clone(), d.clone(), show.clone());
-                                ui.text_bound(
-                                    "default",
-                                    Box::new(move |_: &Ctx| {
-                                        ("settings.config_value".into(), vec![Arg::Key(k.clone()), show(&d2, &k, crate::config::get(id))])
-                                    }),
-                                );
-                                if !locked {
-                                    let (min, range) = (d.min, (d.max - d.min).max(1e-9));
-                                    let unit = if d.kind == weft_abi::config_kind::INT { 1.0 } else { range / 100.0 };
-                                    ui.add(
-                                        Kind::Slider {
-                                            value: 0.0,
-                                            bind: Box::new(move |_: &Ctx| ((crate::config::get(id) - min) / range) as f32),
-                                            on_change: Rc::new(move |_: &mut Ctx, f: f32| crate::config::set(id, min + f as f64 * range)),
-                                            steps: d.steps(unit),
-                                        },
-                                        Style::default().h(20.0).stretch(),
-                                    );
-                                }
-                            }),
-                        };
-                        let tip = format!("{key}.tooltip");
-                        let mut spans = if cx.lang.has(&tip) { cx.t(&tip, &[]) } else { Vec::new() };
-                        for (on, note) in [
-                            (locked, "settings.config_synced"),
-                            (d.flags & crate::tag_bits::config::RESTART_REQUIRED != 0, "settings.config_restart"),
-                        ] {
-                            if on {
-                                if !spans.is_empty() {
-                                    spans.push(Span::text("\n", None));
-                                }
-                                spans.extend(cx.t(note, &[]));
-                            }
-                        }
-                        if !spans.is_empty() {
-                            ui.nodes[row].tooltip = Some(spans);
-                        }
+                        config_row(ui, cx, id as u32, d, rules_locked);
                     }
                     links(ui, &mut linked);
                 },
@@ -1056,19 +1110,7 @@ impl Screen for Controls {
                     .min_h(60.0)
                     .scroll(),
                 |ui| {
-                    let on = crate::settings::invert_y();
-                    let spans = cx.t("settings.invert_y", &[on_off(on)]);
-                    ui.button(
-                        "button",
-                        Style::default().min_h(20.0).pad_xy(6.0, 4.0).stretch(),
-                        Rc::new(move |c: &mut Ctx| {
-                            crate::settings::set("invert_y", !on as u8 as f64);
-                            c.requests.push(Request::Rebuild);
-                        }),
-                        |ui| {
-                            ui.text(spans, "button");
-                        },
-                    );
+                    config_rows(ui, cx, "core:controls");
                     for b in &cx.input.binds {
                         let name = text::Name::Key(b.action.clone());
                         let clash: Vec<String> = conflicts

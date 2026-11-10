@@ -17,6 +17,12 @@ static GOLD: Block = Block::named("base:gold_block");
 static GOLD_HELMET: Item = Item::named("base:gold_helmet");
 static RED_LAMP: Item = Item::named("base:red_lamp");
 static BLUE_LAMP: Item = Item::named("base:blue_lamp");
+/// A value and a question of steps in several phases (`value` op).
+static VALUE: Chain = Chain::named("value");
+static LATE: Step = Step::named("late");
+static EARLY: Step = Step::named("early");
+static MAY: Question = Question::named("may");
+static HALF_STEP: Phase = Phase::named("half_step");
 /// Shared with everyone who sees the entity, for the sync test.
 pub static MARK: Component<u32> = Component::named("testkit:mark");
 /// Server-side stack data that is not saved either.
@@ -33,6 +39,8 @@ pub static PROTECT_GOLD: Config<bool> = Config::named("protect_gold");
 pub static HALF_DAMAGE: Config<bool> = Config::named("half_damage");
 /// Mobs may not attack while it is on.
 pub static PEACE: Config<bool> = Config::named("peace");
+/// Nobody places blocks while it is on: what the client can't know before the server says.
+pub static NO_PLACING: Config<bool> = Config::named("no_placing");
 static DRILL: Block = Block::named("drill");
 /// Registered, then changed by `r.edit` (the `edits` test).
 /// Testmod's, edited here: an edit wins whichever mod loads first.
@@ -236,6 +244,8 @@ pub fn register(r: &mut Registry) {
     r.config(&NO_HURT).bool(false).world();
     r.config(&NO_USE).bool(false).world();
     r.config(&CHAT_HOOKS).bool(false).world();
+    r.config(&NO_PLACING).bool(false).world();
+    r.before_event(&actions::PLACE_BLOCK, |_| if NO_PLACING.get() { Verdict::Deny } else { Verdict::Abstain });
     r.before_event(&actions::CHAT, |q| if CHAT_HOOKS.get() && q.text() == "forbidden" { Verdict::Deny } else { Verdict::Abstain });
     r.chat_format(|f| {
         if CHAT_HOOKS.get() {
@@ -255,11 +265,32 @@ pub fn register(r: &mut Registry) {
     });
     r.config(&HALF_DAMAGE).bool(false).world();
     r.before_event(&actions::BREAK_BLOCK, |q| if GOLD.is(q.state()) && PROTECT_GOLD.get() { Verdict::Deny } else { Verdict::Abstain });
-    r.modify(&chain::DAMAGE, stage::FINAL, |m| {
+    r.modify(&chain::DAMAGE, &phase::FINAL, |m| {
         if HALF_DAMAGE.get() {
             m.value *= 0.5;
         }
     });
+    // Registered out of order: phases and `before` decide, not who came first.
+    r.modify(&VALUE, &phase::MULTIPLY, |m| m.value *= 2.0);
+    r.modify(&VALUE, &phase::ADD, |m| m.value += 3.0);
+    // A phase of its own goes right after multiply, before rules.
+    r.modify(&VALUE, &phase::RULES, |m| m.value *= 3.0);
+    r.phase(&HALF_STEP, &phase::MULTIPLY);
+    r.modify(&VALUE, &HALF_STEP, |m| m.value += 0.5);
+    r.step(&LATE)
+        .on(&VALUE)
+        .phase(&phase::OVERRIDE)
+        .run(|m| m.value -= 1.0);
+    r.step(&EARLY)
+        .on(&VALUE)
+        .phase(&phase::OVERRIDE)
+        .before("late")
+        .run(|m| m.value *= 10.0);
+    r.before_event(&MAY, |_| Verdict::Deny);
+    r.before_event(&MAY, |_| Verdict::Allow)
+        .phase(&phase::OVERRIDE);
+    r.before_event(&MAY, |_| Verdict::Abstain)
+        .phase(&phase::FINAL);
     r.on_event(&actions::BREAK_BLOCK, |b| count(0, b.len()));
     r.on_event(&actions::PLACE_BLOCK, |b| count(1, b.len()));
     r.on_event(&actions::PICKUP_ITEM, |b| count(2, b.len()));
@@ -647,6 +678,22 @@ const OPS: &[(&str, &str, Run)] = &[
         Ok(w.spawn(id(cmd, "kind")?, [p[0] as f64 + 0.5, p[1] as f64, p[2] as f64 + 0.5])
             .to_string())
     }),
+    // `VALUE` from 1 and the answer to `MAY`.
+    ("value", "", |w, _, _, _| Ok(format!("{} {}", w.chain_compute(&VALUE, 1.0, &query()), w.ask(&MAY, &query()) as u32))),
+    // What the server knows the player holds of an action: held, ticks.
+    ("key", "<action:word>", |w, cmd, player, _| {
+        let k = w.key(player, Key::generated(word(cmd, "action")?.to_string()));
+        Ok(format!("{} {}", k.held, k.held_ticks))
+    }),
+    // A projectile from `x y z` flying `vx vy vz` blocks a second, shot by the player.
+    ("shoot", "<kind:entity> <x:float> <y:float> <z:float> <vx:float> <vy:float> <vz:float>", |w, cmd, player, _| {
+        let f = |n: &str| cmd.float(n).ok_or(format!("missing {n}"));
+        let how = Spawn::new()
+            .owner(player)
+            .velocity([f("vx")?, f("vy")?, f("vz")?]);
+        Ok(w.spawn_with(id(cmd, "kind")?, [f("x")?, f("y")?, f("z")?], &how)
+            .to_string())
+    }),
     ("spawnlit", "<kind:entity> <pos:pos>", |w, cmd, _, _| {
         let p = pos(cmd, "pos")?;
         let e = w.spawn(id(cmd, "kind")?, [p[0] as f64 + 0.5, p[1] as f64, p[2] as f64 + 0.5]);
@@ -891,7 +938,7 @@ const OPS: &[(&str, &str, Run)] = &[
         ))
     }),
     ("look", "", |w, _, player, _| {
-        Ok(w.target_block(player, 5.0, false)
+        Ok(w.looked_at(player, 5.0, Ray::blocks())
             .map_or("none".into(), |l| format!("{} {} {} {} {}", l.body, l.pos.x, l.pos.y, l.pos.z, block_name(l.state))))
     }),
     ("place", "<template:word> <pos:pos>", |w, cmd, _, _| {
@@ -983,7 +1030,12 @@ const OPS: &[(&str, &str, Run)] = &[
     }),
     // A stick with a diamond over it, tinted red: a stack's own layered picture.
     ("layered", "<index:int>", |w, cmd, player, _| {
-        let s = ItemStack::new(item("base:stick")?, 1).with_layers(&[("base:stick", None), ("base:diamond", Some(0xFF2020))]);
+        let s = ItemStack::new(item("base:stick")?, 1).with_layers(
+            Layers::new()
+                .layer("base:stick")
+                .layer("base:diamond")
+                .tint(0xFF2020),
+        );
         w.inventory(player).set(int(cmd, "index")?, s);
         Ok(String::new())
     }),
@@ -1071,17 +1123,12 @@ const OPS: &[(&str, &str, Run)] = &[
         let (v, text) = w.attribute_explain(owner(w, cmd)?, Attribute::generated(word(cmd, "attribute")?.to_string()));
         Ok(format!("{v} | {text}"))
     }),
-    ("attr_mod", "@owner <attribute:word> <mod:word> <op:int> <amount:float> <ticks:int>", |w, cmd, _, _| {
+    ("attr_mod", "@owner <attribute:word> <mod:word> <step:word> <amount:float> <ticks:int>", |w, cmd, _, _| {
         let o = owner(w, cmd)?;
         let amount = cmd.float("amount").ok_or("missing amount")?;
-        w.attribute_add_modifier(
-            o,
-            Attribute::generated(word(cmd, "attribute")?.to_string()),
-            word(cmd, "mod")?,
-            int(cmd, "op")?,
-            amount,
-            int(cmd, "ticks")?,
-        );
+        let attr = Attribute::generated(word(cmd, "attribute")?.to_string());
+        let m = Modifier::step(attr, Step::generated(word(cmd, "step")?.to_string()), amount);
+        w.attribute_add_modifier(o, word(cmd, "mod")?, &m, int(cmd, "ticks")?);
         Ok(String::new())
     }),
     ("attr_rm", "@owner <attribute:word> <mod:word>", |w, cmd, _, _| {
@@ -1123,16 +1170,16 @@ const OPS: &[(&str, &str, Run)] = &[
     ("attack_damage", "<item:item> <fall:float>", |w, cmd, player, _| {
         let fall = cmd.float("fall").ok_or("missing fall")?;
         w.entity_modify(player).fall_distance(fall as f32);
-        let base = 6.0;
+        let base = 1.0;
         let q = abi::Query { entity: player, item: id(cmd, "item")?, amount: base, ..query() };
         let fell = w.entity(player).map_or(-1.0, |s| s.fall_distance);
-        Ok(format!("{} {fell}", w.chain_compute(&chain::ATTACK_DAMAGE, base, &q)))
+        Ok(format!("{} {fell}", w.chain_compute(&attribute::ATTACK_DAMAGE, base, &q)))
     }),
     // The player hits `id` as if having fallen `fall` blocks first.
     ("hit_falling", "<id:int> <fall:float>", |w, cmd, player, _| {
         w.entity_modify(player)
             .fall_distance(cmd.float("fall").unwrap_or(0.0) as f32);
-        w.damage(int(cmd, "id")?, 1.0, player, damage_cause::ATTACK);
+        w.damage(int(cmd, "id")?, Damage::new(1.0, damage_cause::ATTACK).by(player));
         Ok(String::new())
     }),
     // Three blocks up, flying there: landing would end the flight.
@@ -1171,12 +1218,12 @@ const OPS: &[(&str, &str, Run)] = &[
     }),
     ("hurt", "<id:int> <amount:float>", |w, cmd, player, _| {
         let amount = cmd.float("amount").ok_or("missing amount")? as f32;
-        Ok((w.damage(int(cmd, "id")?, amount, player, abi::damage_cause::ATTACK) as u32).to_string())
+        Ok((w.damage(int(cmd, "id")?, Damage::new(amount, abi::damage_cause::ATTACK).by(player)) as u32).to_string())
     }),
     ("pose", "", |w, _, player, _| Ok(w.entity(player).map_or(0, |e| e.pose).to_string())),
     ("hurt_me", "<amount:float>", |w, cmd, player, _| {
         let amount = cmd.float("amount").ok_or("missing amount")? as f32;
-        Ok((w.damage(player, amount, 0, abi::damage_cause::ATTACK) as u32).to_string())
+        Ok((w.damage(player, Damage::new(amount, abi::damage_cause::ATTACK)) as u32).to_string())
     }),
     ("snapshot", "<from:pos> <to:pos>", |w, cmd, _, _| {
         let (p, q) = (pos(cmd, "from")?, pos(cmd, "to")?);

@@ -187,7 +187,7 @@ pub fn insert(d: &mut Dim, c: &Content, inv: Inv, stack: ItemStack) -> ItemStack
 
 /// `stack` merged into `list` where `allowed` says, matching stacks first. Returns the rest.
 pub fn merge_into(c: &Content, list: &mut [ItemStack], mut stack: ItemStack, allowed: impl Fn(usize) -> bool) -> ItemStack {
-    let max = c.max_stack(stack.item);
+    let max = c.max_stack(&stack);
     for (_, s) in list.iter_mut().enumerate().filter(|(i, _)| allowed(*i)) {
         if stack.count == 0 {
             break;
