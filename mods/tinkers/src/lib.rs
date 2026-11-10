@@ -62,7 +62,9 @@ fn init(r: &mut Registry) {
         .hardness(3.0)
         .mined_by("axe", abi::tool_tier::HAND)
         .opens(&WORKBENCH_MENU)
-        .textures("workbench_top", "workbench_side", "base:crafting_table_bottom");
+        .texture("workbench_side")
+        .top("workbench_top")
+        .bottom("base:crafting_table_bottom");
     r.shaped(&CRAFTING, WORKBENCH.name(), 1, &["iii", "lsl", "lll"], &[('i', "#ingots/iron"), ('l', "#planks"), ('s', "#stone")]);
 
     r.block(&PART_BUILDER)
@@ -70,7 +72,9 @@ fn init(r: &mut Registry) {
         .hardness(3.0)
         .mined_by("axe", abi::tool_tier::HAND)
         .opens(&PART_BUILDER_MENU)
-        .textures("part_builder_top", "part_builder_side", "base:crafting_table_bottom");
+        .texture("part_builder_side")
+        .top("part_builder_top")
+        .bottom("base:crafting_table_bottom");
     r.shaped(&CRAFTING, PART_BUILDER.name(), 1, &["ppp", "lil", "lll"], &[('p', "#paper"), ('l', "#planks"), ('i', "#ingots/iron")]);
 
     let mut generated_items = HashMap::new();
@@ -85,7 +89,7 @@ fn init(r: &mut Registry) {
                 .item(item)
                 .tab(&TINKER_MATS_TAB)
                 .texture(component)
-                .color(material.color)
+                .tint(material.color)
                 .tag(&component)
                 .tag(&format!("tinkers/{}", material.name));
             if component.ends_with("head") {
@@ -119,9 +123,9 @@ fn init(r: &mut Registry) {
         .max_stack(1);
 
     r.menu(&WORKBENCH_MENU)
-        .group("head", Slots::single().accepts("tool_head"))
-        .group("binding", Slots::single().accepts("binding"))
-        .group("rod", Slots::single().accepts("rod"))
+        .group("head", Slots::single().accepts("#tool_head"))
+        .group("binding", Slots::single().accepts("#binding"))
+        .group("rod", Slots::single().accepts("#rod"))
         .group("result", Slots::single().output().large())
         .player_inventory()
         .recipes(&WORKBENCH_RECIPE)
@@ -185,21 +189,33 @@ fn craft_result_workbench(m: &MenuCtx) {
     };
 
     let stack = match tool_of(head_name) {
-        "pickaxe" => with_tool_components(ItemStack::new(PICKAXE.id(), 1), head_mat, binding_mat, rod_mat).with_layers(&[
-            ("rod", Some(rod_mat.color)),
-            ("pickaxe_head", Some(head_mat.color)),
-            ("pickaxe_binding", Some(binding_mat.color)),
-        ]),
-        "axe" => with_tool_components(ItemStack::new(AXE.id(), 1), head_mat, binding_mat, rod_mat).with_layers(&[
-            ("rod", Some(rod_mat.color)),
-            ("axe_head", Some(head_mat.color)),
-            ("axe_binding", Some(binding_mat.color)),
-        ]),
-        "shovel" => with_tool_components(ItemStack::new(SHOVEL.id(), 1), head_mat, binding_mat, rod_mat).with_layers(&[
-            ("small_rod", Some(rod_mat.color)),
-            ("shovel_head", Some(head_mat.color)),
-            ("shovel_binding", Some(binding_mat.color)),
-        ]),
+        "pickaxe" => with_tool_components(ItemStack::new(PICKAXE.id(), 1), head_mat, binding_mat, rod_mat).with_layers(
+            Layers::new()
+                .layer("rod")
+                .tint(rod_mat.color)
+                .layer("pickaxe_head")
+                .tint(head_mat.color)
+                .layer("pickaxe_binding")
+                .tint(binding_mat.color),
+        ),
+        "axe" => with_tool_components(ItemStack::new(AXE.id(), 1), head_mat, binding_mat, rod_mat).with_layers(
+            Layers::new()
+                .layer("rod")
+                .tint(rod_mat.color)
+                .layer("axe_head")
+                .tint(head_mat.color)
+                .layer("axe_binding")
+                .tint(binding_mat.color),
+        ),
+        "shovel" => with_tool_components(ItemStack::new(SHOVEL.id(), 1), head_mat, binding_mat, rod_mat).with_layers(
+            Layers::new()
+                .layer("small_rod")
+                .tint(rod_mat.color)
+                .layer("shovel_head")
+                .tint(head_mat.color)
+                .layer("shovel_binding")
+                .tint(binding_mat.color),
+        ),
         _ => {
             error!("unknown tool");
             m.group("result").set(0, ItemStack::EMPTY);
