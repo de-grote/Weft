@@ -4,6 +4,7 @@ tab.tinkers.tinkers = Tinkers
 tab.tinkers.tinkers_materials = Tinkers Materials
 item.tinkers.pickaxe = Pickaxe
 item.tinkers.axe = Axe
+item.tinkers.shovel = Shovel
 item.tinkers.wood_rod = Wood Rod
 item.tinkers.stone_rod = Stone Rod
 item.tinkers.iron_rod = Iron Rod
