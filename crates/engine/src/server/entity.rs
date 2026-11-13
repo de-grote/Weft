@@ -50,6 +50,7 @@ pub struct Entity {
     pub using: (u32, bool),
     /// The item it is using, the ticks left until it takes effect, and the slot it is in.
     pub use_done: Option<(u32, u32, u32)>,
+    pub blocking_disabled_until: u64,
     /// The block it is breaking.
     pub mining: Option<Mining>,
     pub anchor: Option<IVec3>,
@@ -59,6 +60,13 @@ pub struct Entity {
     /// The solid body it rides (stands on, or flies above within its carry height).
     /// The body it is on: what it rides, or whose blocks hold it if it has an `anchor`.
     pub frame: Option<u64>,
+    /// Where its body faces (`physics::turn_body`), and where it was when that last turned.
+    pub body_yaw: f32,
+    pub body_from: DVec3,
+    /// How far its legs have walked and its stride (`model::walk_limbs`, by the tick): where its
+    /// legs are.
+    pub strode: f32,
+    pub stride: f32,
     pub motion: Motion,
     /// A body that falls under its weight and is put down as blocks where it lands, whatever
     /// its kind would do otherwise (`World::body_fall`, every falling block).
@@ -116,7 +124,7 @@ pub struct Stuck {
 pub enum StuckIn {
     /// A block, on `body` (in its blocks; 0: this dimension's).
     Block { body: u64, block: IVec3 },
-    /// An entity's box: it goes and turns with it.
+    /// An entity's box: it goes and turns with its body.
     Entity(u64),
 }
 
@@ -188,6 +196,10 @@ impl Entity {
             blocked: false,
             yaw: 0.0,
             pitch: 0.0,
+            body_yaw: 0.0,
+            body_from: pos,
+            strode: 0.0,
+            stride: 0.0,
             on_ground: false,
             in_liquid: false,
             fall: 0.0,
@@ -195,6 +207,7 @@ impl Entity {
             health,
             age: 0,
             hurt_cooldown: 0,
+            blocking_disabled_until: 0,
             walk: None,
             jump_mul: 1.0,
             moves: physics::Moves::default(),
@@ -245,6 +258,25 @@ impl Entity {
     }
 
     /// Its box: its own size if a mod gave it one, else its kind's; crouching lowers either.
+    /// How it stands for what hits it (`hitbox`), at `pos` in the caller's frame.
+    pub fn hit_body(&self, c: &Content, pos: DVec3) -> crate::hitbox::Body {
+        crate::hitbox::Body {
+            pos,
+            body_yaw: self.body_yaw,
+            yaw: self.yaw,
+            pitch: self.pitch,
+            walk: self.strode,
+            stride: self.stride,
+            size: self
+                .size
+                .unwrap_or(c.game.entities[self.kind as usize].size()),
+            scale: self
+                .size
+                .map_or(1.0, |s| (s.height / c.game.entities[self.kind as usize].size().height.max(1e-3)) as f64),
+            pose: self.pose,
+        }
+    }
+
     pub fn dims(&self, c: &Content) -> physics::Dims {
         physics::posed(
             self.size
@@ -331,6 +363,7 @@ impl Entity {
             selected: self.selected,
             moved: self.moved,
             size: self.dims(c).size(),
+            body_yaw: self.body_yaw,
             using: self.use_done.map_or(0, |u| u.0),
             using_ticks: self
                 .use_done
@@ -621,6 +654,11 @@ impl Entities {
             .enumerate()
             .map(|(i, e)| (e.id, i))
             .collect();
+    }
+
+    /// How many slots `owner` has, 0 for none.
+    pub fn inventory_len(&self, owner: u64) -> usize {
+        self.inventories.get(&owner).map_or(0, |i| i.len())
     }
 
     pub fn inventory_slot(&self, owner: u64, slot: u32) -> ItemStack {

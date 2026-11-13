@@ -170,6 +170,32 @@ fn region_of(key: MeshKey) -> (u64, IVec3) {
     (key.0, key.1 >> REGION)
 }
 
+/// Which sides of a box from `lo` to `hi` (relative to the camera) its faces may show, by
+/// direction rank (`mesher::DIR_RANK`: +X +Y +Z -X -Y -Z): a face is seen only from where its
+/// normal points.
+fn seen_sides(lo: Vec3, hi: Vec3) -> [bool; 6] {
+    [lo.x < 0.0, lo.y < 0.0, lo.z < 0.0, hi.x > 0.0, hi.y > 0.0, hi.z > 0.0]
+}
+
+/// Draw ranges from `start`, through groups of records (how many, whether drawn) lying one
+/// after another: neighbors drawn become one range.
+fn runs<'a>(start: u32, groups: impl IntoIterator<Item = (&'a u32, bool)>, mut emit: impl FnMut(u32, u32)) {
+    let (mut off, mut run) = (start, None);
+    for (&n, drawn) in groups {
+        if n > 0 && drawn {
+            run = Some(run.map_or((off, n), |(s, len)| (s, len + n)));
+        } else if n > 0
+            && let Some((s, len)) = run.take()
+        {
+            emit(s, len);
+        }
+        off += n;
+    }
+    if let Some((s, len)) = run {
+        emit(s, len);
+    }
+}
+
 /// The draws of one visible mesh (its corner `lo` relative to the camera, `k` its structure or
 /// 0), returning the faces drawn. A face direction can be seen only from the side its normal
 /// points to; contiguous visible runs become one draw.
@@ -190,34 +216,17 @@ fn mesh_draws(m: &GpuMesh, key: MeshKey, lo: Vec3, k: i32, cam_cube: IVec3, out:
         first_instance: 0,
     };
     if let Some(a) = m.faces {
-        // Directions by rank: +X +Y +Z -X -Y -Z.
-        let seen = [lo.x < 0.0, lo.y < 0.0, lo.z < 0.0, lo.x > -16.0, lo.y > -16.0, lo.z > -16.0];
+        let seen = seen_sides(lo, lo + Vec3::splat(16.0));
         let mut off = a.offset;
         for layer in 0..4 {
             let counts = m.face_counts[layer];
-            if !drawn(layer) {
-                off += counts.iter().sum::<u32>();
-                continue;
+            if drawn(layer) {
+                runs(off, counts.iter().zip(seen), |s, len| {
+                    faces += len as u64;
+                    out.push((0, layer as u8, a.page, args(s, len), origin, center));
+                });
             }
-            let mut run: Option<(u32, u32)> = None;
-            for rank in 0..6 {
-                let n = counts[rank];
-                if n > 0 && seen[rank] {
-                    faces += n as u64;
-                    run = Some(match run {
-                        Some((s, len)) => (s, len + n),
-                        None => (off, n),
-                    });
-                } else if n > 0 {
-                    if let Some((s, len)) = run.take() {
-                        out.push((0, layer as u8, a.page, args(s, len), origin, center));
-                    }
-                }
-                off += n;
-            }
-            if let Some((s, len)) = run {
-                out.push((0, layer as u8, a.page, args(s, len), origin, center));
-            }
+            off += counts.iter().sum::<u32>();
         }
     }
     if let Some(a) = m.quads {
@@ -295,12 +304,13 @@ pub struct WorldRenderer {
     /// By mesh layer: opaque, cutout, translucent, upper layers of faces.
     face_pipes: [PipelineId; 4],
     quad_pipes: [PipelineId; 4],
-    lod_pipe: PipelineId,
+    /// Distant terrain: what is opaque, then see-through surfaces (seas).
+    lod_pipes: [PipelineId; 2],
     /// Distant terrain tiles (`lod`): their quads (in `faces`, four words like a face), count
     /// and the heights they span; the ones to draw this frame; and the columns whose cubes show
     /// their ground (`Lod::mask`, half its width), where their pixels are left to the cubes.
-    lod: FxHashMap<super::lod::TileKey, (Alloc, u32, (i32, i32))>,
-    pub lod_draw: Vec<super::lod::TileKey>,
+    lod: FxHashMap<super::lod::TileKey, (Alloc, super::lod::Counts, (i32, i32))>,
+    pub lod_draw: Vec<(super::lod::TileKey, f32)>,
     pub lod_half: u32,
     lod_mask: (BufferId, usize),
     faces: Pool,
@@ -353,6 +363,8 @@ pub struct WorldRenderer {
     solid: Solid,
     pub drawn: u32,
     pub faces_drawn: u64,
+    /// Distant terrain quads drawn, before the occlusion test.
+    pub lod_drawn: u64,
 }
 
 /// Block shaders: `fn shade(p: BlockPixel) -> vec4<f32>` in `shaders/block/<name>.wgsl`, for
@@ -408,7 +420,7 @@ impl WorldRenderer {
         assets: &crate::assets::Assets,
     ) -> Result<WorldRenderer, String> {
         let (shader, slots) = world_shader(assets).map_err(|e| e.0)?;
-        let (face_pipes, quad_pipes, lod_pipe) = Self::pipelines(gpu, &shader)?;
+        let (face_pipes, quad_pipes, lod_pipes) = Self::pipelines(gpu, &shader)?;
         let tex_shader = shader_table(gpu, c, textures, &slots);
 
         let (tex_info, anim) = Self::texture_info(gpu, textures);
@@ -438,7 +450,7 @@ impl WorldRenderer {
         Ok(WorldRenderer {
             face_pipes,
             quad_pipes,
-            lod_pipe,
+            lod_pipes,
             lod: FxHashMap::default(),
             lod_draw: Vec::new(),
             lod_half: 0,
@@ -473,6 +485,7 @@ impl WorldRenderer {
             solid: Solid::new(gpu, c),
             drawn: 0,
             faces_drawn: 0,
+            lod_drawn: 0,
         })
     }
 
@@ -499,7 +512,7 @@ impl WorldRenderer {
         self.tex_generation = textures.generation();
     }
 
-    fn pipelines(gpu: &mut dyn Backend, shader: &Shader) -> Result<([PipelineId; 4], [PipelineId; 4], PipelineId), String> {
+    fn pipelines(gpu: &mut dyn Backend, shader: &Shader) -> Result<([PipelineId; 4], [PipelineId; 4], [PipelineId; 2]), String> {
         let depth_write = Some(DepthState { write: true, compare: Compare::GreaterEqual });
         let depth_read = Some(DepthState { write: false, compare: Compare::GreaterEqual });
         let mut make = |label: &str, vs: &str, fs: &str, depth, blend, cull| {
@@ -529,7 +542,10 @@ impl WorldRenderer {
             make("quads translucent", "vs_quad", "fs_translucent", depth_read, Blend::Alpha, true)?,
             make("quads layers", "vs_quad", "fs_translucent", depth_read, Blend::Alpha, true)?,
         ];
-        let lod = make("distant terrain", "vs_lod", "fs_lod", depth_write, Blend::None, true)?;
+        let lod = [
+            make("distant terrain", "vs_lod", "fs_lod", depth_write, Blend::None, true)?,
+            make("distant surfaces", "vs_lod", "fs_lod_surface", depth_read, Blend::Alpha, true)?,
+        ];
         Ok((faces, quads, lod))
     }
 
@@ -545,13 +561,13 @@ impl WorldRenderer {
                     .face_pipes
                     .into_iter()
                     .chain(self.quad_pipes)
-                    .chain([self.lod_pipe])
+                    .chain(self.lod_pipes)
                 {
                     gpu.destroy_pipeline(p);
                 }
                 self.face_pipes = f;
                 self.quad_pipes = q;
-                self.lod_pipe = l;
+                self.lod_pipes = l;
                 gpu.destroy_buffer(self.tex_shader);
                 self.tex_shader = shader_table(gpu, crate::content::content(), textures, &slots);
                 self.solid
@@ -643,7 +659,7 @@ impl WorldRenderer {
             .face_pipes
             .into_iter()
             .chain(self.quad_pipes)
-            .chain([self.lod_pipe])
+            .chain(self.lod_pipes)
         {
             gpu.destroy_pipeline(p);
         }
@@ -711,6 +727,7 @@ impl WorldRenderer {
         textures: &GameTextures,
         key: super::lod::TileKey,
         quads: &[[u32; 4]],
+        counts: super::lod::Counts,
         y: (i32, i32),
     ) {
         self.remove_lod(key);
@@ -726,7 +743,7 @@ impl WorldRenderer {
         textures.ensure_blocks(gpu, used);
         let a = self.faces.alloc(gpu, quads.len() as u32);
         gpu.write_buffer(self.faces.pages[a.page as usize].0, a.offset as u64 * 16, bytemuck::cast_slice(quads));
-        self.lod.insert(key, (a, quads.len() as u32, y));
+        self.lod.insert(key, (a, counts, y));
     }
 
     /// The columns shown by cubes (`Lod::mask`).
@@ -740,7 +757,13 @@ impl WorldRenderer {
 
     /// Distant terrain tiles held and their quads.
     pub fn lod_counts(&self) -> (usize, usize) {
-        (self.lod.len(), self.lod.values().map(|t| t.1 as usize).sum())
+        (
+            self.lod.len(),
+            self.lod
+                .values()
+                .map(|t| t.1.iter().flatten().sum::<u32>() as usize)
+                .sum(),
+        )
     }
 
     pub fn remove_lod(&mut self, key: super::lod::TileKey) {
@@ -1015,34 +1038,53 @@ impl WorldRenderer {
 
         // Distant terrain after the cubes (nearer, they hide most of it), a run per page.
         // Each with its box, from the camera's cube in blocks, for the occlusion test to go by.
-        let mut lod: Vec<(DrawRecord, [i32; 6])> = self
-            .lod_draw
-            .iter()
-            .filter_map(|key| {
-                let &(a, count, (y0, y1)) = self.lod.get(key)?;
-                let o = key.origin();
-                let half = Vec3::new(key.size() as f32, (y1 - y0) as f32, key.size() as f32) / 2.0;
-                let center = Vec3::new(o.x as f32, y0 as f32, o.y as f32) + half - (cam_cube * 16).as_vec3() - cam_frac;
-                if !planes
+        // Of a tile only its sides that may face the camera, and what is beside a neighbor as
+        // high only where the neighbor's pixels may give way to cubes (`lod_mask`).
+        let mut lod: Vec<(DrawRecord, [i32; 6])> = Vec::new();
+        self.lod_drawn = 0;
+        let masked = [-(self.lod_half as i32) * 16, (self.lod_half as i32 + 1) * 16];
+        for &(key, fade) in &self.lod_draw {
+            let Some(&(a, counts, (y0, y1))) = self.lod.get(&key) else { continue };
+            let o = key.origin();
+            let half = Vec3::new(key.size() as f32, (y1 - y0) as f32, key.size() as f32) / 2.0;
+            let center = Vec3::new(o.x as f32, y0 as f32, o.y as f32) + half - (cam_cube * 16).as_vec3() - cam_frac;
+            if !planes
+                .iter()
+                .all(|pl| pl.dot(center.extend(1.0)) > -half.length())
+            {
+                continue;
+            }
+            let lo = [o.x - cam_cube.x * 16, y0 - cam_cube.y * 16, o.y - cam_cube.z * 16];
+            let size = key.size() as i32;
+            let bounds = [lo[0], lo[1], lo[2], lo[0] + size, lo[1] + (y1 - y0), lo[2] + size];
+            let near_cubes = [0, 2]
+                .iter()
+                .all(|&k| bounds[k] < masked[1] && bounds[k + 3] > masked[0]);
+            // A block of margin: the tiles are drawn a little lower than their records say.
+            let seen = seen_sides(center - half - Vec3::ONE, center + half + Vec3::ONE);
+            let origin = [o.x / 16 - cam_cube.x, -cam_cube.y, o.y / 16 - cam_cube.z, fade.to_bits() as i32];
+            use super::lod::{ALWAYS, BESIDE_CUBES, SURFACE};
+            let mut draw = |layer: u8, s: u32, len: u32| {
+                self.lod_drawn += len as u64;
+                let args =
+                    DrawIndexedArgs { indices: len * 6, instances: 1, first_index: 0, vertex_offset: (s * 4) as i32, first_instance: 0 };
+                lod.push(((3, layer, a.page, args, origin, center), bounds));
+            };
+            let groups = counts[ALWAYS].iter().zip(seen).chain(
+                counts[BESIDE_CUBES]
                     .iter()
-                    .all(|pl| pl.dot(center.extend(1.0)) > -half.length())
-                {
-                    return None;
-                }
-                let args = DrawIndexedArgs {
-                    indices: count * 6,
-                    instances: 1,
-                    first_index: 0,
-                    vertex_offset: (a.offset * 4) as i32,
-                    first_instance: 0,
-                };
-                let lo = [o.x - cam_cube.x * 16, y0 - cam_cube.y * 16, o.y - cam_cube.z * 16];
-                let size = key.size() as i32;
-                let bounds = [lo[0], lo[1], lo[2], lo[0] + size, lo[1] + (y1 - y0), lo[2] + size];
-                Some(((3, 0, a.page, args, [o.x / 16 - cam_cube.x, -cam_cube.y, o.y / 16 - cam_cube.z, 0], center), bounds))
-            })
-            .collect();
-        lod.sort_by_key(|d| (d.0.2, d.0.5.length_squared().to_bits()));
+                    .zip(seen.map(|s| s && near_cubes)),
+            );
+            runs(a.offset, groups, |s, len| draw(0, s, len));
+            let surface_at = a.offset
+                + counts[ALWAYS]
+                    .iter()
+                    .chain(&counts[BESIDE_CUBES])
+                    .sum::<u32>();
+            runs(surface_at, counts[SURFACE].iter().zip(seen), |s, len| draw(2, s, len));
+        }
+        // What is opaque first; see-through surfaces after all of it, in `draw_translucent`.
+        lod.sort_by_key(|d| (d.0.1, d.0.2, d.0.5.length_squared().to_bits()));
         let (lod, lod_bounds): (Vec<DrawRecord>, Vec<[i32; 6]>) = lod.into_iter().unzip();
         let lods = lod.len() as u32;
         let n = opaque + lods + trans.len() as u32;
@@ -1110,13 +1152,19 @@ impl WorldRenderer {
             }
             start += t;
         }
+        let surfaces = lod.iter().position(|d| d.1 == 2).unwrap_or(lod.len());
         for (j, d) in lod.iter().enumerate() {
+            if j == surfaces {
+                self.translucent = runs.len();
+            }
             match runs.last_mut() {
-                Some(r) if r.0 == 3 && r.2 == d.2 => r.4 += 1,
-                _ => runs.push((3, 0, d.2, opaque + j as u32, 1)),
+                Some(r) if r.0 == 3 && (r.1, r.2) == (d.1, d.2) && j != surfaces => r.4 += 1,
+                _ => runs.push((3, d.1, d.2, opaque + j as u32, 1)),
             }
         }
-        self.translucent = runs.len();
+        if surfaces == lod.len() {
+            self.translucent = runs.len();
+        }
         for (j, d) in trans.iter().enumerate() {
             match runs.last_mut() {
                 Some(r) if r.1 == 2 && (r.0, r.1, r.2) == (d.0, d.1, d.2) => r.4 += 1,
@@ -1198,7 +1246,7 @@ impl WorldRenderer {
         if kind == 0 {
             (self.face_pipes[layer as usize], self.faces.pages[page as usize].0)
         } else if kind == 3 {
-            (self.lod_pipe, self.faces.pages[page as usize].0)
+            (self.lod_pipes[(layer == 2) as usize], self.faces.pages[page as usize].0)
         } else {
             (self.quad_pipes[layer as usize], self.quads.pages[page as usize].0)
         }
@@ -1603,7 +1651,7 @@ impl Occlusion {
             let dst = src + s[0] * s[1];
             list.push_constants(&crate::gpu_layout::OcclusionArgs { size: s, src, dst, count: 0, pad: 0 });
             s = s.map(|v| v.div_ceil(2));
-            list.push(Cmd::Dispatch { x: s[0].div_ceil(32), y: s[1].div_ceil(32), z: 1 });
+            list.push(Cmd::Dispatch { x: s[0].div_ceil(16), y: s[1].div_ceil(16), z: 1 });
             list.push(Cmd::Barrier);
             src = dst;
         }
@@ -1612,7 +1660,11 @@ impl Occlusion {
 }
 
 /// Left, right, bottom, top planes; the reverse-Z infinite projection has no useful far plane.
+/// With `core:frustum_culling` off, planes nothing is behind: everything is drawn.
 pub fn frustum_planes(m: Mat4) -> [Vec4; 4] {
+    if !crate::settings::frustum_culling() {
+        return [Vec4::W; 4];
+    }
     let r = |i: usize| m.row(i);
     let norm = |p: Vec4| p / p.truncate().length();
     [norm(r(3) + r(0)), norm(r(3) - r(0)), norm(r(3) + r(1)), norm(r(3) - r(1))]

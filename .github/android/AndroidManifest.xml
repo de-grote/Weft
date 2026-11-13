@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No Java of our own: Android's NativeActivity loads libmain.so (crates/android). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="org.weft.game">
+    <!-- Vulkan 1.1, what the renderer needs. -->
+    <uses-feature android:name="android.hardware.vulkan.version" android:version="0x401000" android:required="true" />
+    <!-- Playing together. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application
+        android:label="Weft"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@style/Weft"
+        android:hasCode="false"
+        android:extractNativeLibs="true"
+        android:appCategory="game"
+        android:isGame="true">
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Weft"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density">
+            <meta-data android:name="android.app.lib_name" android:value="main" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

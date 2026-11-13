@@ -58,28 +58,31 @@ shared! {
         FLAT = 16,
     }
     /// Distant terrain record (`client::lod`), four words in the faces' pages: x, z in the tile
-    /// (11 bits each), direction, tint kind; texture and biome like a face's; y (signed 16 bits)
-    /// and the box's height; its width and depth, corner AO in the top byte.
+    /// (10 bits each), direction, tint kind, sky light; texture and biome like a face's; y
+    /// (signed 16 bits) and the box's height; its width and depth less one (up to a whole tile
+    /// each), corner AO in the top byte.
     lod_face {
-        POS_MASK = 2047,
-        Z_SHIFT = 11,
-        DIR_SHIFT = 22,
-        TINT_SHIFT = 25,
+        POS_MASK = 1023,
+        Z_SHIFT = 10,
+        DIR_SHIFT = 20,
+        TINT_SHIFT = 23,
+        /// Sky light in 3 bits like a block light channel (`LIGHT_RG_SHIFT`), 7 being full.
+        SKY_SHIFT = 27,
         /// A part of a block (`lod_box`): word 3 holds its x and z edges (5 bits each, 1/16),
         /// word 2 its y edges, or with `EXTRUDE` it goes up the whole height.
         EXTRUDE_SHIFT = 30,
         PARTIAL_SHIFT = 31,
         HALF_SHIFT = 16,
         HALF_MASK = 0xFFFF,
-        /// A face's width and depth; its height has 10 bits.
-        SIZE_BITS = 6,
+        /// A face's width and depth less one; its height has 10 bits.
+        SIZE_BITS = 10,
+        DEPTH_SHIFT = 10,
         HEIGHT_MASK = 1023,
         EDGE_MASK = 31,
-        /// Block light, 3 bits a channel, where neither a face's size nor a box's edges go: red and
-        /// green at the top of word 2, blue's low bits under word 3's AO, its high bit in word 0.
+        /// Block light, 3 bits a channel (half its level), where neither a face's size nor a box's
+        /// edges go: red and green at the top of word 2, blue under word 3's AO.
         LIGHT_RG_SHIFT = 26,
-        LIGHT_B_SHIFT = 22,
-        LIGHT_B_HIGH_SHIFT = 29,
+        LIGHT_B_SHIFT = 20,
     }
     /// Tint kinds of faces and quads (0 none); mods' kinds follow the engine's.
     tint {
@@ -178,10 +181,13 @@ pub mod terrain {
             COLUMN_BIOMES = 2432,
         }
         /// Distant terrain tiles (`client::lod`): samples per side (a tile's 32 cells and one
-        /// around it), all of them.
+        /// around it), all of them, and words per sample: ground height and top block; biome
+        /// and the block under the top; what stands over the ground up to a height (a sea: its
+        /// surface and block), none for 0.
         lod {
             SIDE = 34,
             SAMPLES = 34 * 34,
+            WORDS = 3,
         }
         /// Expression step kinds.
         expr {
@@ -323,17 +329,24 @@ pub fn quad_uv(uv: [f32; 4], tint: u32) -> (u32, [u32; 4]) {
 }
 
 /// A distant terrain record (`lod_face`): the `dir` face of a box at `pos` in the tile, `size`
-/// blocks, lit by block light `light` (0..15 a channel).
+/// blocks (1 to a whole tile across), lit by sky light `sky` and block light `light` (0..15 a
+/// channel).
 #[inline]
-pub fn lod_record(dir: u32, pos: [i32; 3], size: [i32; 3], tex: u32, tint: u32, biome: u32, light: [u8; 3]) -> [u32; 4] {
+#[allow(clippy::too_many_arguments)]
+pub fn lod_record(dir: u32, pos: [i32; 3], size: [i32; 3], tex: u32, tint: u32, biome: u32, sky: u8, light: [u8; 3]) -> [u32; 4] {
     use lod_face as l;
     let (h, wide) = (l::HALF_SHIFT, (1 << l::SIZE_BITS) - 1);
     let [r, g, b] = light.map(|c| c.min(15) as u32 / 2);
+    let across = |v: i32| (v.max(1) as u32 - 1).min(wide);
     [
-        pos[0] as u32 | (pos[2] as u32) << l::Z_SHIFT | dir << l::DIR_SHIFT | tint << l::TINT_SHIFT | (b >> 2) << l::LIGHT_B_HIGH_SHIFT,
+        pos[0] as u32
+            | (pos[2] as u32) << l::Z_SHIFT
+            | dir << l::DIR_SHIFT
+            | tint << l::TINT_SHIFT
+            | (sky.min(15) as u32 / 2) << l::SKY_SHIFT,
         tex | biome << face::BIOME_SHIFT,
         (pos[1] as u32 & l::HALF_MASK) | (size[1].max(0) as u32).min(l::HEIGHT_MASK) << h | (r | g << 3) << l::LIGHT_RG_SHIFT,
-        (size[0] as u32).min(wide) | (size[2] as u32).min(wide) << h | (b & 3) << l::LIGHT_B_SHIFT,
+        across(size[0]) | across(size[2]) << l::DEPTH_SHIFT | b << l::LIGHT_B_SHIFT,
     ]
 }
 
@@ -346,7 +359,7 @@ pub fn lod_box(mut r: [u32; 4], min: [u32; 3], max: [u32; 3], extrude: bool) -> 
     if !extrude {
         r[2] = r[2] & !(l::HEIGHT_MASK << l::HALF_SHIFT) | (min[1] | max[1] << 5) << l::HALF_SHIFT;
     }
-    let keep = r[3] & (3 << l::LIGHT_B_SHIFT | 0xFF << 24);
+    let keep = r[3] & (7 << l::LIGHT_B_SHIFT | 0xFF << 24);
     r[3] = keep | min[0] | max[0] << 5 | min[2] << 10 | max[2] << 15;
     r
 }
@@ -403,7 +416,7 @@ fn records() -> String {
         "    let height = f32((w2 >> LOD_FACE_HALF_SHIFT) & LOD_FACE_HEIGHT_MASK);\n",
         "    if (w0 >> LOD_FACE_PARTIAL_SHIFT) == 0u {\n",
         "        let s = (1u << LOD_FACE_SIZE_BITS) - 1u;\n",
-        "        return corner * vec3<f32>(f32(w3 & s), height, f32((w3 >> LOD_FACE_HALF_SHIFT) & s));\n",
+        "        return corner * vec3<f32>(f32((w3 & s) + 1u), height, f32(((w3 >> LOD_FACE_DEPTH_SHIFT) & s) + 1u));\n",
         "    }\n",
         "    let e = vec4<f32>(vec4<u32>(w3, w3 >> 5u, w3 >> 10u, w3 >> 15u) & vec4(LOD_FACE_EDGE_MASK)) / 16.0;\n",
         "    var y = vec2<f32>(vec2<u32>(w2 >> LOD_FACE_HALF_SHIFT, w2 >> (LOD_FACE_HALF_SHIFT + 5u)) & vec2(LOD_FACE_EDGE_MASK)) / 16.0;\n",
@@ -413,10 +426,12 @@ fn records() -> String {
         "    let mn = vec3<f32>(e.x, y.x, e.z);\n",
         "    return mn + corner * (vec3<f32>(e.y, y.y, e.w) - mn);\n",
         "}\n",
-        "fn lod_light(w0: u32, w2: u32, w3: u32) -> vec3<f32> {\n",
+        "// Sky and block light, 0..1.\n",
+        "fn lod_light(w0: u32, w2: u32, w3: u32) -> vec4<f32> {\n",
         "    let rg = w2 >> LOD_FACE_LIGHT_RG_SHIFT;\n",
-        "    let b = ((w3 >> LOD_FACE_LIGHT_B_SHIFT) & 3u) | ((w0 >> LOD_FACE_LIGHT_B_HIGH_SHIFT) & 1u) << 2u;\n",
-        "    return vec3<f32>(f32(rg & 7u), f32((rg >> 3u) & 7u), f32(b)) * 2.0 / 15.0;\n",
+        "    let b = (w3 >> LOD_FACE_LIGHT_B_SHIFT) & 7u;\n",
+        "    let sky = (w0 >> LOD_FACE_SKY_SHIFT) & 7u;\n",
+        "    return vec4<f32>(select(f32(sky) * 2.0 / 15.0, 1.0, sky == 7u), vec3<f32>(f32(rg & 7u), f32((rg >> 3u) & 7u), f32(b)) * 2.0 / 15.0);\n",
         "}\n",
         "fn lod_ao(w3: u32) -> vec4<u32> {\n",
         "    let a = w3 >> 24u;\n",
@@ -606,8 +621,10 @@ gpu_struct! {
         pub light: u32,
         /// Entity effect slot (`shaders/entity_effect/<name>.wgsl`, 0 none).
         pub effect: u32,
+        /// 1: something worn, drawn on the kind's worn geometry instead of its skin's (read when
+        /// queued).
+        pub worn: u32,
         // Whole 16 bytes: WGSL rounds the array stride up to them.
-        pub pad0: u32,
         pub pad1: u32,
     }
 }
@@ -621,8 +638,9 @@ gpu_struct! {
         pub inflate: f32,
         pub faces: [[f32; 4]; 6],
         pub role: u32,
-        // Three words, not a vec3: WGSL would align that to 16 bytes.
-        pub pad0: u32,
+        /// The bone whose covering draws it: its own, or the one it is worn on.
+        pub cover: u32,
+        // Whole 16 bytes: WGSL rounds the array stride up to them.
         pub pad1: u32,
         pub pad2: u32,
     }
@@ -634,7 +652,8 @@ gpu_struct! {
         pub bone: u32,
         pub uv: [f32; 2],
         pub role: u32,
-        pub pad: u32,
+        /// As `GpuCuboid::cover`.
+        pub cover: u32,
     }
 }
 
@@ -1091,17 +1110,19 @@ mod tests {
         assert_eq!(corner_light([200, 3, 15, 16]), 15 | 3 << 4 | 15 << 8 | 15 << 12);
         let q = quad_pos([-2.0, 0.5, 61.9375]);
         assert_eq!([q & quad::POS_MASK, (q >> quad::POS_BITS) & quad::POS_MASK, q >> (2 * quad::POS_BITS)], [0, 40, 1023]);
-        let l = lod_record(4, [2047, -300, 5], [16, 7, 32], 9, 3, 2, [15, 4, 13]);
-        assert_eq!(l[0] & lod_face::POS_MASK, 2047);
+        let l = lod_record(4, [1023, -300, 5], [1024, 7, 1], 9, 3, 2, 9, [15, 4, 13]);
+        assert_eq!(l[0] & lod_face::POS_MASK, 1023);
         assert_eq!((l[0] >> lod_face::Z_SHIFT) & lod_face::POS_MASK, 5);
         assert_eq!((l[0] >> lod_face::DIR_SHIFT) & face::DIR_MASK, 4);
+        assert_eq!((l[0] >> lod_face::TINT_SHIFT) & tint::MASK, 3);
+        assert_eq!((l[0] >> lod_face::SKY_SHIFT) & 7, 4);
         assert_eq!(((l[2] << 16) as i32) >> 16, -300);
         let wide = (1 << lod_face::SIZE_BITS) - 1;
-        assert_eq!([l[3] & wide, (l[2] >> 16) & lod_face::HEIGHT_MASK, (l[3] >> 16) & wide], [16, 7, 32]);
+        assert_eq!([l[3] & wide, (l[2] >> 16) & lod_face::HEIGHT_MASK, (l[3] >> lod_face::DEPTH_SHIFT) & wide], [1023, 7, 0]);
         // A box keeps the light and AO, and its position.
         let b = lod_box([l[0], l[1], l[2], l[3] | 0xAB << 24], [1, 2, 3], [15, 14, 13], false);
         assert_eq!([b[0] & !(0b11 << lod_face::EXTRUDE_SHIFT), b[2] >> lod_face::LIGHT_RG_SHIFT, b[3] >> 24], [l[0], 7 | 2 << 3, 0xAB]);
-        assert_eq!((b[3] >> lod_face::LIGHT_B_SHIFT) & 3 | (b[0] >> lod_face::LIGHT_B_HIGH_SHIFT & 1) << 2, 6);
+        assert_eq!((b[3] >> lod_face::LIGHT_B_SHIFT) & 7, 6);
         let src = format!(
             "{}{}const F0: u32 = {}u;\nconst Q: u32 = {}u;\nconst L0: u32 = {}u;\nconst L2: u32 = {}u;\nconst L3: u32 = {}u;\n\
              @compute @workgroup_size(1) fn main() {{ _ = face_pos(F0); _ = face_dir(F0); _ = face_ao(F0); _ = quad_pos(Q); _ = lod_pos(L0, L2); _ = lod_corner(L0, L2, L3, vec3(1.0)); _ = lod_light(L0, L2, L3); _ = corner_light(1u, 2u, 3u); _ = quad_uv(Q); _ = quad_uv_fine(Q, Q, Q, Q, Q); _ = lod_dir(L0); _ = lod_tint(L0); }}\n",

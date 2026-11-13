@@ -21,13 +21,18 @@ pub use crate::gpu_layout::Instance;
 use crate::gpu_layout::{GpuCorner, GpuCuboid, rows};
 use crate::model::{self, Animation, BoneMotion, Bound, Drive, Motion, Playing, role};
 use crate::net::AvatarData;
-use crate::registry::Part;
+use crate::registry::{Cuboid, Part};
 
 /// A kind's model and animations.
 pub struct KindModel {
     pub parts: Vec<Part>,
     cuboids: (u32, u32),
     corners: (u32, u32),
+    /// What worn items are drawn on (`add_worn_geometry`), first and count as above.
+    worn_cuboids: (u32, u32),
+    worn_corners: (u32, u32),
+    /// Per bone, the bone it is worn on if it is worn geometry (`model::worn_targets`).
+    worn_on: Vec<Option<usize>>,
     pub anims: Vec<Bound>,
     /// Per action, its clips: this kind's own and what is left of the stock one under them.
     actions: FxHashMap<String, Vec<u32>>,
@@ -127,6 +132,11 @@ impl Act {
 }
 
 impl KindModel {
+    /// Its boxes and triangles in the tables: the skin's, or those worn items are drawn on.
+    fn ranges(&self, worn: bool) -> ((u32, u32), (u32, u32)) {
+        if worn { (self.worn_cuboids, self.worn_corners) } else { (self.cuboids, self.corners) }
+    }
+
     /// What plays for an engine action, nothing in hand or swapped.
     pub fn act(&self, a: Act) -> &[u32] {
         &self.engine[a as usize]
@@ -238,21 +248,38 @@ pub struct PlayClip {
     pub by_progress: bool,
 }
 
-/// A clip coming in or going out on one entity.
+/// A clip coming in or going out on one entity: how far in it was when it last turned (`from`,
+/// 0..1, at its holder's clock `since`) and how fast it goes now, so it is a function of the
+/// holder's clock and every client has it alike.
 #[derive(Clone, Copy)]
 pub struct Fade {
     clip: PlayClip,
-    /// How far in it is, 0..1.
-    on: f32,
+    since: f32,
+    from: f32,
+    rate: f32,
+}
+
+impl Fade {
+    fn on(&self, now: f32) -> f32 {
+        (self.from + self.rate * (now - self.since).max(0.0)).clamp(0.0, 1.0)
+    }
+
+    /// From `now` on at `rate` a second, going on from where it is.
+    fn turn(&mut self, now: f32, rate: f32) {
+        if self.rate != rate {
+            (self.from, self.since, self.rate) = (self.on(now), now, rate);
+        }
+    }
 }
 
 /// Seconds a clip takes to come and go unless its file says. What goes by an action's progress
 /// starts at once: its first frames are the action's.
 const BLEND_SECS: f32 = 0.12;
 
-/// Eases what plays over the standing clips in and out: on `t` what is wanted comes in, what no
-/// longer is goes out where it stopped. What is below keeps its order: over it, later clips win.
-pub fn fade_clips(fades: &mut Vec<Fade>, m: &KindModel, clips: &mut Clips, standing: usize, dt: f32) {
+/// Eases what plays over the standing clips in and out by the holder's clock `now` (seconds):
+/// what is wanted comes in, what no longer is goes out where it stopped. What is below keeps its
+/// order: over it, later clips win.
+pub fn fade_clips(fades: &mut Vec<Fade>, m: &KindModel, clips: &mut Clips, standing: usize, now: f32) {
     let wanted = *clips;
     clips.n = standing;
     let anim = |c: &PlayClip| m.anims.get(c.anim as usize).map(|b| &b.anim);
@@ -266,11 +293,12 @@ pub fn fade_clips(fades: &mut Vec<Fade>, m: &KindModel, clips: &mut Clips, stand
         let secs = anim(&f.clip)
             .and_then(|a| a.blend_out)
             .unwrap_or(BLEND_SECS);
-        f.on -= dt / secs.max(1e-3);
-        if f.on <= 0.0 {
+        f.turn(now, -1.0 / secs.max(1e-3));
+        let on = f.on(now);
+        if on <= 0.0 {
             return false;
         }
-        clips.push(PlayClip { w: f.clip.w * smooth(f.on), ..f.clip });
+        clips.push(PlayClip { w: f.clip.w * smooth(on), ..f.clip });
         true
     });
     for c in &wanted.all()[standing..] {
@@ -280,14 +308,15 @@ pub fn fade_clips(fades: &mut Vec<Fade>, m: &KindModel, clips: &mut Clips, stand
         let found = fades
             .iter()
             .position(|f| (f.clip.anim, f.clip.mirror) == (c.anim, c.mirror));
+        // What has no time to come in is there at once.
         let i = found.unwrap_or_else(|| {
-            fades.push(Fade { clip: *c, on: 0.0 });
+            fades.push(Fade { clip: *c, since: now, from: if secs <= 0.0 { 1.0 } else { 0.0 }, rate: 0.0 });
             fades.len() - 1
         });
         let f = &mut fades[i];
-        f.on = (f.on + dt / secs.max(1e-3)).min(1.0);
+        f.turn(now, 1.0 / secs.max(1e-3));
         f.clip = *c;
-        clips.push(PlayClip { w: c.w * smooth(f.on), ..*c });
+        clips.push(PlayClip { w: c.w * smooth(f.on(now)), ..*c });
     }
 }
 
@@ -513,28 +542,74 @@ fn stock_file(parts: &[Part]) -> &'static str {
 const STOCK_FILES: [&str; 5] =
     ["core:stock_biped", "core:stock_biped_arms_out", "core:stock_quadruped", "core:stock_spider", "core:stock_other"];
 
-/// A model's boxes and triangles into the two tables.
-fn add_geometry(parts: &[Part], cuboids: &mut Vec<GpuCuboid>, corners: &mut Vec<GpuCorner>) {
-    for (b, p) in parts.iter().enumerate() {
-        for cu in &p.cuboids {
-            let origin = [p.pivot[0] + cu.origin[0], p.pivot[1] + cu.origin[1], p.pivot[2] + cu.origin[2]];
-            cuboids.push(GpuCuboid {
-                origin,
-                bone: b as u32,
-                size: cu.size,
-                inflate: cu.inflate,
-                faces: cu.face_rects(),
-                role: p.role,
-                pad0: 0,
-                pad1: 0,
-                pad2: 0,
-            });
-        }
-        corners.extend(
-            p.mesh
+/// A box of bone `bone` for the table, drawn when bone `cover` (of role `role`) is.
+fn gpu_cuboid(cu: &Cuboid, p: &Part, bone: usize, cover: usize, role: u32) -> GpuCuboid {
+    GpuCuboid {
+        origin: [p.pivot[0] + cu.origin[0], p.pivot[1] + cu.origin[1], p.pivot[2] + cu.origin[2]],
+        bone: bone as u32,
+        size: cu.size,
+        inflate: cu.inflate,
+        faces: cu.face_rects(),
+        role,
+        cover: cover as u32,
+        pad1: 0,
+        pad2: 0,
+    }
+}
+
+/// Bone `bone`'s triangles for the table, drawn when bone `cover` (of role `role`) is.
+fn gpu_corners(p: &Part, bone: usize, cover: usize, role: u32) -> impl Iterator<Item = GpuCorner> + '_ {
+    p.mesh
+        .iter()
+        .map(move |v| GpuCorner { pos: v.pos, bone: bone as u32, uv: v.uv, role, cover: cover as u32 })
+}
+
+/// A model's boxes and triangles into the two tables, but for its worn geometry.
+fn add_geometry(parts: &[Part], worn_on: &[Option<usize>], cuboids: &mut Vec<GpuCuboid>, corners: &mut Vec<GpuCorner>) {
+    for (b, p) in parts
+        .iter()
+        .enumerate()
+        .filter(|(b, _)| worn_on[*b].is_none())
+    {
+        cuboids.extend(p.cuboids.iter().map(|cu| gpu_cuboid(cu, p, b, b, p.role)));
+        corners.extend(gpu_corners(p, b, b, p.role));
+    }
+}
+
+/// What worn items are drawn on, per bone of a model: its `armor_` bones if it has any; else
+/// vanilla armor's piece in vanilla's unwrap fitted to its biggest box, where there is one
+/// (`model::armor_unwrap`); else its own boxes and triangles, for a texture in its skin's layout.
+/// Every model has it, players' own ones too, so armor goes on whatever wears it.
+fn add_worn_geometry(parts: &[Part], worn_on: &[Option<usize>], cuboids: &mut Vec<GpuCuboid>, corners: &mut Vec<GpuCorner>) {
+    let volume = |c: &&Cuboid| c.size[0] * c.size[1] * c.size[2];
+    for (t, p) in parts
+        .iter()
+        .enumerate()
+        .filter(|(t, _)| worn_on[*t].is_none())
+    {
+        let own: Vec<usize> = (0..parts.len())
+            .filter(|&b| worn_on[b] == Some(t))
+            .collect();
+        if !own.is_empty() {
+            for b in own {
+                let q = &parts[b];
+                cuboids.extend(q.cuboids.iter().map(|cu| gpu_cuboid(cu, q, b, t, p.role)));
+                corners.extend(gpu_corners(q, b, t, p.role));
+            }
+        } else if let (Some((uv, size)), Some(main)) = (
+            model::armor_unwrap(p),
+            p.cuboids
                 .iter()
-                .map(|v| GpuCorner { pos: v.pos, bone: b as u32, uv: v.uv, role: p.role, pad: 0 }),
-        );
+                .max_by(|a, b| volume(a).total_cmp(&volume(b))),
+        ) {
+            // Limbs at -x have their unwrap mirrored, as vanilla's.
+            let mirror = p.pivot[0] + main.origin[0] + main.size[0] / 2.0 < 0.0;
+            let piece = Cuboid { origin: [0.0; 3], size, uv, inflate: 0.0, mirror, faces: None };
+            cuboids.push(GpuCuboid { faces: piece.face_rects(), ..gpu_cuboid(main, p, t, t, p.role) });
+        } else {
+            cuboids.extend(p.cuboids.iter().map(|cu| gpu_cuboid(cu, p, t, t, p.role)));
+            corners.extend(gpu_corners(p, t, t, p.role));
+        }
     }
 }
 
@@ -673,8 +748,11 @@ fn push_kind(
     texture: Option<[u32; 2]>,
     clips: (&[Arc<Animation>], &[Arc<Animation>], &[(u32, Vec<Arc<Animation>>)]),
 ) -> u32 {
+    let worn_on = model::worn_targets(&parts);
     let (c0, v0) = (tables.0.len() as u32, tables.1.len() as u32);
-    add_geometry(&parts, &mut tables.0, &mut tables.1);
+    add_geometry(&parts, &worn_on, &mut tables.0, &mut tables.1);
+    let (c1, v1) = (tables.0.len() as u32, tables.1.len() as u32);
+    add_worn_geometry(&parts, &worn_on, &mut tables.0, &mut tables.1);
     let (anims, actions, items) = bind_kind(&parts, clips.0, clips.1, clips.2);
     let engine = ACTS.map(|n| actions.get(n).cloned().unwrap_or_default());
     kinds.push(KindModel {
@@ -689,8 +767,11 @@ fn push_kind(
             let (lo, hi) = bounds_of(&parts);
             lo.abs().max(hi.abs()).length() / 16.0
         },
-        cuboids: (c0, tables.0.len() as u32 - c0),
-        corners: (v0, tables.1.len() as u32 - v0),
+        cuboids: (c0, c1 - c0),
+        corners: (v0, v1 - v0),
+        worn_cuboids: (c1, tables.0.len() as u32 - c1),
+        worn_corners: (v1, tables.1.len() as u32 - v1),
+        worn_on,
         parts,
         anims,
         actions,
@@ -801,6 +882,82 @@ mod tests {
     fn settle(s: &mut Swing, pivot: Vec3, rest: Vec3, d: BoneMotion, secs: f32) {
         for _ in 0..(secs * 60.0) as u32 {
             s.step(pivot, rest, d, 1.0 / 60.0);
+        }
+    }
+
+    fn part(name: &str, parent: Option<u32>, pivot: [f32; 3], boxes: &[([f32; 3], [f32; 3], [f32; 2], bool)]) -> Part {
+        let cuboids = boxes
+            .iter()
+            .map(|&(origin, size, uv, mirror)| Cuboid { origin, size, uv, inflate: 0.0, mirror, faces: None })
+            .collect();
+        Part { name: name.into(), parent, pivot, role: 0, cuboids, rest: [0.0; 3], mesh: Vec::new() }
+    }
+
+    /// A model's skin and worn geometry, its roles assigned.
+    fn geometry(mut parts: Vec<Part>) -> (Vec<GpuCuboid>, Vec<GpuCuboid>) {
+        model::assign_roles(&mut parts);
+        let worn_on = model::worn_targets(&parts);
+        let (mut skin, mut worn, mut corners) = (Vec::new(), Vec::new(), Vec::new());
+        add_geometry(&parts, &worn_on, &mut skin, &mut corners);
+        add_worn_geometry(&parts, &worn_on, &mut worn, &mut corners);
+        (skin, worn)
+    }
+
+    fn same(a: &GpuCuboid, b: &GpuCuboid) -> bool {
+        bytemuck::bytes_of(a) == bytemuck::bytes_of(b)
+    }
+
+    #[test]
+    fn armor_on_the_classic_humanoid_is_drawn_on_its_own_boxes() {
+        // The SDK's `humanoid`: its unwrap is vanilla armor's.
+        let limb = |uv: [f32; 2], mirror| ([-2.0, -10.0, -2.0], [4.0, 12.0, 4.0], uv, mirror);
+        let leg = |mirror| ([-2.0, -12.0, -2.0], [4.0, 12.0, 4.0], [0.0, 16.0], mirror);
+        let (skin, worn) = geometry(vec![
+            part("head", None, [0.0, 24.0, 0.0], &[([-4.0, 0.0, -4.0], [8.0; 3], [0.0, 0.0], false)]),
+            part("body", None, [0.0, 24.0, 0.0], &[([-4.0, -12.0, -2.0], [8.0, 12.0, 4.0], [16.0, 16.0], false)]),
+            part("rightArm", None, [-6.0, 22.0, 0.0], &[limb([40.0, 16.0], true)]),
+            part("leftArm", None, [6.0, 22.0, 0.0], &[limb([40.0, 16.0], false)]),
+            part("rightLeg", None, [-2.0, 12.0, 0.0], &[leg(true)]),
+            part("leftLeg", None, [2.0, 12.0, 0.0], &[leg(false)]),
+        ]);
+        assert_eq!(worn.len(), skin.len());
+        for (i, (w, s)) in worn.iter().zip(&skin).enumerate() {
+            assert!(same(w, s), "box {i} worn as it is");
+        }
+    }
+
+    #[test]
+    fn armor_fits_a_bigger_head_and_leaves_its_ears_and_tail() {
+        let (skin, worn) = geometry(vec![
+            part(
+                "head",
+                None,
+                [0.0, 24.0, 0.0],
+                &[([-5.0, 0.0, -6.0], [10.0, 10.0, 10.0], [0.0, 0.0], false), ([5.0, 8.0, -1.0], [2.0, 4.0, 1.0], [40.0, 0.0], false)],
+            ),
+            part("tail", None, [0.0, 12.0, 2.0], &[([-1.0, -1.0, 0.0], [2.0, 2.0, 8.0], [24.0, 32.0], false)]),
+        ]);
+        assert_eq!(worn.len(), 2, "a helmet and the tail's own box");
+        let helmet = &worn[0];
+        assert_eq!((helmet.origin, helmet.size), ([-5.0, 24.0, -6.0], [10.0; 3]), "on the head, the ears left out");
+        let vanilla = Cuboid { origin: [0.0; 3], size: [8.0; 3], uv: [0.0, 0.0], inflate: 0.0, mirror: false, faces: None };
+        assert_eq!(helmet.faces, vanilla.face_rects(), "painted from vanilla's helmet");
+        assert_eq!((helmet.role, helmet.cover), (role::HEAD, 0));
+        assert!(same(&worn[1], &skin[2]), "what has no armor piece is worn in its skin's layout");
+    }
+
+    #[test]
+    fn armor_bones_are_worn_and_never_skin() {
+        let (skin, worn) = geometry(vec![
+            part("body", None, [0.0, 24.0, 0.0], &[([-4.0, -12.0, -2.0], [8.0, 12.0, 4.0], [16.0, 16.0], false)]),
+            part("head", None, [0.0, 24.0, 0.0], &[([-4.0, 0.0, -4.0], [8.0; 3], [0.0, 0.0], false)]),
+            part("armor_head", Some(1), [0.0, 24.0, 0.0], &[([-5.0, 0.0, -5.0], [10.0, 9.0, 10.0], [0.0, 0.0], false)]),
+            part("visor", Some(2), [0.0, 28.0, -5.0], &[([-4.0, -1.0, -1.0], [8.0, 2.0, 1.0], [32.0, 0.0], false)]),
+        ]);
+        assert_eq!(skin.len(), 2, "the body and the head only");
+        assert_eq!(worn.len(), 3, "the body's piece and the helmet the file has, visor and all");
+        for (w, bone) in worn[1..].iter().zip([2, 3]) {
+            assert_eq!((w.bone, w.cover, w.role), (bone, 1, role::HEAD), "moves with its bone, worn when the head is covered");
         }
     }
 
@@ -1280,6 +1437,67 @@ impl Models {
             })
     }
 
+    /// The first box of what `entity` showed last frame (its model, what it holds and has on) that
+    /// a ray from `from` along `dir` (the world, a unit vector) enters within `max`: that model,
+    /// the bone and how far along.
+    pub fn ray_bones(&self, entity: u64, from: glam::DVec3, dir: glam::DVec3, max: f64) -> Option<(u32, usize, f64)> {
+        let mut best: Option<(u32, usize, f64)> = None;
+        for &(_, kind, first) in self.located.iter().filter(|l| l.0 == entity) {
+            let Some(m) = self.kinds.get(kind as usize) else { continue };
+            for (i, p) in m
+                .parts
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| m.worn_on[*i].is_none())
+            {
+                // In the bone's pixels the ray goes by the same steps: its own length stays the world's.
+                let back = self.bone(first as usize + i).inverse();
+                let o = back
+                    .transform_point3((from - self.located_from).as_vec3())
+                    .as_dvec3();
+                let d = back.transform_vector3(dir.as_vec3()).as_dvec3();
+                for cu in &p.cuboids {
+                    let lo = Vec3::from_array(p.pivot) + Vec3::from_array(cu.origin);
+                    let b = crate::physics::Aabb { min: lo.as_dvec3(), max: (lo + Vec3::from_array(cu.size)).as_dvec3() };
+                    if let Some((t, _)) = crate::physics::ray_aabb(o, d, &b, max) {
+                        if best.is_none_or(|b| t < b.2) {
+                            best = Some((kind, i, t));
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Whether `entity` was shown last frame: its bones are known.
+    pub fn posed(&self, entity: u64) -> bool {
+        self.located.iter().any(|l| l.0 == entity)
+    }
+
+    /// The bone the whole of `entity`'s own model goes with (its `body`, else its first), as last shown.
+    pub fn main_bone(&self, entity: u64) -> Option<(u32, usize)> {
+        let &(_, kind, _) = self.located.iter().find(|l| l.0 == entity)?;
+        let parts = &self.kinds.get(kind as usize)?.parts;
+        Some((kind, model::bone_named(parts, "body").unwrap_or(0)))
+    }
+
+    /// A point and a direction in the world as they were in bone `part` of `entity`'s model
+    /// `kind` last frame, in its pixels.
+    pub fn to_bone(&self, entity: u64, kind: u32, part: usize, p: glam::DVec3, d: glam::DVec3) -> Option<(Vec3, Vec3)> {
+        let &(.., first) = self.located.iter().find(|l| l.0 == entity && l.1 == kind)?;
+        let back = self.bone(first as usize + part).inverse();
+        Some((back.transform_point3((p - self.located_from).as_vec3()), back.transform_vector3(d.as_vec3())))
+    }
+
+    /// Where a point and a direction in a bone's pixels were in the world last frame (`to_bone`
+    /// the other way).
+    pub fn from_bone(&self, entity: u64, kind: u32, part: usize, p: Vec3, d: Vec3) -> Option<(glam::DVec3, glam::DVec3)> {
+        let &(.., first) = self.located.iter().find(|l| l.0 == entity && l.1 == kind)?;
+        let m = self.bone(first as usize + part);
+        Some((self.located_from + m.transform_point3(p).as_dvec3(), m.transform_vector3(d).as_dvec3().normalize_or_zero()))
+    }
+
     pub fn destroy(&mut self, gpu: &mut dyn Backend) {
         for b in [self.cuboids, self.corners].into_iter().chain(
             self.instances
@@ -1370,7 +1588,7 @@ impl Models {
     pub fn clips_along(&self, to: u32, holder: u32, clips: &[PlayClip], clock: f32, off: bool) -> Clips {
         let mut out = Clips::default();
         let (Some(m), Some(h)) = (self.kinds.get(to as usize), self.kinds.get(holder as usize)) else { return out };
-        m.play(&mut out, m.act(Act::Idle), &Play { clock, looping: true, ..Play::default() });
+        m.play(&mut out, m.act(Act::Idle), &Play { clock, looping: true, mirror: off, ..Play::default() });
         for c in clips.iter().filter(|c| !c.hand || c.mirror == off) {
             let Some(b) = h.anims.get(c.anim as usize) else { continue };
             let name = b
@@ -1382,7 +1600,7 @@ impl Models {
             let own = if name == "idle" { &[][..] } else { m.action(0, name) };
             for &i in own {
                 let Some(own) = m.anims.get(i as usize) else { continue };
-                out.push(PlayClip { anim: i, t: c.t / b.anim.length * own.anim.length, w: c.w, ..PlayClip::default() });
+                out.push(PlayClip { anim: i, t: c.t / b.anim.length * own.anim.length, w: c.w, mirror: off, ..PlayClip::default() });
             }
             // A holder's own clip, not whoever else's of that name, on this one's bones.
             for &i in &m.brought {
@@ -1390,7 +1608,7 @@ impl Models {
                     .get(i as usize)
                     .is_some_and(|own| Arc::ptr_eq(&own.anim, &b.anim))
                 {
-                    out.push(PlayClip { anim: i, t: c.t, w: c.w, ..PlayClip::default() });
+                    out.push(PlayClip { anim: i, t: c.t, w: c.w, mirror: off, ..PlayClip::default() });
                 }
             }
         }
@@ -1406,7 +1624,8 @@ impl Models {
     pub fn queue(&mut self, kind: u32, first: u32, layers: impl IntoIterator<Item = Instance>) {
         let Some(m) = self.kinds.get(kind as usize) else { return };
         for mut inst in layers {
-            (inst.bones, inst.cuboids, inst.cuboid_count, inst.vertices) = (first, m.cuboids.0, m.cuboids.1, m.corners.0);
+            let (cuboids, corners) = m.ranges(inst.worn != 0);
+            (inst.bones, inst.cuboids, inst.cuboid_count, inst.vertices) = (first, cuboids.0, cuboids.1, corners.0);
             self.queued.push((kind, inst));
         }
     }
@@ -1520,7 +1739,7 @@ impl Models {
         if self.queued.is_empty() {
             return;
         }
-        self.queued.sort_by_key(|q| q.0);
+        self.queued.sort_by_key(|q| (q.0, q.1.worn));
         let grow = crate::gpu_layout::frame_buffer;
         let ib = grow(
             gpu,
@@ -1558,10 +1777,13 @@ impl Models {
         list.bind(crate::gpu_layout::bind::model::BONES, bb);
         let mut i = 0;
         while i < self.queued.len() {
-            let kind = self.queued[i].0;
-            let end = i + self.queued[i..].iter().take_while(|q| q.0 == kind).count();
-            let m = &self.kinds[kind as usize];
-            let vertices = m.cuboids.1 * 36 + m.corners.1;
+            let (kind, worn) = (self.queued[i].0, self.queued[i].1.worn);
+            let end = i + self.queued[i..]
+                .iter()
+                .take_while(|q| (q.0, q.1.worn) == (kind, worn))
+                .count();
+            let (cuboids, corners) = self.kinds[kind as usize].ranges(worn != 0);
+            let vertices = cuboids.1 * 36 + corners.1;
             list.push(Cmd::Draw { vertices, instances: (end - i) as u32, first_vertex: 0, first_instance: i as u32 });
             i = end;
         }

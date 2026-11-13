@@ -926,11 +926,11 @@ pub fn layout_with(spans: &[Span], font: &Font, max_width: Option<f32>, line_hei
 
 /// A key's name for players: translated (`keyname.ShiftLeft`) when the language has it.
 /// `Ctrl+T`: the modifiers (`keyname.ctrl` ..., either side's key), then the key.
-/// What a player reads for a binding: its keys, `x2` after a double tap's (`Wx2`).
+/// What a player reads for a binding: its keys, `*2` after a double tap's (`W*2`).
 pub fn display_binding(lang: &Lang, b: crate::input::Binding) -> String {
     let chord = display_chord(lang, b.chord);
     match b.trigger {
-        crate::input::Trigger::Double => format!("{chord}x2"),
+        crate::input::Trigger::Double => format!("{chord}*2"),
         _ => chord,
     }
 }
@@ -958,6 +958,29 @@ pub fn display_key(lang: &Lang, k: crate::input::Key) -> String {
 
 pub fn plain(s: &str) -> Vec<Span> {
     vec![Span::text(s, None)]
+}
+
+/// The spans holding chars `from..to` of their text, cut where a span crosses either end.
+pub fn slice(spans: &[Span], from: usize, to: usize) -> Vec<Span> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for s in spans {
+        match &s.piece {
+            Piece::Text(t) => {
+                let n = t.chars().count();
+                let (a, b) = (from.max(at), to.min(at + n));
+                if a < b {
+                    let mut part = s.clone();
+                    part.piece = Piece::Text(t.chars().skip(a - at).take(b - a).collect());
+                    out.push(part);
+                }
+                at += n;
+            }
+            _ if (from..to).contains(&at) => out.push(s.clone()),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The text of spans, without icons or formatting.

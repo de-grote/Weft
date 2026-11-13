@@ -115,12 +115,25 @@ The main menu's logo is the GUI texture `logo` (drawn across the menu bar in who
 | anchor (`hud_anchor::..`) | where |
 |---|---|
 | `TOP_LEFT`, `TOP_RIGHT`, `BOTTOM_LEFT`, `BOTTOM_RIGHT` | the corners of the window |
+| `TOP_CENTER` | centered at the top of the window |
 | `HOTBAR`, `HOTBAR_LEFT`, `HOTBAR_RIGHT` | over the hotbar, on its left and right (health and hunger live there) |
 | `ABOVE_HOTBAR` | centered above all of that (the held item's name) |
 | `UNDER_CROSSHAIR` | just under the crosshair, which stays where it is (the attack indicator) |
 | `DEBUG_LEFT`, `DEBUG_RIGHT` | a panel of the F3 overlay, titled by the element's name as a translation key |
 
 F3 panels from mods take the key numbers after the engine's five, so the first one is F3+6.
+
+Use `.rebuild_when(|view| revision)` on a HUD element when its set of widgets changes.
+The builder runs again only when that `u64` revision changes; text, bars and other live values
+still use bindings. `view.target()` identifies the block or entity under the crosshair.
+For a block it gives its `state`, `pos` and `body` (0 for the world); for an entity, its `entity`
+id. Nothing targeted gives `None`.
+
+Base's target information panel accepts `r.screen_part(&base_api::TARGET_INFO, "details", order,
+|ui| ..)`. The same text, item, progress and icon widgets work there as on a screen.
+Read entity components shared with `SYNC_WATCHERS`, or use your mod's existing channels for
+server data the client doesn't have. A HUD element exposes its own extension areas with
+`ui.screen_parts(ELEMENT.name(), "details")`.
 
 The engine's own parts are elements like these: `core:hotbar`, `core:held_name`, `core:crosshair`, `core:chat` and the F3 panels, `core:debug.<group>`. Players arrange all of them, yours too, in **Settings > Arrange HUD**: drag to move, right click to hide. You don't do anything for it, your element just needs a name, and `hud.element.<mod>.<name>` in your lang file is what the editor calls it. It ends up in `config/hud.txt`, which can be edited by hand too: `base:food = top_right 2` (anchor, then order), `core:hotbar = at 0.5 1 0 -4` (a point of the window and of the element, then GUI pixels from there), and `hidden` at the end of either.
 

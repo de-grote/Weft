@@ -261,17 +261,27 @@ impl ClientWorld {
     /// Above the camera a cube not here yet is taken for air: those are the new top of the view
     /// while rising, nearly always sky. Nothing but air all the way down means the same, unless
     /// the land lies under what the view reaches, seen from high up: that is left to distant terrain.
-    pub fn column_shown(&self, col: IVec2, seed: u64) -> bool {
+    /// `through`: what can be seen through (a sea, glass) counts as air, so a sea shows its ground
+    /// only once its floor is drawn too, never when it is deeper than the view reaches.
+    pub fn column_shown(&self, col: IVec2, seed: u64, through: bool) -> bool {
         let lo = self.range.0;
-        let def = &crate::content::content().dims[self.dim as usize];
+        let c = crate::content::content();
+        let def = &c.dims[self.dim as usize];
         let land_below = || {
-            def.column(seed, col.x * 16 + 8, col.y * 16 + 8)
-                .is_some_and(|c| c.height >> 4 < lo)
+            through
+                || def
+                    .column(seed, col.x * 16 + 8, col.y * 16 + 8)
+                    .is_some_and(|c| c.height >> 4 < lo)
+        };
+        let see = |p: u32| p == AIR || through && c.states[p as usize].layer == weft_abi::RenderLayer::Translucent;
+        let clear = |s: &Slot| match s.cube.uniform_state() {
+            Some(state) => see(state),
+            None => through && s.cube.palette().iter().all(|&p| see(p)),
         };
         shows_ground(self.range, self.eye, land_below, |y| {
             self.cubes
                 .get(&IVec3::new(col.x, y, col.y))
-                .map(|s| (s.shown, s.cube.uniform_state() == Some(AIR), s.sky & ABOVE != 0))
+                .map(|s| (s.shown, clear(s), s.sky & ABOVE != 0))
         })
     }
 

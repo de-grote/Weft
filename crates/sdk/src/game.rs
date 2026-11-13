@@ -64,6 +64,12 @@ impl Spawn {
         self.desc.set |= abi::spawn_set::VELOCITY;
         self
     }
+    /// Adds its owner's current velocity once at spawn, including a mount or moving platform.
+    /// Combine with `owner(id)` and `velocity(v)` to launch relative to the shooter.
+    pub fn inherit_velocity(mut self) -> Self {
+        self.desc.set |= abi::spawn_set::INHERIT_VELOCITY;
+        self
+    }
     /// Radians, like `EntityState::yaw`.
     pub fn yaw(mut self, radians: f32) -> Self {
         self.desc.yaw = radians;
@@ -111,6 +117,11 @@ impl Damage {
         self.0.crit = 1;
         self
     }
+    /// The part of the hitbox it lands on (`hitbox_part::HEAD`, `hitbox_part_id("tail")`).
+    pub fn part(mut self, part: u32) -> Self {
+        self.0.part = part;
+        self
+    }
 }
 
 // ---------------------------------------------------------------- world helpers
@@ -127,7 +138,7 @@ impl World {
         self.action_play(id, "", false);
     }
 
-    /// While this holds, entity `id` plays action `to` wherever it would play `from`: a creeper
+    /// While this holds, entity `id` plays action `to` wherever it would play `from`: a mob
     /// running from a cat plays its own run instead of `walk`. Everyone who sees it sees it, and
     /// without a clip for `to` it goes on playing `from`.
     pub fn action_override(&self, id: u64, from: &str, to: &str) {
@@ -179,11 +190,31 @@ impl World {
         let mut s = EntityState::default();
         (unsafe { (host().entity_get)(self.raw(), id, &mut s) } != 0).then_some(s)
     }
-    /// Places `template` with its lowest corner at `pos`; false (and nothing placed) when part
-    /// of it isn't loaded.
-    pub fn place_template(&self, template: &crate::Template, pos: impl Into<BlockPos>) -> bool {
+    /// Places `template` with its lowest corner at `pos` once placed with `transform`, its slots
+    /// filled from `palette` (else its defaults). What undoes it (`unplace`), `None` (and nothing
+    /// placed) when part of it isn't loaded.
+    pub fn place_template(
+        &self,
+        template: &crate::Template,
+        pos: impl Into<BlockPos>,
+        transform: crate::Transform,
+        palette: Option<&crate::Palette>,
+    ) -> Option<u64> {
         let pos = pos.into();
-        unsafe { (host().place_template)(self.raw(), Str::new(template.name()), &pos) != 0 }
+        let palette = Str::new(palette.map_or("", |p| p.name()));
+        let id = unsafe { (host().place)(self.raw(), Str::new(template.name()), &pos, transform.0 as u32, palette) };
+        (id != 0).then_some(id)
+    }
+    /// Puts feature `feature` into the world now as if it started at `pos` (its plan or template,
+    /// with what they bring). What undoes it, `None` when part of it isn't loaded.
+    pub fn place_feature(&self, feature: &crate::Feature, pos: impl Into<BlockPos>) -> Option<u64> {
+        let pos = pos.into();
+        let id = unsafe { (host().place)(self.raw(), Str::new(feature.name()), &pos, 0, Str::new("")) };
+        (id != 0).then_some(id)
+    }
+    /// Puts back what a placing replaced (the last 16 of a dimension are kept); whether it could.
+    pub fn unplace(&self, placing: u64) -> bool {
+        unsafe { (host().unplace)(self.raw(), placing) != 0 }
     }
     /// Changes what the entity is now, only what is named, when the edit is dropped:
     /// `w.entity_modify(id).velocity(v).yaw(y);`. Players' own clients follow.
@@ -461,7 +492,7 @@ impl World {
         out
     }
 
-    /// A white flash on an entity for everyone who sees it (a creeper about to go off).
+    /// A white flash on an entity for everyone who sees it (something about to go off).
     pub fn flash(&self, id: u64) {
         self.entity_effect(id, &crate::entity_effects::FLASH, 1, 2)
     }
@@ -1097,6 +1128,10 @@ impl EntityBuilder<'_> {
     pub fn projectile(self, p: Projectile) -> Self {
         self.set(&comps::entity::PROJECTILE, p.0)
     }
+    /// What hits land on, part by part (`Hitboxes::humanoid()` ...); without, its whole box.
+    pub fn hitboxes(self, h: Hitboxes) -> Self {
+        self.set(&comps::entity::HITBOXES, h.0)
+    }
     pub fn walk_speed(self, s: f32) -> Self {
         self.set(&comps::entity::SPEED, s)
     }
@@ -1291,6 +1326,11 @@ impl MenuCtx {
     pub fn player(&self) -> u64 {
         self.args.player
     }
+    /// In `on_take` of a crafting grid's result (`Slots::crafting`), how many runs of its recipe
+    /// that was (a shift-click crafts all that fit at once); 1 otherwise.
+    pub fn times(&self) -> u32 {
+        self.args.times.max(1)
+    }
     /// What the menu was opened on (a block entity, a mob, a pouch in a slot); `None` for
     /// the player's own and a crafting table's.
     pub fn owner(&self) -> Option<Holder> {
@@ -1410,6 +1450,13 @@ impl Slots {
     pub fn liquid(mut self, capacity: u32) -> Self {
         self.flags |= abi::slot_flags::LIQUID;
         self.limit = capacity;
+        self
+    }
+    /// A crafting grid of the menu's first `.recipes(..)` kind: the engine shows what it makes in
+    /// the menu's `output()` group and uses it up when that is taken, as the recipe says
+    /// (`RecipeBuilder::keep`, `wear`, `leaves`); a shift-click crafts all that fits at once.
+    pub fn crafting(mut self) -> Self {
+        self.flags |= abi::slot_flags::GRID;
         self
     }
     /// Items only come out (results).
@@ -1725,15 +1772,15 @@ impl Registry {
         unsafe { (host().reg_command_branch)(self.raw, Str::new(command), Str::new(usage), 1, cb) }
     }
 
-    /// Adds to place `area` of `screen` without replacing the screen: a button in the main menu is
+    /// Adds to place `area` of a screen or HUD element without replacing it: a main menu button is
     /// `r.screen_part(&screens::TITLE, "buttons", 0, |ui| ..)`. Lower `order` comes first. The
     /// engine's places: `TITLE` `buttons` and `side`, `PAUSE` `buttons`, `SETTINGS` `buttons`, and
     /// beside menus: any menu's own `side` (`r.screen_part(&base::CHEST, "side", ..)`, another
     /// mod's menu too) and `MENUS` `side` beside every one (a sort button). Named
     /// `<mod>:<screen>/<area>` (`base:pause/buttons`, the next `/2`..), other mods edit it by that.
-    pub fn screen_part(
+    pub fn screen_part<K: crate::kind::Kind>(
         &mut self,
-        screen: &Menu,
+        screen: &crate::Handle<K>,
         area: &str,
         order: i32,
         f: impl Fn(&mut Ui) + Send + Sync + 'static,
@@ -1850,6 +1897,24 @@ impl Registry {
 /// unless `named`: other mods edit and remove it by that name (`r.remove(&Recipe::named(..))`).
 /// Any other component is data it carries for what makes it (`.set(&ENERGY_PER_TICK, 32)`), which
 /// the kind's info line can show.
+/// An ingredient of a recipe by its pattern character (`'h'`), or for one without a pattern by
+/// its place among the inputs (`0`).
+pub trait RecipeSlot {
+    fn key(&self) -> String;
+}
+
+impl RecipeSlot for char {
+    fn key(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl RecipeSlot for usize {
+    fn key(&self) -> String {
+        self.to_string()
+    }
+}
+
 pub struct RecipeBuilder<'a> {
     reg: &'a mut Registry,
     e: crate::entry::Entry,
@@ -1884,6 +1949,25 @@ impl RecipeBuilder<'_> {
         self.push(&comps::recipe::OUTPUTS, pool)
     }
     /// Works, but the recipe viewer doesn't list it.
+    /// Ingredient `key` (its pattern character, or for a recipe without a pattern its place
+    /// among the inputs) stays as it is: a mold, a catalyst.
+    pub fn keep(self, key: impl RecipeSlot) -> Self {
+        self.uses(key, abi::recipe_use::KEEP, 0, "")
+    }
+    /// Ingredient `key` stays and wears by `amount` a run, breaking when it is worn out: a hammer.
+    pub fn wear(self, key: impl RecipeSlot, amount: u32) -> Self {
+        self.uses(key, abi::recipe_use::WEAR, amount, "")
+    }
+    /// Ingredient `key` is used up and `item` takes its place (any mod's): a lava bucket leaving
+    /// its bucket. Without this one leaves its item's `remainder`.
+    pub fn leaves(self, key: impl RecipeSlot, item: &str) -> Self {
+        let item = crate::full_name(item);
+        self.uses(key, abi::recipe_use::LEAVES, 0, &item)
+    }
+    fn uses(self, key: impl RecipeSlot, how: u32, amount: u32, item: &str) -> Self {
+        let u = abi::RecipeUse { key: key.key(), how, amount, item: item.to_string() };
+        self.push(&comps::recipe::USES, u)
+    }
     pub fn hidden(self) -> Self {
         self.tag(abi::comp::recipe::HIDDEN)
     }
@@ -1954,6 +2038,16 @@ pub struct HudElementBuilder<'a> {
 }
 
 impl HudElementBuilder<'_> {
+    /// Rebuilds the layout when this revision changes. Keep changing text and numbers in
+    /// bindings; use this for a different set of widgets, such as a new inspected block.
+    pub fn rebuild_when(self, f: impl Fn(&crate::ClientView) -> u64 + Send + Sync + 'static) -> Self {
+        self.set(
+            &comps::hud_element::REBUILD,
+            callback(move |a: &mut abi::UiRevisionArgs| {
+                a.revision = f(&crate::ClientView::from_raw(a.client));
+            }),
+        )
+    }
     /// Where it sits (`hud_anchor::*`).
     pub fn anchor(self, anchor: &str) -> Self {
         self.set_text(&comps::hud_element::ANCHOR, anchor)
@@ -2217,6 +2311,91 @@ impl Projectile {
     /// It stays stuck where it hits a block, for `ticks` (vanilla's arrow a minute).
     pub fn sticks(mut self, ticks: u32) -> Self {
         (self.0.sticks, self.0.stuck_ticks) = (true, ticks);
+        self
+    }
+}
+
+/// What hits land on, part by part (`EntityBuilder::hitboxes`): boxes in pixels (1/16 block, its
+/// feet at 0, -Z its front, -X its right) at the kind's size; one made bigger is hit bigger. Rays, arrows and blows tell the part they hit (`RayHit::part`, `Damage::part`, the
+/// `part` a chain step reads in its query). They go with the body, a head with the look, arms
+/// and legs swing as it walks: run and an arrow may pass between them. Not the model's boxes:
+/// how a mob looks never changes where it can be hit.
+#[derive(Clone)]
+pub struct Hitboxes(abi::Hitboxes);
+
+impl Hitboxes {
+    pub fn new() -> Hitboxes {
+        Hitboxes(abi::Hitboxes { parts: Vec::new() })
+    }
+    fn add(mut self, name: &str, min: [f32; 3], max: [f32; 3], pivot: [f32; 3], follows: u32, swing: f32, phase: f32) -> Self {
+        self.0
+            .parts
+            .push(abi::HitboxPart { name: name.into(), min, max, pivot, follows, swing, phase });
+        self
+    }
+    /// A part going with the body.
+    pub fn part(self, name: &str, min: [f32; 3], max: [f32; 3]) -> Self {
+        self.add(name, min, max, [0.0; 3], abi::hitbox_follows::BODY, 0.0, 0.0)
+    }
+    /// A head: it turns with the look about `pivot`, its neck.
+    pub fn head(self, name: &str, min: [f32; 3], max: [f32; 3], pivot: [f32; 3]) -> Self {
+        self.add(name, min, max, pivot, abi::hitbox_follows::LOOK, 0.0, 0.0)
+    }
+    /// A leg or an arm: it swings about `pivot` as it walks, `swing` radians at a full stride,
+    /// `phase` radians after the beat (`PI` the other half of the step).
+    pub fn limb(self, name: &str, min: [f32; 3], max: [f32; 3], pivot: [f32; 3], swing: f32, phase: f32) -> Self {
+        self.add(name, min, max, pivot, abi::hitbox_follows::STRIDE, swing, phase)
+    }
+    /// Two legs, two arms, a body and a head, 32 pixels tall: the player's.
+    pub fn humanoid() -> Hitboxes {
+        let pi = std::f32::consts::PI;
+        Hitboxes::new()
+            .head("head", [-4.0, 24.0, -4.0], [4.0, 32.0, 4.0], [0.0, 24.0, 0.0])
+            .part("body", [-4.0, 12.0, -2.0], [4.0, 24.0, 2.0])
+            .limb("right_arm", [-8.0, 12.0, -2.0], [-4.0, 24.0, 2.0], [-5.0, 22.0, 0.0], 0.8, pi)
+            .limb("left_arm", [4.0, 12.0, -2.0], [8.0, 24.0, 2.0], [5.0, 22.0, 0.0], 0.8, 0.0)
+            .limb("right_leg", [-4.0, 0.0, -2.0], [0.0, 12.0, 2.0], [-2.0, 12.0, 0.0], 0.8, 0.0)
+            .limb("left_leg", [0.0, 0.0, -2.0], [4.0, 12.0, 2.0], [2.0, 12.0, 0.0], 0.8, pi)
+    }
+    /// A body on four legs with a head ahead, 25 pixels tall: a cow's.
+    pub fn quadruped() -> Hitboxes {
+        let pi = std::f32::consts::PI;
+        Hitboxes::new()
+            .head("head", [-5.0, 16.0, -15.0], [5.0, 25.0, -8.0], [0.0, 20.0, -8.0])
+            .part("body", [-6.0, 11.0, -8.0], [6.0, 22.0, 10.0])
+            .limb("front_right_leg", [-6.0, 0.0, -7.0], [-2.0, 12.0, -3.0], [-4.0, 12.0, -5.0], 0.8, pi)
+            .limb("front_left_leg", [2.0, 0.0, -7.0], [6.0, 12.0, -3.0], [4.0, 12.0, -5.0], 0.8, 0.0)
+            .limb("back_right_leg", [-6.0, 0.0, 5.0], [-2.0, 12.0, 9.0], [-4.0, 12.0, 7.0], 0.8, 0.0)
+            .limb("back_left_leg", [2.0, 0.0, 5.0], [6.0, 12.0, 9.0], [4.0, 12.0, 7.0], 0.8, pi)
+    }
+    /// Its arms held out ahead, not swinging, as a zombie's.
+    pub fn reaching(mut self) -> Self {
+        for p in self
+            .0
+            .parts
+            .iter_mut()
+            .filter(|p| p.name == "right_arm" || p.name == "left_arm")
+        {
+            let (half, below, above) = ((p.max[2] - p.min[2]) / 2.0, p.pivot[1] - p.min[1], p.max[1] - p.pivot[1]);
+            p.min = [p.min[0], p.pivot[1] - half, p.pivot[2] - below];
+            p.max = [p.max[0], p.pivot[1] + half, p.pivot[2] + above];
+            p.follows = abi::hitbox_follows::BODY;
+        }
+        self
+    }
+    /// Arms and legs `px` pixels thick, as a skeleton's.
+    pub fn slim(mut self, px: f32) -> Self {
+        for p in self
+            .0
+            .parts
+            .iter_mut()
+            .filter(|p| p.name.ends_with("_arm") || p.name.ends_with("_leg"))
+        {
+            for a in [0, 2] {
+                let mid = (p.min[a] + p.max[a]) / 2.0;
+                (p.min[a], p.max[a]) = (mid - px / 2.0, mid + px / 2.0);
+            }
+        }
         self
     }
 }

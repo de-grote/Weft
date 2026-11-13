@@ -1,7 +1,9 @@
-//! Vulkan 1.3 backend: dynamic rendering, synchronization2, bindless sampled images,
-//! push descriptors for per-draw buffers.
+//! Vulkan 1.1 backend with descriptor indexing, which phones have too: render passes, bindless
+//! sampled images, a descriptor set for each draw's buffers. Draws many at once and with a count
+//! a shader wrote where the GPU can, one by one and compacted where it can't.
 
-use std::ffi::{CString, c_void};
+use std::collections::HashMap;
+use std::ffi::{CString, c_char, c_void};
 use std::mem::ManuallyDrop;
 
 use ash::{ext, khr, vk};
@@ -10,6 +12,8 @@ use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, 
 use weft_render::*;
 
 const FRAMES: usize = 2;
+/// Set 0 has the textures, 1 each draw's buffers, this one the samplers.
+const SAMPLER_SET: u32 = 2;
 /// Timestamp queries per frame: start, after uploads, marks, end.
 const MAX_MARKS: u32 = 16;
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
@@ -60,10 +64,20 @@ struct Frame {
     fence: vk::Fence,
     staging: Staging,
     deferred: Vec<Deferred>,
+    /// Sets for the buffers of draws, all freed at once when the slot comes round; a new pool
+    /// when the last is full.
+    set_pools: Vec<vk::DescriptorPool>,
+    set_pool: usize,
+    framebuffers: Vec<vk::Framebuffer>,
+    /// Compacted draw records, where draws with a count don't work: (buffer, size).
+    compacted: Option<(BufferId, u64)>,
     waited: bool,
     /// Timestamps written by the frame now in flight in this slot.
     marks: u32,
 }
+
+/// What makes render passes differ: the color format and how each attachment starts.
+type PassKey = (Option<(vk::Format, vk::AttachmentLoadOp)>, Option<vk::AttachmentLoadOp>);
 
 enum Upload {
     Buffer { src: (u32, u64), dst: u32, offset: u64, size: u64 },
@@ -79,6 +93,8 @@ struct Swapchain {
     layouts: Vec<vk::ImageLayout>,
     format: vk::Format,
     extent: vk::Extent2D,
+    mode: vk::PresentModeKHR,
+    transform: vk::SurfaceTransformFlagsKHR,
 }
 
 pub struct VulkanBackend {
@@ -91,7 +107,21 @@ pub struct VulkanBackend {
     device: ash::Device,
     queue: vk::Queue,
     swapchain_fn: khr::swapchain::Device,
-    push_fn: khr::push_descriptor::Device,
+    /// Draws with a count a shader wrote; without them, `compaction` zeroes the records past it.
+    draw_count_fn: Option<khr::draw_indirect_count::Device>,
+    compaction: Option<PipelineId>,
+    /// Several indirect draws in one call.
+    multi_draw: bool,
+    passes: HashMap<PassKey, vk::RenderPass>,
+    /// Compiled pipelines, kept in `cache_file` between runs; `cache_dirty` once one was added.
+    pipeline_cache: vk::PipelineCache,
+    cache_file: Option<std::path::PathBuf>,
+    cache_dirty: bool,
+    /// `precompile`'s threads, how many are still at it, and whether one finished since the
+    /// cache was last written.
+    compile_threads: Vec<std::thread::JoinHandle<()>>,
+    compiling: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    compiled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     allocator: ManuallyDrop<Allocator>,
     swapchain: Option<Swapchain>,
     frames: Vec<Frame>,
@@ -100,6 +130,9 @@ pub struct VulkanBackend {
     want_size: (u32, u32),
     vsync: bool,
     dirty_swapchain: bool,
+    /// Drawn upright on a turned phone: Android calls every frame suboptimal then, which is no
+    /// reason to make the swapchain again (resizes still come as out of date and `resize`).
+    turned: bool,
     buffers: Slab<Buffer>,
     textures: Slab<Texture>,
     pipelines: Slab<Pipeline>,
@@ -107,6 +140,9 @@ pub struct VulkanBackend {
     global_layout: vk::DescriptorSetLayout,
     global_pool: vk::DescriptorPool,
     global_set: vk::DescriptorSet,
+    sampler_layout: vk::DescriptorSetLayout,
+    sampler_pool: vk::DescriptorPool,
+    sampler_set: vk::DescriptorSet,
     samplers: [vk::Sampler; 4],
     free_tex: Vec<u32>,
     next_tex: u32,
@@ -200,10 +236,10 @@ impl VulkanBackend {
                 .map_err(err("window handle"))?
                 .as_raw();
 
-            let mut exts: Vec<*const i8> = ash_window::enumerate_required_extensions(display)
+            let mut exts: Vec<*const c_char> = ash_window::enumerate_required_extensions(display)
                 .map_err(err("surface extensions"))?
                 .to_vec();
-            let mut layers: Vec<*const i8> = Vec::new();
+            let mut layers: Vec<*const c_char> = Vec::new();
             let validation = c"VK_LAYER_KHRONOS_validation";
             let debug = desc.debug
                 && entry
@@ -231,7 +267,7 @@ impl VulkanBackend {
             let app = vk::ApplicationInfo::default()
                 .application_name(c"Weft")
                 .engine_name(c"Weft")
-                .api_version(vk::API_VERSION_1_3);
+                .api_version(vk::API_VERSION_1_1);
             let instance = entry
                 .create_instance(
                     &vk::InstanceCreateInfo::default()
@@ -274,7 +310,7 @@ impl VulkanBackend {
                 .map_err(err("enumerating GPUs"))?
             {
                 let props = instance.get_physical_device_properties(pdev);
-                if props.api_version < vk::API_VERSION_1_3 {
+                if props.api_version < vk::API_VERSION_1_1 {
                     continue;
                 }
                 let families = instance.get_physical_device_queue_family_properties(pdev);
@@ -296,13 +332,29 @@ impl VulkanBackend {
                     best = Some((pdev, qf as u32, score));
                 }
             }
-            let (pdev, queue_family, _) = best.ok_or_else(|| Error("no Vulkan 1.3 GPU with presentation".into()))?;
+            let (pdev, queue_family, _) = best.ok_or_else(|| Error("no Vulkan 1.1 GPU with presentation".into()))?;
             let props = instance.get_physical_device_properties(pdev);
             let device_name = props
                 .device_name_as_c_str()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default();
             log::info!("GPU: {device_name}");
+            let available: Vec<_> = instance
+                .enumerate_device_extension_properties(pdev)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|e| e.extension_name_as_c_str().ok().map(|n| n.to_owned()))
+                .collect();
+            let has_ext = |name: &std::ffi::CStr| available.iter().any(|e| e.as_c_str() == name);
+            let required = [khr::swapchain::NAME, ext::descriptor_indexing::NAME, ext::scalar_block_layout::NAME];
+            let missing: Vec<_> = required
+                .iter()
+                .filter(|&&e| !has_ext(e))
+                .map(|e| e.to_string_lossy())
+                .collect();
+            if !missing.is_empty() {
+                return Err(Error(format!("{device_name} lacks what the game needs: {}", missing.join(", "))));
+            }
             let mut indexing = vk::PhysicalDeviceDescriptorIndexingProperties::default();
             let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut indexing);
             instance.get_physical_device_properties2(pdev, &mut props2);
@@ -313,31 +365,25 @@ impl VulkanBackend {
                 return Err(Error(format!("{device_name} can bind {images} textures at once, the game needs {MAX_TEXTURES}")));
             }
 
-            let mut has11 = vk::PhysicalDeviceVulkan11Features::default();
-            let mut has12 = vk::PhysicalDeviceVulkan12Features::default();
-            let mut has13 = vk::PhysicalDeviceVulkan13Features::default();
+            let mut has16 = vk::PhysicalDevice16BitStorageFeatures::default();
+            let mut has_indexing = vk::PhysicalDeviceDescriptorIndexingFeatures::default();
+            let mut has_scalar = vk::PhysicalDeviceScalarBlockLayoutFeatures::default();
             let mut has = vk::PhysicalDeviceFeatures2::default()
-                .push_next(&mut has11)
-                .push_next(&mut has12)
-                .push_next(&mut has13);
+                .push_next(&mut has16)
+                .push_next(&mut has_indexing)
+                .push_next(&mut has_scalar);
             instance.get_physical_device_features2(pdev, &mut has);
             let base = has.features;
             let missing: Vec<&str> = [
-                ("multiDrawIndirect", base.multi_draw_indirect),
-                ("drawIndirectCount", has12.draw_indirect_count),
                 ("drawIndirectFirstInstance", base.draw_indirect_first_instance),
                 ("samplerAnisotropy", base.sampler_anisotropy),
-                ("fillModeNonSolid", base.fill_mode_non_solid),
                 ("shaderInt16", base.shader_int16),
-                ("storageBuffer16BitAccess", has11.storage_buffer16_bit_access),
-                ("descriptorIndexing", has12.descriptor_indexing),
-                ("runtimeDescriptorArray", has12.runtime_descriptor_array),
-                ("descriptorBindingPartiallyBound", has12.descriptor_binding_partially_bound),
-                ("descriptorBindingSampledImageUpdateAfterBind", has12.descriptor_binding_sampled_image_update_after_bind),
-                ("shaderSampledImageArrayNonUniformIndexing", has12.shader_sampled_image_array_non_uniform_indexing),
-                ("scalarBlockLayout", has12.scalar_block_layout),
-                ("dynamicRendering", has13.dynamic_rendering),
-                ("synchronization2", has13.synchronization2),
+                ("storageBuffer16BitAccess", has16.storage_buffer16_bit_access),
+                ("runtimeDescriptorArray", has_indexing.runtime_descriptor_array),
+                ("descriptorBindingPartiallyBound", has_indexing.descriptor_binding_partially_bound),
+                ("descriptorBindingSampledImageUpdateAfterBind", has_indexing.descriptor_binding_sampled_image_update_after_bind),
+                ("shaderSampledImageArrayNonUniformIndexing", has_indexing.shader_sampled_image_array_non_uniform_indexing),
+                ("scalarBlockLayout", has_scalar.scalar_block_layout),
             ]
             .into_iter()
             .filter(|f| f.1 == vk::FALSE)
@@ -346,43 +392,38 @@ impl VulkanBackend {
             if !missing.is_empty() {
                 return Err(Error(format!("{device_name} lacks what the game needs: {}", missing.join(", "))));
             }
+            let multi_draw = base.multi_draw_indirect != vk::FALSE && props.limits.max_draw_indirect_count > 1;
+            // Some drivers have the extension and still draw one at a time.
+            let draw_count = multi_draw && has_ext(khr::draw_indirect_count::NAME);
+            log::info!("multi-draw: {multi_draw}, draw counts: {draw_count}");
 
             let features = vk::PhysicalDeviceFeatures::default()
-                .multi_draw_indirect(true)
+                .multi_draw_indirect(multi_draw)
                 .draw_indirect_first_instance(true)
                 .sampler_anisotropy(true)
-                .fill_mode_non_solid(true)
                 .shader_int16(true);
-            let mut f11 = vk::PhysicalDeviceVulkan11Features::default().storage_buffer16_bit_access(true);
+            let mut f16 = vk::PhysicalDevice16BitStorageFeatures::default().storage_buffer16_bit_access(true);
             // Texture slots are written while the frame before may still be drawing, which only
             // this makes legal; where it is missing, it was so before too.
-            let unused_while_pending = has12.descriptor_binding_update_unused_while_pending != vk::FALSE;
-            let mut f12 = vk::PhysicalDeviceVulkan12Features::default()
-                .descriptor_indexing(true)
+            let unused_while_pending = has_indexing.descriptor_binding_update_unused_while_pending != vk::FALSE;
+            let mut f_indexing = vk::PhysicalDeviceDescriptorIndexingFeatures::default()
                 .runtime_descriptor_array(true)
                 .descriptor_binding_partially_bound(true)
                 .descriptor_binding_sampled_image_update_after_bind(true)
                 .descriptor_binding_update_unused_while_pending(unused_while_pending)
-                .shader_sampled_image_array_non_uniform_indexing(true)
-                // Metal has no such draw, and nothing needs it yet.
-                .draw_indirect_count(has12.draw_indirect_count != vk::FALSE)
-                .scalar_block_layout(true);
-            let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
-                .dynamic_rendering(true)
-                .synchronization2(true);
+                .shader_sampled_image_array_non_uniform_indexing(true);
+            let mut f_scalar = vk::PhysicalDeviceScalarBlockLayoutFeatures::default().scalar_block_layout(true);
             let mut f2 = vk::PhysicalDeviceFeatures2::default()
                 .features(features)
-                .push_next(&mut f11)
-                .push_next(&mut f12)
-                .push_next(&mut f13);
-            let mut dev_exts = vec![khr::swapchain::NAME.as_ptr(), khr::push_descriptor::NAME.as_ptr()];
+                .push_next(&mut f16)
+                .push_next(&mut f_indexing)
+                .push_next(&mut f_scalar);
+            let mut dev_exts: Vec<_> = required.iter().map(|e| e.as_ptr()).collect();
+            if draw_count {
+                dev_exts.push(khr::draw_indirect_count::NAME.as_ptr());
+            }
             // A driver that has this extension requires it to be enabled.
-            if instance
-                .enumerate_device_extension_properties(pdev)
-                .unwrap_or_default()
-                .iter()
-                .any(|e| e.extension_name_as_c_str() == Ok(khr::portability_subset::NAME))
-            {
+            if has_ext(khr::portability_subset::NAME) {
                 dev_exts.push(khr::portability_subset::NAME.as_ptr());
             }
             let prio = [1.0];
@@ -412,7 +453,17 @@ impl VulkanBackend {
             .map_err(err("GPU allocator"))?;
 
             let swapchain_fn = khr::swapchain::Device::new(&instance, &device);
-            let push_fn = khr::push_descriptor::Device::new(&instance, &device);
+            let draw_count_fn = draw_count.then(|| khr::draw_indirect_count::Device::new(&instance, &device));
+            // The driver checks the data is its own and starts empty otherwise.
+            let cache_file = desc.cache.map(|d| d.join("vulkan_pipelines.bin"));
+            let cached = cache_file
+                .as_ref()
+                .and_then(|f| std::fs::read(f).ok())
+                .unwrap_or_default();
+            let pipeline_cache = device
+                .create_pipeline_cache(&vk::PipelineCacheCreateInfo::default().initial_data(&cached), None)
+                .or_else(|_| device.create_pipeline_cache(&Default::default(), None))
+                .map_err(err("pipeline cache"))?;
 
             let mut frames = Vec::new();
             for _ in 0..FRAMES {
@@ -442,74 +493,14 @@ impl VulkanBackend {
                         .map_err(err("fence"))?,
                     staging: Staging { chunks: Vec::new(), current: 0, used: 0 },
                     deferred: Vec::new(),
+                    set_pools: Vec::new(),
+                    set_pool: 0,
+                    framebuffers: Vec::new(),
+                    compacted: None,
                     waited: false,
                     marks: 0,
                 });
             }
-
-            let mut flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND;
-            if unused_while_pending {
-                flags |= vk::DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING;
-            }
-            let binding_flags = [flags, vk::DescriptorBindingFlags::empty(), Default::default(), Default::default(), Default::default()];
-            let bindings = [
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(0)
-                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .descriptor_count(MAX_TEXTURES)
-                    .stage_flags(vk::ShaderStageFlags::ALL),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(1)
-                    .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::ALL),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(2)
-                    .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::ALL),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(3)
-                    .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::ALL),
-                vk::DescriptorSetLayoutBinding::default()
-                    .binding(4)
-                    .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .descriptor_count(1)
-                    .stage_flags(vk::ShaderStageFlags::ALL),
-            ];
-            let mut flag_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
-            let global_layout = device
-                .create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::default()
-                        .bindings(&bindings)
-                        .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
-                        .push_next(&mut flag_info),
-                    None,
-                )
-                .map_err(err("global set layout"))?;
-            let sizes = [
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: MAX_TEXTURES },
-                vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: 4 },
-            ];
-            let global_pool = device
-                .create_descriptor_pool(
-                    &vk::DescriptorPoolCreateInfo::default()
-                        .pool_sizes(&sizes)
-                        .max_sets(1)
-                        .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND),
-                    None,
-                )
-                .map_err(err("descriptor pool"))?;
-            let layouts = [global_layout];
-            let global_set = device
-                .allocate_descriptor_sets(
-                    &vk::DescriptorSetAllocateInfo::default()
-                        .descriptor_pool(global_pool)
-                        .set_layouts(&layouts),
-                )
-                .map_err(err("global set"))?[0];
 
             let sampler = |filter: vk::Filter, mode: vk::SamplerAddressMode, mips: bool| {
                 // The filtered sampler gets anisotropy: block faces at grazing angles stay sharp.
@@ -534,22 +525,79 @@ impl VulkanBackend {
                 sampler(vk::Filter::NEAREST, vk::SamplerAddressMode::CLAMP_TO_EDGE, true).map_err(err("sampler"))?,
                 sampler(vk::Filter::LINEAR, vk::SamplerAddressMode::CLAMP_TO_EDGE, true).map_err(err("sampler"))?,
             ];
-            let infos: Vec<[vk::DescriptorImageInfo; 1]> = samplers
-                .iter()
-                .map(|&s| [vk::DescriptorImageInfo::default().sampler(s)])
-                .collect();
-            let writes: Vec<_> = infos
+
+            let mut flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND;
+            if unused_while_pending {
+                flags |= vk::DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING;
+            }
+            let binding_flags = [flags];
+            let bindings = [vk::DescriptorSetLayoutBinding::default()
+                .binding(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(MAX_TEXTURES)
+                .stage_flags(vk::ShaderStageFlags::ALL)];
+            let mut flag_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
+            let global_layout = device
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default()
+                        .bindings(&bindings)
+                        .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
+                        .push_next(&mut flag_info),
+                    None,
+                )
+                .map_err(err("global set layout"))?;
+            let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: MAX_TEXTURES }];
+            let global_pool = device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .pool_sizes(&sizes)
+                        .max_sets(1)
+                        .flags(vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND),
+                    None,
+                )
+                .map_err(err("descriptor pool"))?;
+            let layouts = [global_layout];
+            let global_set = device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(global_pool)
+                        .set_layouts(&layouts),
+                )
+                .map_err(err("global set"))?[0];
+
+            // The samplers, a set of their own (`SAMPLER_SET`): in the textures' set, Mali's driver
+            // samples nothing through them. Fixed in the layout, as they never change.
+            let sampler_bindings: Vec<_> = samplers
                 .iter()
                 .enumerate()
-                .map(|(i, info)| {
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(global_set)
-                        .dst_binding(1 + i as u32)
+                .map(|(i, s)| {
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(i as u32)
                         .descriptor_type(vk::DescriptorType::SAMPLER)
-                        .image_info(info)
+                        .stage_flags(vk::ShaderStageFlags::ALL)
+                        .immutable_samplers(std::slice::from_ref(s))
                 })
                 .collect();
-            device.update_descriptor_sets(&writes, &[]);
+            let sampler_layout = device
+                .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&sampler_bindings), None)
+                .map_err(err("sampler set layout"))?;
+            let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: samplers.len() as u32 }];
+            let sampler_pool = device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .pool_sizes(&sizes)
+                        .max_sets(1),
+                    None,
+                )
+                .map_err(err("sampler pool"))?;
+            let layouts = [sampler_layout];
+            let sampler_set = device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(sampler_pool)
+                        .set_layouts(&layouts),
+                )
+                .map_err(err("sampler set"))?[0];
 
             let queries = device
                 .create_query_pool(
@@ -569,7 +617,16 @@ impl VulkanBackend {
                 device,
                 queue,
                 swapchain_fn,
-                push_fn,
+                draw_count_fn,
+                compaction: None,
+                multi_draw,
+                passes: HashMap::new(),
+                pipeline_cache,
+                cache_file,
+                cache_dirty: false,
+                compile_threads: Vec::new(),
+                compiling: Default::default(),
+                compiled: Default::default(),
                 allocator: ManuallyDrop::new(allocator),
                 swapchain: None,
                 frames,
@@ -578,6 +635,7 @@ impl VulkanBackend {
                 want_size: (desc.width, desc.height),
                 vsync: desc.vsync,
                 dirty_swapchain: true,
+                turned: false,
                 buffers: Slab::default(),
                 textures: Slab::default(),
                 pipelines: Slab::default(),
@@ -585,6 +643,9 @@ impl VulkanBackend {
                 global_layout,
                 global_pool,
                 global_set,
+                sampler_layout,
+                sampler_pool,
+                sampler_set,
                 samplers,
                 free_tex: Vec::new(),
                 next_tex: 0,
@@ -603,6 +664,11 @@ impl VulkanBackend {
             );
             backend.write_texture(blank, 0, &[0; 4]);
             backend.blank_view = backend.textures.get(blank.0).view;
+            if backend.draw_count_fn.is_none() {
+                let shader = Shader::from_wgsl("draw compaction", DRAW_COMPACTION).map_err(|e| Error(e.0))?;
+                backend.compaction =
+                    Some(backend.create_compute(&ComputeDesc { label: "draw compaction", shader: &shader, entry: "main" })?);
+            }
             Ok(backend)
         }
     }
@@ -626,6 +692,20 @@ impl VulkanBackend {
                         .1
                         .clamp(caps.min_image_extent.height, caps.max_image_extent.height),
                 }
+            };
+            // Drawn upright (`transform` below), the picture is the window's way round, whichever
+            // way a phone held sideways gives its size.
+            let upright = caps
+                .supported_transforms
+                .contains(vk::SurfaceTransformFlagsKHR::IDENTITY);
+            let quarter = caps
+                .current_transform
+                .intersects(vk::SurfaceTransformFlagsKHR::ROTATE_90 | vk::SurfaceTransformFlagsKHR::ROTATE_270);
+            let (w, h) = self.want_size;
+            let extent = if upright && quarter && w > 0 && h > 0 && (w > h) != (extent.width > extent.height) {
+                vk::Extent2D { width: extent.height, height: extent.width }
+            } else {
+                extent
             };
             if extent.width == 0 || extent.height == 0 {
                 return Ok(());
@@ -656,11 +736,33 @@ impl VulkanBackend {
                 .into_iter()
                 .find(|m| modes.contains(m))
                 .unwrap_or(P::FIFO);
+            // Drawn upright: a phone held sideways has the compositor turn it, rather than the
+            // picture coming out turned (`current_transform` there is a quarter turn).
+            let transform = if upright { vk::SurfaceTransformFlagsKHR::IDENTITY } else { caps.current_transform };
+            // Android's surfaces may offer only `INHERIT`.
+            let alpha = [vk::CompositeAlphaFlagsKHR::OPAQUE, vk::CompositeAlphaFlagsKHR::INHERIT]
+                .into_iter()
+                .find(|&a| caps.supported_composite_alpha.contains(a))
+                .unwrap_or(vk::CompositeAlphaFlagsKHR::OPAQUE);
             let mut count = caps.min_image_count + 1;
             if caps.max_image_count > 0 {
                 count = count.min(caps.max_image_count);
             }
-            let old = self.swapchain.take();
+            // A resize to the size it already has: remaking it for nothing crashed Intel Arc's driver at start.
+            if let Some(sc) = &self.swapchain
+                && sc.extent == extent
+                && sc.format == format.format
+                && sc.mode == mode
+                && sc.transform == transform
+            {
+                self.dirty_swapchain = false;
+                return Ok(());
+            }
+            self.turned = transform != caps.current_transform;
+            // Destroyed before the new one instead of handed over as `old_swapchain`: nothing is in flight after the wait above.
+            if let Some(old) = self.swapchain.take() {
+                self.destroy_swapchain(old);
+            }
             let raw = self
                 .swapchain_fn
                 .create_swapchain(
@@ -673,17 +775,13 @@ impl VulkanBackend {
                         .image_array_layers(1)
                         .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC)
                         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .pre_transform(caps.current_transform)
-                        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                        .pre_transform(transform)
+                        .composite_alpha(alpha)
                         .present_mode(mode)
-                        .clipped(true)
-                        .old_swapchain(old.as_ref().map_or(vk::SwapchainKHR::null(), |s| s.raw)),
+                        .clipped(true),
                     None,
                 )
                 .map_err(err("vkCreateSwapchainKHR"))?;
-            if let Some(old) = old {
-                self.destroy_swapchain(old);
-            }
             let images = self
                 .swapchain_fn
                 .get_swapchain_images(raw)
@@ -709,7 +807,15 @@ impl VulkanBackend {
                         .map_err(err("semaphore"))?,
                 );
             }
-            log::debug!("swapchain {}x{} {:?} {:?}", extent.width, extent.height, format.format, mode);
+            log::info!(
+                "swapchain {}x{} {:?} {:?}, {:?} on a {:?} screen",
+                extent.width,
+                extent.height,
+                format.format,
+                mode,
+                transform,
+                caps.current_transform
+            );
             self.swapchain = Some(Swapchain {
                 raw,
                 layouts: vec![vk::ImageLayout::UNDEFINED; images.len()],
@@ -718,6 +824,8 @@ impl VulkanBackend {
                 rendered,
                 format: format.format,
                 extent,
+                mode,
+                transform,
             });
             self.dirty_swapchain = false;
             Ok(())
@@ -781,10 +889,221 @@ impl VulkanBackend {
                     .collect();
             }
         }
+        for &pool in &frame.set_pools {
+            unsafe {
+                self.device
+                    .reset_descriptor_pool(pool, vk::DescriptorPoolResetFlags::empty())
+            }
+            .ok();
+        }
+        frame.set_pool = 0;
+        for f in frame.framebuffers.drain(..) {
+            unsafe { self.device.destroy_framebuffer(f, None) };
+        }
         let deferred = std::mem::take(&mut frame.deferred);
         for d in deferred {
             self.destroy_now(d);
         }
+    }
+
+    /// Writes the compiled pipelines out, if any were added: once a frame at most, as a phone's
+    /// app may be ended without notice.
+    fn save_pipeline_cache(&mut self) {
+        let added = std::mem::take(&mut self.cache_dirty)
+            | self
+                .compiled
+                .swap(false, std::sync::atomic::Ordering::Relaxed);
+        let Some(file) = self.cache_file.as_ref().filter(|_| added) else { return };
+        let Ok(data) = (unsafe { self.device.get_pipeline_cache_data(self.pipeline_cache) }) else { return };
+        let part = file.with_extension("part");
+        let written = file
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::write(&part, &data))
+            .and_then(|_| std::fs::rename(&part, file));
+        if let Err(e) = written {
+            log::warn!("{}: {e}", file.display());
+        }
+    }
+
+    /// A set of `layout` from this frame's pools.
+    unsafe fn buffer_set(&mut self, layout: vk::DescriptorSetLayout) -> vk::DescriptorSet {
+        let layouts = [layout];
+        loop {
+            let frame = &mut self.frames[self.slot];
+            if frame.set_pool == frame.set_pools.len() {
+                let sizes = [
+                    vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 8192 },
+                    vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 1024 },
+                ];
+                let pool = unsafe {
+                    self.device.create_descriptor_pool(
+                        &vk::DescriptorPoolCreateInfo::default()
+                            .pool_sizes(&sizes)
+                            .max_sets(2048),
+                        None,
+                    )
+                }
+                .expect("descriptor pool");
+                frame.set_pools.push(pool);
+            }
+            let info = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(frame.set_pools[frame.set_pool])
+                .set_layouts(&layouts);
+            match unsafe { self.device.allocate_descriptor_sets(&info) } {
+                Ok(sets) => return sets[0],
+                Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY | vk::Result::ERROR_FRAGMENTED_POOL) => frame.set_pool += 1,
+                Err(e) => panic!("allocating a descriptor set: {e:?}"),
+            }
+        }
+    }
+
+    /// Binds the buffers `bound` to pipeline `p`'s set 1, those of its bindings that have one.
+    unsafe fn bind_buffers(&mut self, cmd: vk::CommandBuffer, p: u32, bound: &[(u32, vk::DescriptorBufferInfo)]) {
+        let pl = self.pipelines.get(p);
+        if pl.buffers.is_empty() {
+            return;
+        }
+        let (layout, set_layout, bind_point) = (pl.layout, pl.set_layout, pl.bind_point);
+        let set = unsafe { self.buffer_set(set_layout) };
+        let pl = self.pipelines.get(p);
+        let infos: Vec<_> = pl
+            .buffers
+            .iter()
+            .filter_map(|&(b, ty)| bound.iter().find(|x| x.0 == b).map(|x| (b, ty, [x.1])))
+            .collect();
+        let writes: Vec<_> = infos
+            .iter()
+            .map(|(b, ty, info)| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(*b)
+                    .descriptor_type(*ty)
+                    .buffer_info(info)
+            })
+            .collect();
+        unsafe {
+            self.device.update_descriptor_sets(&writes, &[]);
+            self.device
+                .cmd_bind_descriptor_sets(cmd, bind_point, layout, 1, &[set], &[]);
+        }
+    }
+
+    /// A render pass of these attachments, which stay in their attachment layouts throughout:
+    /// barriers around the pass move them.
+    fn render_pass(&mut self, key: PassKey) -> vk::RenderPass {
+        if let Some(&p) = self.passes.get(&key) {
+            return p;
+        }
+        let mut attachments = Vec::new();
+        let mut color_ref = Vec::new();
+        if let Some((format, load)) = key.0 {
+            color_ref.push(vk::AttachmentReference { attachment: 0, layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL });
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(format)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(load)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .initial_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL),
+            );
+        }
+        let depth_ref =
+            vk::AttachmentReference { attachment: attachments.len() as u32, layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        if let Some(load) = key.1 {
+            attachments.push(
+                vk::AttachmentDescription::default()
+                    .format(DEPTH_FORMAT)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .load_op(load)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+                    .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL),
+            );
+        }
+        let mut subpass = vk::SubpassDescription::default()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_ref);
+        if key.1.is_some() {
+            subpass = subpass.depth_stencil_attachment(&depth_ref);
+        }
+        let subpasses = [subpass];
+        let pass = unsafe {
+            self.device.create_render_pass(
+                &vk::RenderPassCreateInfo::default()
+                    .attachments(&attachments)
+                    .subpasses(&subpasses),
+                None,
+            )
+        }
+        .expect("vkCreateRenderPass");
+        self.passes.insert(key, pass);
+        pass
+    }
+
+    /// Draws `count` indirect records from `offset`, in one call where the GPU can.
+    unsafe fn draw_indirect(&self, cmd: vk::CommandBuffer, buffer: vk::Buffer, offset: u64, count: u32, indexed: bool) {
+        let stride = if indexed { size_of::<DrawIndexedArgs>() } else { size_of::<DrawArgs>() } as u32;
+        let (calls, per_call) = if self.multi_draw || count <= 1 { (1, count) } else { (count, 1) };
+        for i in 0..calls {
+            let at = offset + (i * stride) as u64;
+            unsafe {
+                if indexed {
+                    self.device
+                        .cmd_draw_indexed_indirect(cmd, buffer, at, per_call, stride);
+                } else {
+                    self.device
+                        .cmd_draw_indirect(cmd, buffer, at, per_call, stride);
+                }
+            }
+        }
+    }
+
+    /// Without draws with a count: copies the records of the count draws in the pass starting at
+    /// `cmds[0]` into this frame's compacted buffer, zeroing those past their count. Where each
+    /// one's copy starts, in order.
+    unsafe fn compact_draws(&mut self, cmd: vk::CommandBuffer, cmds: &[Cmd]) -> Vec<u64> {
+        let Some(compaction) = self.compaction else { return Vec::new() };
+        let (draws, total) = count_draws(cmds);
+        if draws.is_empty() {
+            return Vec::new();
+        }
+        let scratch = match self.frames[self.slot].compacted {
+            Some((b, size)) if size >= total => b,
+            old => {
+                if let Some((b, _)) = old {
+                    self.destroy_buffer(b);
+                }
+                let size = total.max(16).next_power_of_two();
+                let b = self.create_buffer(size, usage::STORAGE | usage::INDIRECT, "compacted draws");
+                self.frames[self.slot].compacted = Some((b, size));
+                b
+            }
+        };
+        let pl = self.pipelines.get(compaction.0);
+        let (raw, layout) = (pl.raw, pl.layout);
+        unsafe {
+            // What wrote the counts is done, and so is any draw still reading the copies.
+            self.memory_barrier(cmd);
+            self.device
+                .cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, raw);
+            self.device
+                .cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, layout, 0, &[self.global_set], &[]);
+            for d in &draws {
+                let info = |b: BufferId| vk::DescriptorBufferInfo { buffer: self.buffers.get(b.0).raw, offset: 0, range: vk::WHOLE_SIZE };
+                let bound = [(0, info(d.buffer)), (1, info(d.count_buffer)), (2, info(scratch))];
+                self.bind_buffers(cmd, compaction.0, &bound);
+                let bytes: Vec<u8> = d.args.iter().flat_map(|a| a.to_ne_bytes()).collect();
+                self.device
+                    .cmd_push_constants(cmd, layout, vk::ShaderStageFlags::ALL, 0, &bytes);
+                self.device.cmd_dispatch(cmd, d.max.div_ceil(64), 1, 1);
+            }
+            self.memory_barrier(cmd);
+        }
+        draws.iter().map(|d| d.at).collect()
     }
 
     /// Frees `d` once the GPU is done with it: after the next wait on this slot's fence. That wait
@@ -879,43 +1198,48 @@ impl VulkanBackend {
         old: vk::ImageLayout,
         new: vk::ImageLayout,
     ) {
-        let b = [vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-            .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-            .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+        let b = [vk::ImageMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
             .old_layout(old)
             .new_layout(new)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .image(image)
             .subresource_range(range)];
+        let all = vk::PipelineStageFlags::ALL_COMMANDS;
         unsafe {
             self.device
-                .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&b))
+                .cmd_pipeline_barrier(cmd, all, all, vk::DependencyFlags::empty(), &[], &[], &b)
         };
     }
 
     unsafe fn memory_barrier(&self, cmd: vk::CommandBuffer) {
-        let b = [vk::MemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-            .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS | vk::PipelineStageFlags2::HOST)
-            .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::HOST_READ)];
+        let b = [vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
+            .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE | vk::AccessFlags::HOST_READ)];
         unsafe {
-            self.device
-                .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&b))
+            self.device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::ALL_COMMANDS,
+                vk::PipelineStageFlags::ALL_COMMANDS | vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &b,
+                &[],
+                &[],
+            )
         };
     }
 
     /// Orders copies: those recorded after it start once those before it are written.
     unsafe fn copy_barrier(&self, cmd: vk::CommandBuffer) {
-        let b = [vk::MemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COPY)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
-            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)];
+        let b = [vk::MemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+        let copy = vk::PipelineStageFlags::TRANSFER;
         unsafe {
             self.device
-                .cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&b))
+                .cmd_pipeline_barrier(cmd, copy, copy, vk::DependencyFlags::empty(), &b, &[], &[])
         };
     }
 
@@ -994,7 +1318,7 @@ impl VulkanBackend {
                         }
                         let depth = t.index == u32::MAX;
                         let (range, new) = if depth {
-                            (depth_range(), vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                            (depth_range(), vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                         } else {
                             (color_range(t.desc.mips), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                         };
@@ -1063,6 +1387,44 @@ fn raw_buffer(
     }
 }
 
+/// Marks `NonUniform` each sampled image made of a texture that is: naga 30 marks only the texture,
+/// and the rule wants the operand the sampling reads. NVIDIA doesn't mind; Mali samples zeros.
+fn non_uniform_samples(words: &mut Vec<u32>) {
+    const DECORATE: u32 = 71;
+    const SAMPLED_IMAGE: u32 = 86;
+    const NON_UNIFORM: u32 = 5300;
+    // After the five words of the header: (word count << 16 | opcode) and the operands.
+    let mut marked = Vec::new();
+    let mut add = Vec::new();
+    let mut first_decoration = None;
+    let mut at = 5;
+    while at < words.len() {
+        let (count, op) = ((words[at] >> 16) as usize, words[at] & 0xffff);
+        if count == 0 {
+            return;
+        }
+        let operands = &words[at + 1..(at + count).min(words.len())];
+        match op {
+            DECORATE => {
+                first_decoration.get_or_insert(at);
+                if operands.get(1) == Some(&NON_UNIFORM) {
+                    marked.push(operands[0]);
+                }
+            }
+            // Result type, result, image, sampler.
+            SAMPLED_IMAGE if operands.len() == 4 && marked.contains(&operands[2]) => add.push(operands[1]),
+            _ => {}
+        }
+        at += count;
+    }
+    let Some(first) = first_decoration else { return };
+    let new: Vec<u32> = add
+        .iter()
+        .flat_map(|&id| [3 << 16 | DECORATE, id, NON_UNIFORM])
+        .collect();
+    words.splice(first..first, new);
+}
+
 fn compare_op(c: Compare) -> vk::CompareOp {
     match c {
         Compare::Always => vk::CompareOp::ALWAYS,
@@ -1077,14 +1439,22 @@ impl VulkanBackend {
     fn spirv(&self, shader: &Shader, stage: naga::ShaderStage, entry: &str) -> Result<vk::ShaderModule, Error> {
         let mut options = naga::back::spv::Options::default();
         options.lang_version = (1, 3);
+        // The prelude's samplers, group 0 bindings 1 to 4, are a set of their own here.
+        for binding in 1..5 {
+            options.binding_map.insert(
+                naga::ResourceBinding { group: 0, binding },
+                naga::back::spv::BindingInfo { descriptor_set: SAMPLER_SET, binding: binding - 1, binding_array_size: None },
+            );
+        }
         options.force_loop_bounding = false;
-        let words = naga::back::spv::write_vec(
+        let mut words = naga::back::spv::write_vec(
             &shader.module,
             &shader.info,
             &options,
             Some(&naga::back::spv::PipelineOptions { shader_stage: stage, entry_point: entry.to_string() }),
         )
         .map_err(|e| Error(format!("SPIR-V for {entry}: {e}")))?;
+        non_uniform_samples(&mut words);
         unsafe {
             self.device
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
@@ -1117,14 +1487,9 @@ impl VulkanBackend {
         unsafe {
             let set_layout = self
                 .device
-                .create_descriptor_set_layout(
-                    &vk::DescriptorSetLayoutCreateInfo::default()
-                        .bindings(&bindings)
-                        .flags(vk::DescriptorSetLayoutCreateFlags::PUSH_DESCRIPTOR_KHR),
-                    None,
-                )
-                .map_err(err("push descriptor layout"))?;
-            let sets = [self.global_layout, set_layout];
+                .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)
+                .map_err(err("buffer set layout"))?;
+            let sets = [self.global_layout, set_layout, self.sampler_layout];
             let ranges = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::ALL, offset: 0, size: shader.push_constant_size }];
             let mut info = vk::PipelineLayoutCreateInfo::default().set_layouts(&sets);
             if shader.push_constant_size > 0 {
@@ -1169,6 +1534,38 @@ impl Backend for VulkanBackend {
         if self.vsync != vsync {
             self.vsync = vsync;
             self.dirty_swapchain = true;
+        }
+    }
+
+    fn set_surface(&mut self, window: Option<&dyn Window>) {
+        unsafe {
+            self.device.device_wait_idle().ok();
+            if let Some(sc) = self.swapchain.take() {
+                self.destroy_swapchain(sc);
+            }
+            if self.surface != vk::SurfaceKHR::null() {
+                self.surface_fn.destroy_surface(self.surface, None);
+                self.surface = vk::SurfaceKHR::null();
+            }
+            let Some(window) = window else { return };
+            let handles = window
+                .display_handle()
+                .and_then(|d| Ok((d.as_raw(), window.window_handle()?.as_raw())));
+            match handles
+                .map_err(err("window handles"))
+                .and_then(|(display, window)| {
+                    ash_window::create_surface(&self._entry, &self.instance, display, window, None).map_err(err("creating surface"))
+                }) {
+                Ok(surface) => {
+                    self.surface = surface;
+                    // Now, so what is made before the next frame gets the surface's format.
+                    if let Err(e) = self.recreate_swapchain() {
+                        log::error!("{e}");
+                        self.dirty_swapchain = true;
+                    }
+                }
+                Err(e) => log::error!("{e}"),
+            }
         }
     }
 
@@ -1410,10 +1807,9 @@ impl Backend for VulkanBackend {
         let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(if desc.color.is_some() { &attachments } else { &[] });
         let dynamic = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic);
-        let color_formats = desc.color.map(|f| [self.vk_format(f)]);
-        let mut rendering = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(color_formats.as_ref().map_or(&[][..], |f| &f[..]))
-            .depth_attachment_format(if desc.depth.is_some() { DEPTH_FORMAT } else { vk::Format::UNDEFINED });
+        // Any pass of the same formats will do for drawing with it.
+        let load = vk::AttachmentLoadOp::LOAD;
+        let pass = self.render_pass((desc.color.map(|f| (self.vk_format(f), load)), desc.depth.map(|_| load)));
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vertex_input)
@@ -1425,10 +1821,10 @@ impl Backend for VulkanBackend {
             .color_blend_state(&blend)
             .dynamic_state(&dynamic)
             .layout(layout)
-            .push_next(&mut rendering);
+            .render_pass(pass);
         let result = unsafe {
             self.device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+                .create_graphics_pipelines(self.pipeline_cache, &[info], None)
         };
         unsafe {
             self.device.destroy_shader_module(vs, None);
@@ -1437,6 +1833,7 @@ impl Backend for VulkanBackend {
             }
         }
         let raw = result.map_err(|(_, e)| Error(format!("pipeline {}: {e:?}", desc.label)))?[0];
+        self.cache_dirty = true;
         Ok(PipelineId(
             self.pipelines
                 .insert(Pipeline { raw, layout, set_layout, bind_point: vk::PipelineBindPoint::GRAPHICS, buffers }),
@@ -1456,14 +1853,55 @@ impl Backend for VulkanBackend {
             .layout(layout);
         let result = unsafe {
             self.device
-                .create_compute_pipelines(vk::PipelineCache::null(), &[info], None)
+                .create_compute_pipelines(self.pipeline_cache, &[info], None)
         };
         unsafe { self.device.destroy_shader_module(cs, None) };
         let raw = result.map_err(|(_, e)| Error(format!("compute pipeline {}: {e:?}", desc.label)))?[0];
+        self.cache_dirty = true;
         Ok(PipelineId(
             self.pipelines
                 .insert(Pipeline { raw, layout, set_layout, bind_point: vk::PipelineBindPoint::COMPUTE, buffers }),
         ))
+    }
+
+    fn precompile(&mut self, desc: &ComputeDesc) {
+        use std::sync::atomic::Ordering;
+        let Ok(cs) = self.spirv(desc.shader, naga::ShaderStage::Compute, desc.entry) else { return };
+        let Ok((layout, set_layout, _)) = self.layout_for(desc.shader) else {
+            unsafe { self.device.destroy_shader_module(cs, None) };
+            return;
+        };
+        let (device, cache, entry, label) =
+            (self.device.clone(), self.pipeline_cache, CString::new(desc.entry).unwrap(), desc.label.to_string());
+        let (left, done) = (self.compiling.clone(), self.compiled.clone());
+        left.fetch_add(1, Ordering::SeqCst);
+        // The pipeline itself goes: what stays is the driver's compiled code in the cache, which a
+        // layout made alike finds again.
+        self.compile_threads
+            .push(std::thread::spawn(move || unsafe {
+                let started = std::time::Instant::now();
+                let stage = vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::COMPUTE)
+                    .module(cs)
+                    .name(&entry);
+                let info = vk::ComputePipelineCreateInfo::default()
+                    .stage(stage)
+                    .layout(layout);
+                match device.create_compute_pipelines(cache, &[info], None) {
+                    Ok(p) => device.destroy_pipeline(p[0], None),
+                    Err((_, e)) => log::warn!("compiling {label} ahead: {e:?}"),
+                }
+                device.destroy_shader_module(cs, None);
+                device.destroy_pipeline_layout(layout, None);
+                device.destroy_descriptor_set_layout(set_layout, None);
+                log::info!("compiled {label} in {:.1} s", started.elapsed().as_secs_f32());
+                done.store(true, Ordering::Relaxed);
+                left.fetch_sub(1, Ordering::SeqCst);
+            }));
+    }
+
+    fn compiling(&self) -> bool {
+        self.compiling.load(std::sync::atomic::Ordering::SeqCst) > 0
     }
 
     fn destroy_pipeline(&mut self, pipeline: PipelineId) {
@@ -1474,6 +1912,9 @@ impl Backend for VulkanBackend {
 
     fn begin_frame(&mut self) -> Option<FrameInfo> {
         self.ensure_slot_ready();
+        if self.surface == vk::SurfaceKHR::null() {
+            return None;
+        }
         if self.dirty_swapchain || self.swapchain.is_none() {
             if let Err(e) = unsafe { self.recreate_swapchain() } {
                 log::error!("{e}");
@@ -1488,7 +1929,7 @@ impl Backend for VulkanBackend {
         };
         match result {
             Ok((index, suboptimal)) => {
-                if suboptimal {
+                if suboptimal && !self.turned {
                     self.dirty_swapchain = true;
                 }
                 self.image_index = Some(index);
@@ -1522,21 +1963,59 @@ impl Backend for VulkanBackend {
             self.device
                 .cmd_reset_query_pool(cmd, self.queries, first_query, MAX_MARKS);
             self.device
-                .cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::TOP_OF_PIPE, self.queries, first_query);
+                .cmd_write_timestamp(cmd, vk::PipelineStageFlags::TOP_OF_PIPE, self.queries, first_query);
             self.record_uploads(cmd);
             self.device
-                .cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, self.queries, first_query + 1);
+                .cmd_write_timestamp(cmd, vk::PipelineStageFlags::BOTTOM_OF_PIPE, self.queries, first_query + 1);
             let mut marks = 2;
             let sets = [self.global_set];
             let mut current: Option<u32> = None;
+            // Buffers bound since, and whether the pipeline's set has them yet.
+            let mut bound: Vec<(u32, vk::DescriptorBufferInfo)> = Vec::new();
+            let mut stale = false;
+            // The last immediates, as bytes of `list.data`.
+            let mut pushed: Option<(u32, u32)> = None;
+            let mut compacted: Vec<u64> = Vec::new();
             let mut in_pass_targets: Vec<u32> = Vec::new();
             let (sc_image, sc_view, sc_extent) = {
                 let sc = self.swapchain.as_ref().unwrap();
                 (sc.images[image_index as usize], sc.views[image_index as usize], sc.extent)
             };
-            for cmd_item in &list.cmds {
+            for (i, cmd_item) in list.cmds.iter().enumerate() {
+                if stale
+                    && matches!(
+                        cmd_item,
+                        Cmd::Draw { .. }
+                            | Cmd::DrawIndirect { .. }
+                            | Cmd::DrawIndexedIndirect { .. }
+                            | Cmd::DrawIndexedIndirectCount { .. }
+                            | Cmd::DrawIndirectCount { .. }
+                            | Cmd::Dispatch { .. }
+                    )
+                    && let Some(p) = current
+                {
+                    self.bind_buffers(cmd, p, &bound);
+                    stale = false;
+                }
                 match *cmd_item {
                     Cmd::BeginPass { color, depth } => {
+                        compacted = self.compact_draws(cmd, &list.cmds[i + 1..]);
+                        compacted.reverse();
+                        // Its pipeline, buffers and immediates are not the list's: those come back.
+                        if let (false, Some(p)) = (compacted.is_empty(), current) {
+                            let pl = self.pipelines.get(p);
+                            self.device.cmd_bind_pipeline(cmd, pl.bind_point, pl.raw);
+                            self.device
+                                .cmd_bind_descriptor_sets(cmd, pl.bind_point, pl.layout, 0, &sets, &[]);
+                            self.device
+                                .cmd_bind_descriptor_sets(cmd, pl.bind_point, pl.layout, SAMPLER_SET, &[self.sampler_set], &[]);
+                            if let Some((start, len)) = pushed {
+                                let bytes = &list.data[start as usize..(start + len) as usize];
+                                self.device
+                                    .cmd_push_constants(cmd, pl.layout, vk::ShaderStageFlags::ALL, 0, bytes);
+                            }
+                            stale = true;
+                        }
                         let mut extent = sc_extent;
                         let mut color_att = None;
                         if let Some((target, clear)) = color {
@@ -1559,42 +2038,60 @@ impl Backend for VulkanBackend {
                             let old = if clear.is_some() { vk::ImageLayout::UNDEFINED } else { old };
                             // Also when the layout stays: a pass loading what the last one wrote.
                             self.barrier_image(cmd, image, color_range(1), old, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-                            color_att = Some(
-                                vk::RenderingAttachmentInfo::default()
-                                    .image_view(view)
-                                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                                    .load_op(if clear.is_some() {
-                                        vk::AttachmentLoadOp::CLEAR
-                                    } else if old == vk::ImageLayout::UNDEFINED {
-                                        vk::AttachmentLoadOp::DONT_CARE
-                                    } else {
-                                        vk::AttachmentLoadOp::LOAD
-                                    })
-                                    .store_op(vk::AttachmentStoreOp::STORE)
-                                    .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: clear.unwrap_or_default() } }),
-                            );
+                            let load = if clear.is_some() {
+                                vk::AttachmentLoadOp::CLEAR
+                            } else if old == vk::ImageLayout::UNDEFINED {
+                                vk::AttachmentLoadOp::DONT_CARE
+                            } else {
+                                vk::AttachmentLoadOp::LOAD
+                            };
+                            let format = match target {
+                                Target::Surface => self.swapchain.as_ref().unwrap().format,
+                                Target::Texture(t) => self.vk_format(self.textures.get(t.0).desc.format),
+                            };
+                            color_att = Some((view, format, load, clear.unwrap_or_default()));
                         }
                         let depth_att = depth.map(|(t, clear)| {
                             let tex = self.textures.get(t.0);
                             extent = vk::Extent2D { width: tex.desc.width, height: tex.desc.height };
-                            vk::RenderingAttachmentInfo::default()
-                                .image_view(tex.view)
-                                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-                                .load_op(if clear.is_some() { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD })
-                                .store_op(vk::AttachmentStoreOp::STORE)
-                                .clear_value(vk::ClearValue {
-                                    depth_stencil: vk::ClearDepthStencilValue { depth: clear.unwrap_or(0.0), stencil: 0 },
-                                })
+                            let load = if clear.is_some() { vk::AttachmentLoadOp::CLEAR } else { vk::AttachmentLoadOp::LOAD };
+                            (tex.view, load, clear.unwrap_or(0.0))
                         });
-                        let colors: Vec<_> = color_att.into_iter().collect();
-                        let mut info = vk::RenderingInfo::default()
-                            .render_area(vk::Rect2D { offset: Default::default(), extent })
-                            .layer_count(1)
-                            .color_attachments(&colors);
-                        if let Some(d) = depth_att.as_ref() {
-                            info = info.depth_attachment(d);
+                        let pass = self.render_pass((color_att.map(|c| (c.1, c.2)), depth_att.map(|d| d.1)));
+                        let views: Vec<_> = color_att
+                            .map(|c| c.0)
+                            .into_iter()
+                            .chain(depth_att.map(|d| d.0))
+                            .collect();
+                        let framebuffer = self
+                            .device
+                            .create_framebuffer(
+                                &vk::FramebufferCreateInfo::default()
+                                    .render_pass(pass)
+                                    .attachments(&views)
+                                    .width(extent.width)
+                                    .height(extent.height)
+                                    .layers(1),
+                                None,
+                            )
+                            .expect("vkCreateFramebuffer");
+                        self.frames[self.slot].framebuffers.push(framebuffer);
+                        let mut clears = Vec::new();
+                        if let Some(c) = color_att {
+                            clears.push(vk::ClearValue { color: vk::ClearColorValue { float32: c.3 } });
                         }
-                        self.device.cmd_begin_rendering(cmd, &info);
+                        if let Some(d) = depth_att {
+                            clears.push(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: d.2, stencil: 0 } });
+                        }
+                        self.device.cmd_begin_render_pass(
+                            cmd,
+                            &vk::RenderPassBeginInfo::default()
+                                .render_pass(pass)
+                                .framebuffer(framebuffer)
+                                .render_area(vk::Rect2D { offset: Default::default(), extent })
+                                .clear_values(&clears),
+                            vk::SubpassContents::INLINE,
+                        );
                         self.device.cmd_set_viewport(
                             cmd,
                             0,
@@ -1611,7 +2108,7 @@ impl Backend for VulkanBackend {
                             .cmd_set_scissor(cmd, 0, &[vk::Rect2D { offset: Default::default(), extent }]);
                     }
                     Cmd::EndPass => {
-                        self.device.cmd_end_rendering(cmd);
+                        self.device.cmd_end_render_pass(cmd);
                         for t in in_pass_targets.drain(..) {
                             let image = self.textures.get(t).image;
                             self.barrier_image(
@@ -1629,25 +2126,24 @@ impl Backend for VulkanBackend {
                         self.device.cmd_bind_pipeline(cmd, pl.bind_point, pl.raw);
                         self.device
                             .cmd_bind_descriptor_sets(cmd, pl.bind_point, pl.layout, 0, &sets, &[]);
+                        self.device
+                            .cmd_bind_descriptor_sets(cmd, pl.bind_point, pl.layout, SAMPLER_SET, &[self.sampler_set], &[]);
                         current = Some(p.0);
+                        stale = true;
                     }
                     Cmd::BindBuffer { binding, buffer, offset, size } => {
-                        let Some(p) = current else { continue };
-                        let pl = self.pipelines.get(p);
                         // A binding the shader never reads is not in its reflection (a shader
-                        // pack's that skips a buffer): nothing to bind.
-                        let Some(&(_, ty)) = pl.buffers.iter().find(|b| b.0 == binding) else { continue };
-                        let b = self.buffers.get(buffer.0);
+                        // pack's that skips a buffer): it is left out when the set is made.
                         let range = if size == u64::MAX { vk::WHOLE_SIZE } else { size };
-                        let info = [vk::DescriptorBufferInfo { buffer: b.raw, offset, range }];
-                        let write = vk::WriteDescriptorSet::default()
-                            .dst_binding(binding)
-                            .descriptor_type(ty)
-                            .buffer_info(&info);
-                        self.push_fn
-                            .cmd_push_descriptor_set(cmd, pl.bind_point, pl.layout, 1, &[write]);
+                        let info = vk::DescriptorBufferInfo { buffer: self.buffers.get(buffer.0).raw, offset, range };
+                        match bound.iter_mut().find(|b| b.0 == binding) {
+                            Some(b) => b.1 = info,
+                            None => bound.push((binding, info)),
+                        }
+                        stale = true;
                     }
                     Cmd::PushConstants { start, len } => {
+                        pushed = Some((start, len));
                         let Some(p) = current else { continue };
                         let pl = self.pipelines.get(p);
                         let bytes = &list.data[start as usize..(start + len) as usize];
@@ -1666,9 +2162,7 @@ impl Backend for VulkanBackend {
                             .cmd_draw(cmd, vertices, instances, first_vertex, first_instance);
                     }
                     Cmd::DrawIndirect { buffer, offset, count } => {
-                        let b = self.buffers.get(buffer.0).raw;
-                        self.device
-                            .cmd_draw_indirect(cmd, b, offset, count, size_of::<DrawArgs>() as u32);
+                        self.draw_indirect(cmd, self.buffers.get(buffer.0).raw, offset, count, false);
                     }
                     Cmd::IndexBuffer(buffer) => {
                         let b = self.buffers.get(buffer.0).raw;
@@ -1676,28 +2170,24 @@ impl Backend for VulkanBackend {
                             .cmd_bind_index_buffer(cmd, b, 0, vk::IndexType::UINT32);
                     }
                     Cmd::DrawIndexedIndirect { buffer, offset, count } => {
-                        let b = self.buffers.get(buffer.0).raw;
-                        self.device
-                            .cmd_draw_indexed_indirect(cmd, b, offset, count, size_of::<DrawIndexedArgs>() as u32);
+                        self.draw_indirect(cmd, self.buffers.get(buffer.0).raw, offset, count, true);
                     }
-                    Cmd::DrawIndexedIndirectCount { buffer, offset, count_buffer, count_offset, max } => {
+                    Cmd::DrawIndexedIndirectCount { buffer, offset, count_buffer, count_offset, max }
+                    | Cmd::DrawIndirectCount { buffer, offset, count_buffer, count_offset, max } => {
+                        let indexed = matches!(cmd_item, Cmd::DrawIndexedIndirectCount { .. });
                         let b = self.buffers.get(buffer.0).raw;
                         let c = self.buffers.get(count_buffer.0).raw;
-                        self.device.cmd_draw_indexed_indirect_count(
-                            cmd,
-                            b,
-                            offset,
-                            c,
-                            count_offset,
-                            max,
-                            size_of::<DrawIndexedArgs>() as u32,
-                        );
-                    }
-                    Cmd::DrawIndirectCount { buffer, offset, count_buffer, count_offset, max } => {
-                        let b = self.buffers.get(buffer.0).raw;
-                        let c = self.buffers.get(count_buffer.0).raw;
-                        self.device
-                            .cmd_draw_indirect_count(cmd, b, offset, c, count_offset, max, size_of::<DrawArgs>() as u32);
+                        match &self.draw_count_fn {
+                            Some(f) if indexed => {
+                                f.cmd_draw_indexed_indirect_count(cmd, b, offset, c, count_offset, max, size_of::<DrawIndexedArgs>() as u32)
+                            }
+                            Some(f) => f.cmd_draw_indirect_count(cmd, b, offset, c, count_offset, max, size_of::<DrawArgs>() as u32),
+                            None => {
+                                let (b, _) = self.frames[self.slot].compacted.unwrap();
+                                let at = compacted.pop().unwrap();
+                                self.draw_indirect(cmd, self.buffers.get(b.0).raw, at, max, indexed);
+                            }
+                        }
                     }
                     Cmd::Dispatch { x, y, z } => self.device.cmd_dispatch(cmd, x, y, z),
                     Cmd::Barrier => self.memory_barrier(cmd),
@@ -1709,7 +2199,7 @@ impl Backend for VulkanBackend {
                             cmd,
                             image,
                             depth_range(),
-                            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                         );
                         let region = vk::BufferImageCopy::default()
@@ -1727,13 +2217,13 @@ impl Backend for VulkanBackend {
                             image,
                             depth_range(),
                             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                            vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                         );
                     }
                     Cmd::Mark => {
                         if marks < MAX_MARKS - 1 {
                             self.device
-                                .cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, self.queries, first_query + marks);
+                                .cmd_write_timestamp(cmd, vk::PipelineStageFlags::BOTTOM_OF_PIPE, self.queries, first_query + marks);
                             marks += 1;
                         }
                     }
@@ -1771,29 +2261,24 @@ impl Backend for VulkanBackend {
             }
             self.swapchain.as_mut().unwrap().layouts[image_index as usize] = vk::ImageLayout::PRESENT_SRC_KHR;
             self.device
-                .cmd_write_timestamp2(cmd, vk::PipelineStageFlags2::ALL_COMMANDS, self.queries, first_query + marks);
+                .cmd_write_timestamp(cmd, vk::PipelineStageFlags::BOTTOM_OF_PIPE, self.queries, first_query + marks);
             self.frames[self.slot].marks = marks + 1;
             self.device.end_command_buffer(cmd).ok();
 
             let frame = &mut self.frames[self.slot];
             let rendered = self.swapchain.as_ref().unwrap().rendered[image_index as usize];
-            let waits = [vk::SemaphoreSubmitInfo::default()
-                .semaphore(frame.acquired)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-            let signals = [vk::SemaphoreSubmitInfo::default()
-                .semaphore(rendered)
-                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
-            let cmds = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
-            let submit = vk::SubmitInfo2::default()
-                .wait_semaphore_infos(&waits)
-                .command_buffer_infos(&cmds)
-                .signal_semaphore_infos(&signals);
+            let waits = [frame.acquired];
+            let stages = [vk::PipelineStageFlags::ALL_COMMANDS];
+            let signals = [rendered];
+            let cmds = [cmd];
+            let submit = vk::SubmitInfo::default()
+                .wait_semaphores(&waits)
+                .wait_dst_stage_mask(&stages)
+                .command_buffers(&cmds)
+                .signal_semaphores(&signals);
             self.device.reset_fences(&[frame.fence]).ok();
-            if let Err(e) = self
-                .device
-                .queue_submit2(self.queue, &[submit], frame.fence)
-            {
-                log::error!("vkQueueSubmit2: {e:?}");
+            if let Err(e) = self.device.queue_submit(self.queue, &[submit], frame.fence) {
+                log::error!("vkQueueSubmit: {e:?}");
             }
             frame.waited = false;
 
@@ -1805,12 +2290,13 @@ impl Backend for VulkanBackend {
                 .swapchains(&swapchains)
                 .image_indices(&indices);
             match self.swapchain_fn.queue_present(self.queue, &present) {
-                Ok(false) => {}
-                Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.dirty_swapchain = true,
+                Ok(suboptimal) if !suboptimal || self.turned => {}
+                Ok(_) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => self.dirty_swapchain = true,
                 Err(e) => log::error!("vkQueuePresentKHR: {e:?}"),
             }
         }
         self.slot = (self.slot + 1) % FRAMES;
+        self.save_pipeline_cache();
     }
 
     fn request_capture(&mut self) {
@@ -1841,6 +2327,9 @@ impl Backend for VulkanBackend {
 
 impl Drop for VulkanBackend {
     fn drop(&mut self) {
+        for t in self.compile_threads.drain(..) {
+            let _ = t.join();
+        }
         unsafe {
             self.device.device_wait_idle().ok();
             for i in 0..self.frames.len() {
@@ -1853,6 +2342,12 @@ impl Drop for VulkanBackend {
                     self.allocator.free(alloc).ok();
                 }
                 let f = &self.frames[i];
+                for &p in &f.set_pools {
+                    self.device.destroy_descriptor_pool(p, None);
+                }
+                for &fb in &f.framebuffers {
+                    self.device.destroy_framebuffer(fb, None);
+                }
                 self.device.destroy_command_pool(f.pool, None);
                 self.device.destroy_semaphore(f.acquired, None);
                 self.device.destroy_fence(f.fence, None);
@@ -1886,7 +2381,16 @@ impl Drop for VulkanBackend {
             for s in self.samplers {
                 self.device.destroy_sampler(s, None);
             }
+            for (_, p) in self.passes.drain() {
+                self.device.destroy_render_pass(p, None);
+            }
+            self.save_pipeline_cache();
+            self.device
+                .destroy_pipeline_cache(self.pipeline_cache, None);
             self.device.destroy_descriptor_pool(self.global_pool, None);
+            self.device.destroy_descriptor_pool(self.sampler_pool, None);
+            self.device
+                .destroy_descriptor_set_layout(self.sampler_layout, None);
             self.device
                 .destroy_descriptor_set_layout(self.global_layout, None);
             if let Some(sc) = self.swapchain.take() {
@@ -1900,5 +2404,36 @@ impl Drop for VulkanBackend {
             }
             self.instance.destroy_instance(None);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every sampled image of a texture picked per pixel ends up marked, whatever naga does.
+    #[test]
+    fn sampled_images_of_varying_textures_are_non_uniform() {
+        let shader = weft_render::Shader::from_wgsl(
+            "test",
+            "@fragment fn fs(@location(0) @interpolate(flat) t: u32, @location(1) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                return textureSampleLevel(textures[t], nearest_clamp, uv, 0.0);
+            }",
+        )
+        .unwrap();
+        let options = naga::back::spv::PipelineOptions { shader_stage: naga::ShaderStage::Fragment, entry_point: "fs".into() };
+        let mut words = naga::back::spv::write_vec(&shader.module, &shader.info, &Default::default(), Some(&options)).unwrap();
+        super::non_uniform_samples(&mut words);
+        let (mut marked, mut sampled) = (Vec::new(), Vec::new());
+        let mut at = 5;
+        while at < words.len() {
+            let count = (words[at] >> 16) as usize;
+            match words[at] & 0xffff {
+                71 if words[at + 2] == 5300 => marked.push(words[at + 1]),
+                86 => sampled.push(words[at + 2]),
+                _ => {}
+            }
+            at += count;
+        }
+        assert!(!sampled.is_empty());
+        assert!(sampled.iter().all(|s| marked.contains(s)), "sampled {sampled:?}, marked {marked:?}");
     }
 }

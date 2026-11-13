@@ -90,7 +90,92 @@ pub const COMMANDS: &[(&str, &str, Handler, u32)] = &[
     ("say", "<text:text>", say_all, p::GAME_MASTER),
     ("msg", "<who:player> <text:text>", whisper, p::EVERYONE),
     ("tellraw", "<who:targets> <text:text>", tellraw, p::GAME_MASTER),
+    (
+        "structure",
+        "save <name:word> <from:pos> <to:pos> | load <name:word> [pos:pos] [transform:int] | undo | locate <name:word> [radius:int]",
+        structure,
+        p::GAME_MASTER,
+    ),
 ];
+
+/// Most blocks `/structure save` takes at once.
+const MOST_SAVED: i64 = 1 << 22;
+
+/// `/structure`: a box of the world saved to `structures/<name>.json` beside the saves, a
+/// template or a saved file placed (turned by `transform`, `abi::transform`), the last placing
+/// undone, the nearest start of a feature found.
+fn structure(s: &mut Server, x: &Ctx) -> Vec<Msg> {
+    let (c, a, dim) = (x.c, x.a, x.me.0);
+    let name = a.text("name").unwrap_or("");
+    if a.get("save").is_some() {
+        let (Some(from), Some(to)) = (a.pos("from"), a.pos("to")) else { return Vec::new() };
+        let (lo, hi) = (from.floor().as_ivec3().min(to.floor().as_ivec3()), from.floor().as_ivec3().max(to.floor().as_ivec3()));
+        let size = hi - lo + IVec3::ONE;
+        if size.x as i64 * size.y as i64 * size.z as i64 > MOST_SAVED || name.is_empty() || name.contains(['/', '\\', '.', ':']) {
+            return say("structure.bad", vec![text(name)]);
+        }
+        let Some(dir) = s.structures_dir() else { return say("structure.no_folder", Vec::new()) };
+        let Some(parts) = s.dims[dim as usize]
+            .region_at(lo)
+            .and_then(|r| r.capture(c, lo, hi))
+        else {
+            return say("not_loaded", Vec::new());
+        };
+        let file = dir.join(format!("{name}.json"));
+        let written = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&file, crate::template::write_json(size, &parts)));
+        return match written {
+            Ok(()) => say("structure.saved", vec![text(name), int(parts.blocks.len())]),
+            Err(e) => say("structure.not_saved", vec![text(&e.to_string())]),
+        };
+    }
+    if a.get("load").is_some() {
+        let at = a.pos("pos").unwrap_or(x.here).floor().as_ivec3();
+        let t = crate::template::Transform::new(a.int("transform").unwrap_or(0).clamp(0, 7) as u32);
+        let file_def;
+        let def = match c.template_names.get(name) {
+            Some(&t) => &c.templates[t as usize],
+            None => {
+                let Some(path) = s.structures_dir().map(|d| d.join(format!("{name}.json"))) else {
+                    return say("structure.unknown", vec![text(name)]);
+                };
+                let parts = match crate::template::read_file(&path) {
+                    Ok(p) => p,
+                    Err(_) => return say("structure.unknown", vec![text(name)]),
+                };
+                let mut errors = Vec::new();
+                file_def = crate::template::TemplateDef::from_parts(name, parts, |b| c.parse_state(b), &mut errors);
+                for e in errors {
+                    log::warn!("/structure load: {e}");
+                }
+                &file_def
+            }
+        };
+        return match s.dims[dim as usize].region_at(at) {
+            Some(r) => match r.place_template(c, def, at, t, None) {
+                Some(_) => say("structure.placed", vec![text(name)]),
+                None => say("not_loaded", Vec::new()),
+            },
+            None => say("not_loaded", Vec::new()),
+        };
+    }
+    if a.get("undo").is_some() {
+        let at = x.here.floor().as_ivec3();
+        let Some(r) = s.dims[dim as usize].region_at(at) else { return say("not_loaded", Vec::new()) };
+        return match r.last_placing() {
+            Some(id) if r.unplace(c, id) => say("structure.undone", Vec::new()),
+            _ => say("structure.nothing", Vec::new()),
+        };
+    }
+    let radius = a.int("radius").unwrap_or(4096).clamp(1, 1 << 16) as i32;
+    let seed = s.dims[dim as usize].seed();
+    match crate::features::nearest(c, dim, seed, name, x.here.floor().as_ivec3(), radius) {
+        Some(p) => {
+            let coords = Msg::template(&format!("{{link:suggest:/tp {} {} {}}}[{}, {}, {}]{{/link}}", p.x, p.y, p.z, p.x, p.y, p.z));
+            say("structure.found", vec![text(name), Arg::Msg(coords)])
+        }
+        None => say("structure.none", vec![text(name), int(radius)]),
+    }
+}
 
 fn title(s: &mut Server, x: &Ctx) -> Vec<Msg> {
     use weft_abi::show_place as place;

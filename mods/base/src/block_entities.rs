@@ -37,7 +37,13 @@ pub fn register(r: &mut Registry) {
         .opens(&FURNACE_MENU);
     r.menu(&FURNACE_MENU)
         .group("input", Slots::single().holder())
-        .group("fuel", Slots::single().accepts("#fuel").holder())
+        .group(
+            "fuel",
+            Slots::single()
+                .accepts("#fuel")
+                .background("slot_fuel")
+                .holder(),
+        )
         .group("output", Slots::single().output().holder())
         .recipes(&crate::recipes::SMELTING)
         .player_inventory()

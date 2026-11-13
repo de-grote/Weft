@@ -69,6 +69,63 @@ pub const PRELUDE: &str = r#"enable wgpu_binding_array;
 @group(0) @binding(4) var linear_mipped: sampler;
 "#;
 
+/// For GPUs without draws whose count a shader wrote: copies `max` draw records of `stride` words
+/// to `dst`, zeroing those at or past the count, so a plain indirect draw of `max` does the same.
+pub const DRAW_COMPACTION: &str = r#"
+struct Args { src: u32, count: u32, max: u32, dst: u32, stride: u32 }
+@group(1) @binding(0) var<storage, read> src: array<u32>;
+@group(1) @binding(1) var<storage, read> counts: array<u32>;
+@group(1) @binding(2) var<storage, read_write> dst: array<u32>;
+var<immediate> a: Args;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if i >= a.max {
+        return;
+    }
+    let live = i < counts[a.count];
+    for (var w = 0u; w < a.stride; w++) {
+        dst[a.dst + i * a.stride + w] = select(0u, src[a.src + i * a.stride + w], live);
+    }
+}
+"#;
+
+/// A draw whose count a shader wrote, on a GPU without those: its records are copied by
+/// `DRAW_COMPACTION` to `at` in a buffer of compacted ones, `args` being the shader's immediates.
+pub struct CountDraw {
+    pub buffer: BufferId,
+    pub count_buffer: BufferId,
+    pub max: u32,
+    pub at: u64,
+    pub args: [u32; 5],
+}
+
+/// The count draws of the pass starting at `cmds[0]`, one after another, and the bytes they take.
+pub fn count_draws(cmds: &[Cmd]) -> (Vec<CountDraw>, u64) {
+    let mut at = 0;
+    let draws = cmds
+        .iter()
+        .take_while(|c| !matches!(c, Cmd::EndPass))
+        .filter_map(|c| {
+            let (buffer, offset, count_buffer, count_offset, max, stride) = match *c {
+                Cmd::DrawIndexedIndirectCount { buffer, offset, count_buffer, count_offset, max } => {
+                    (buffer, offset, count_buffer, count_offset, max, size_of::<DrawIndexedArgs>() as u64)
+                }
+                Cmd::DrawIndirectCount { buffer, offset, count_buffer, count_offset, max } => {
+                    (buffer, offset, count_buffer, count_offset, max, size_of::<DrawArgs>() as u64)
+                }
+                _ => return None,
+            };
+            let args = [(offset / 4) as u32, (count_offset / 4) as u32, max, (at / 4) as u32, (stride / 4) as u32];
+            let draw = CountDraw { buffer, count_buffer, max, at, args };
+            at += max as u64 * stride;
+            Some(draw)
+        })
+        .collect();
+    (draws, at)
+}
+
 /// Every texture of every kind is its own entry (blocks, items, particles, skins, GUI, each
 /// animation frame): big packs have thousands; face records keep 16-bit indices.
 pub const MAX_TEXTURES: u32 = 65536;
@@ -352,6 +409,9 @@ pub struct BackendDesc<'a> {
     pub height: u32,
     pub vsync: bool,
     pub debug: bool,
+    /// Where compiled shaders may be kept between runs: a phone's driver takes most of a minute
+    /// over the terrain shader.
+    pub cache: Option<&'a std::path::Path>,
 }
 
 pub trait Backend: Send {
@@ -364,6 +424,9 @@ pub trait Backend: Send {
     fn surface_size(&self) -> (u32, u32);
     fn resize(&mut self, width: u32, height: u32);
     fn set_vsync(&mut self, vsync: bool);
+    /// The window's surface went away (an Android app sent to the background), or came back with
+    /// `Some`: no frames begin in between. Only phones do this, and only Vulkan runs there.
+    fn set_surface(&mut self, _window: Option<&dyn Window>) {}
 
     fn create_buffer(&mut self, size: u64, usage: u32, label: &str) -> BufferId;
     /// Only valid for `usage::HOST` buffers.
@@ -381,6 +444,14 @@ pub trait Backend: Send {
 
     fn create_pipeline(&mut self, desc: &PipelineDesc) -> Result<PipelineId, Error>;
     fn create_compute(&mut self, desc: &ComputeDesc) -> Result<PipelineId, Error>;
+    /// Compiles `desc` on another thread into the kept shaders (`BackendDesc::cache`), so that
+    /// `create_compute` of it later takes no time: a phone's driver needs most of a minute over a
+    /// big shader. Without a cache of its own a backend compiles nothing ahead.
+    fn precompile(&mut self, _desc: &ComputeDesc) {}
+    /// Whether what `precompile` started is still compiling.
+    fn compiling(&self) -> bool {
+        false
+    }
     fn destroy_pipeline(&mut self, pipeline: PipelineId);
 
     /// `None` when the surface cannot be drawn to right now (minimized).

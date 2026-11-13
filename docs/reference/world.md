@@ -1,0 +1,251 @@
+# World reference
+
+What a `World` can do, shapes, directions, conditions.
+
+## BlockInfo
+
+What a block state is besides its components (those: `components_of`): its block, the mod it is from, its flags, light, look and feel. `None` for a state that doesn't exist.
+
+- <a id="BlockInfo-solid"></a>`.solid() -> bool` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L341)
+- <a id="BlockInfo-opaque"></a>`.opaque() -> bool` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L344)
+
+## Cond
+
+A condition (`abi::condition`): one of the engine's below, a registered one (`Cond::from(&conditions::NIGHT)`, `Cond::with(&MY_COND, "lava")`) or written out (`Cond::new("night & light(..7)")`), put together with `&`, `|` and `!`. Loot tables, spawning, poses, music, camera modes and text (`{if:..}`) all take them, and `w.holds` asks one.
+
+- <a id="Cond-new"></a>`.new(text: &str) -> Cond` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L597)
+- <a id="Cond-with"></a>`.with(c: &crate::Condition, arg: &str) -> Cond`: A registered condition with its argument, `name(arg)`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L601)
+- <a id="Cond-text"></a>`.text() -> &str` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L604)
+- <a id="Cond-chance"></a>`.chance(p: f32) -> Cond`: Holds that share of the times it is asked. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L608)
+- <a id="Cond-light"></a>`.light(min: u32, max: u32) -> Cond`: The light there, inclusive (0..15): the brighter of sky light times daylight and block light. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L612)
+- <a id="Cond-block"></a>`.block(what: &str) -> Cond`: The block asked about is one `what` takes (a block matcher): one broken, one under a spawn. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L616)
+- <a id="Cond-side"></a>`.side(d: crate::Dir, what: &str) -> Cond`: The cell on side `d` of the one asked about has a block `what` takes, or (empty) is solid. Not known while unloaded, so a rule waits. In a block's rule the side is of its own frame. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L621)
+- <a id="Cond-beside"></a>`.beside(d: crate::Dir, what: &str) -> Cond`: A block horizontally next to the cell on side `d` is one `what` takes. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L628)
+- <a id="Cond-open"></a>`.open(d: crate::Dir) -> Cond`: Side `d` can be fallen into: air, a liquid, what placing replaces. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L632)
+- <a id="Cond-covered"></a>`.covered() -> Cond`: Something opaque is on top. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L636)
+- <a id="Cond-state"></a>`.state(props: &str) -> Cond`: That block has these properties, written as in `w.prop`: `state("age=7")` for a ripe crop. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L640)
+- <a id="Cond-tool"></a>`.tool(tag: &str) -> Cond`: What it was broken or killed with carries the tag (`tools/shears`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L644)
+- <a id="Cond-tool_level"></a>`.tool_level(level: u32) -> Cond` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L647)
+- <a id="Cond-killed_by_player"></a>`.killed_by_player() -> Cond` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L650)
+- <a id="Cond-on_fire"></a>`.on_fire() -> Cond` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L653)
+- <a id="Cond-harvested"></a>`.harvested() -> Cond`: The block was harvested: broken by the world, or mined with a tool its `mined_by` level accepts. `drops(..)` tables have it; write it on pools of your own tables that should. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L658)
+- <a id="Cond-in_liquid"></a>`.in_liquid() -> Cond`: The body asked about is in a liquid it swims in, flies, sprints (poses). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L662)
+- <a id="Cond-flying"></a>`.flying() -> Cond` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L665)
+- <a id="Cond-sprinting"></a>`.sprinting() -> Cond` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L668)
+- <a id="Cond-attribute"></a>`.attribute(a: &crate::Attribute, min: f64, max: f64) -> Cond`: An attribute of the body asked about is within `min..=max`: `attribute(&attribute::CAN_FLY, 1.0, f64::MAX)` where it may fly. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L673)
+
+## Dir
+
+A direction, in face order (`-X +X -Y +Y -Z +Z`), so `face()` is the face index blocks and support rules use.
+
+- <a id="Dir-face"></a>`.face() -> u32` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L27)
+- <a id="Dir-from_face"></a>`.from_face(face: u32) -> Dir` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L30)
+- <a id="Dir-opposite"></a>`.opposite() -> Dir` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L33)
+- <a id="Dir-offset"></a>`.offset() -> BlockPos` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L36)
+- <a id="Dir-clockwise"></a>`.clockwise() -> Dir`: The next way around, seen from above: north, east, south, west. Up and down stay. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L40)
+- <a id="Dir-counter_clockwise"></a>`.counter_clockwise() -> Dir` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L49)
+- <a id="Dir-horizontal"></a>`.horizontal() -> bool` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L52)
+- <a id="Dir-name"></a>`.name() -> &'static str`: The value of a `facing` property. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L56)
+- <a id="Dir-from_name"></a>`.from_name(name: &str) -> Option<Dir>` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L59)
+- <a id="Dir-nearest"></a>`.nearest(v: [f32`: The direction closest to `v` among `allowed`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L63)
+
+## EntityFilter
+
+What `World::entities_in` picks.
+
+- <a id="EntityFilter-any"></a>`.any() -> EntityFilter` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L219)
+- <a id="EntityFilter-kind"></a>`.kind(kind: &crate::EntityKind) -> EntityFilter` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L222)
+- <a id="EntityFilter-targets"></a>`.targets(mut self)`: Only what can be hit: no dropped items, block entities, spectators or the dead. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L226)
+- <a id="EntityFilter-touching"></a>`.touching(mut self)`: Any part of its box in the shape, not just its feet (an arrow catching a tall mob's head). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L231)
+
+## Facings
+
+The directions a block may face (a bit per face index).
+
+- <a id="Facings-only"></a>`.only(dirs: &[Dir]) -> Facings` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L84)
+- <a id="Facings-allows"></a>`.allows(d: Dir) -> bool` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L93)
+- <a id="Facings-count"></a>`.count() -> u32` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L96)
+- <a id="Facings-dirs"></a>`.dirs() -> impl Iterator<Item = Dir>` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L99)
+
+## Fill
+
+A fill in the making (`World::fill`); it happens as this goes.
+
+- <a id="Fill-keep"></a>`.keep(what: &str)`: Blocks `what` takes stay (a block matcher: `"#unbreakable #liquids"`), on top of what an earlier `keep` said. One naming a block nobody has is a mistake the fill logs instead of happening. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L178)
+- <a id="Fill-only"></a>`.only(what: &str)`: Only blocks `what` (or an earlier `only`) takes change (a block matcher): ore veins in stone only. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L184)
+
+## Orientation
+
+How a block's model is turned (`State::orientation`, one of `abi::Turn`'s 24). A model is written once facing north, its top up; boxes, model files, hitboxes, a cube's faces, liquid walls and support all turn with it. `.facing(..)`, `.axis()` and redstone's `attach` and `front` turn their states by themselves.
+
+- <a id="Orientation-new"></a>`.new(attach: Dir, front: Dir) -> Orientation`: Its bottom against `attach`, its front to `front`; a front along `attach` takes another way. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L150)
+- <a id="Orientation-front"></a>`.front(facing: Dir) -> Orientation`: Its front to `facing`, its top up unless the front is (then to the north, under it to the south). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L162)
+- <a id="Orientation-up"></a>`.up(facing: Dir) -> Orientation`: Its top to `facing` (a piston's head). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L172)
+- <a id="Orientation-leaning"></a>`.leaning(attach: Dir) -> Orientation`: Upright, its own west against `attach` (a torch on a wall). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L177)
+- <a id="Orientation-axis"></a>`.axis(axis: &str) -> Orientation`: Its top along axis `x`, `y` or `z` (a log). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L182)
+- <a id="Orientation-dir"></a>`.dir(d: Dir) -> Dir`: Where its own `d` goes. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L191)
+- <a id="Orientation-own"></a>`.own(d: Dir) -> Dir`: Its own direction that goes to `d`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L196)
+- <a id="Orientation-turn"></a>`.turn() -> abi::Turn` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L200)
+
+## Ray
+
+What a ray looks for (`World::raycast`): blocks unless said otherwise.
+
+- <a id="Ray-blocks"></a>`.blocks() -> Ray` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2411)
+- <a id="Ray-entities_only"></a>`.entities_only() -> Ray`: Only what can be hit: bodies, not dropped stacks, the dead or spectators. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2415)
+- <a id="Ray-liquids"></a>`.liquids(mut self) -> Ray`: Liquids stop it too. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2419)
+- <a id="Ray-entities"></a>`.entities(mut self) -> Ray` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2423)
+- <a id="Ray-solid"></a>`.solid(mut self) -> Ray`: Blocks by what stops a body, not what is aimed at: through grass, as an arrow flies. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2428)
+- <a id="Ray-skip"></a>`.skip(id: u64) -> Ray`: It goes through `id` (the one looking, the shooter). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2433)
+
+## Shape
+
+- <a id="Shape-ball"></a>`.ball(center: impl Into<Vec3>, radius: f64) -> Shape` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L27)
+- <a id="Shape-cuboid"></a>`.cuboid(min: impl Into<Vec3>, max: impl Into<Vec3>) -> Shape`: The box between two corners. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L32)
+- <a id="Shape-cylinder"></a>`.cylinder(base: impl Into<Vec3>, radius: f64, height: f64, dir: Dir) -> Shape`: From `base` along `dir` for `height` blocks (a mine shaft: `Dir::Down`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L38)
+- <a id="Shape-ellipsoid"></a>`.ellipsoid(center: impl Into<Vec3>, radii: impl Into<Vec3>) -> Shape` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L44)
+- <a id="Shape-noisy"></a>`.noisy(center: impl Into<Vec3>, radius: f64, amount: f64, bumps: f64, seed: u64) -> Shape`: A ball whose edge wanders in and out by up to `amount` of the radius (0..1), with `bumps` of them across; the same `seed`, the same edge. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L51)
+- <a id="Shape-blast"></a>`.blast(center: impl Into<Vec3>, power: f64, seed: u64) -> Shape`: A crater like vanilla's explosions leave, without their rays: a ball of radius `power` with a ragged edge. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L59)
+- <a id="Shape-union"></a>`.union(other: Shape) -> Shape`: Inside either. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L70)
+- <a id="Shape-intersect"></a>`.intersect(other: Shape) -> Shape`: Inside both. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L74)
+- <a id="Shape-subtract"></a>`.subtract(other: Shape) -> Shape`: Inside this and not in `other`: a shell, a tunnel's hollow. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L78)
+- <a id="Shape-contains"></a>`.contains(p: impl Into<Vec3>) -> bool` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L82)
+- <a id="Shape-bounds"></a>`.bounds() -> (Vec3, Vec3)`: A box around everything inside (min, max). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L87)
+- <a id="Shape-steps"></a>`.steps() -> &[ShapeStep]` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L93)
+- <a id="Shape-outline"></a>`.outline() -> Vec<(Vec3, Vec3)>`: Lines tracing each primitive (circles around balls and cylinders, a box's edges), for drawing it. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L99)
+
+## Toward
+
+How placing chooses the facing.
+
+- <a id="Toward-choose"></a>`.choose(allowed: Facings, face: u32, look: [f32`: The facing for a placement: clicked face (0..6), look direction and where it was clicked (0..1 in its cell). A clicked face the block cannot face (a ladder on a floor) falls back to the player's look, front towards the player. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/facing.rs#L122)
+
+## World
+
+A dimension as seen from a callback. Only valid for the duration of that callback.
+
+- <a id="World-force_camera"></a>`.force_camera(player: u64, mode: &CameraMode, over: Option<(f32, u32)>)`: Puts `player` in camera `mode` and keeps it there until `release_camera`; the change over `over` (seconds, `easing::*`) or as the mode says. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/camera.rs#L238)
+- <a id="World-set_camera"></a>`.set_camera(player: u64, mode: &CameraMode, over: Option<(f32, u32)>)`: Puts `player` in camera `mode`, which it may leave as usual. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/camera.rs#L242)
+- <a id="World-release_camera"></a>`.release_camera(player: u64, over: Option<(f32, u32)>)`: Back to the camera the player had chosen, free to change it again. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/camera.rs#L246)
+- <a id="World-send"></a>`.send<T: Payload>(who: impl Into<crate::Who>, channel: &Channel<T>, value: &T)`: Sends `value` on `channel` to the clients of `who` (a player's id for one). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/client.rs#L543)
+- <a id="World-act"></a>`.act<T: Value>(action: &Action<T>, q: &abi::Query, value: T) -> bool`: Asks `action`'s question with `q`, and when the answer is yes sends its event with `value`. True if it may happen. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L367)
+- <a id="World-timer"></a>`.timer<T: Value>(holder: impl Into<abi::Holder>, ticks: u32, event: &Event<T>, value: T)`: In `ticks` ticks `event` fires with `value` (a calm-down, a fuse, a hunger pulse). The timer is saved with `holder`: an entity (and goes with it), a block (`BLOCK_TICK` is its own tick, `schedule_tick`), `Holder::NONE` for the dimension. Time away counts: a timer due while its holder wasn't loaded fires when it is. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1103)
+- <a id="World-schedule_tick"></a>`.schedule_tick(pos: impl Into<abi::BlockPos>, ticks: u32)`: The block's own tick (`block.on_scheduled`, a liquid's flow) in `ticks` ticks. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1113)
+- <a id="World-emit"></a>`.emit<T: Value>(event: &impl AsRef<Event<T>>, value: T)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1118)
+- <a id="World-ask"></a>`.ask(question: &impl Valued, q: &abi::Query) -> bool`: Question `question` about `q`; true if the answer is yes. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1128)
+- <a id="World-chain_compute"></a>`.chain_compute(chain: &impl Valued, base: f64, q: &abi::Query) -> f64` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1132)
+- <a id="World-chain_explain"></a>`.chain_explain(chain: &impl Valued, base: f64, q: &abi::Query) -> (f64, String)`: Like `chain_compute`, with the steps that led to the value ("core:damage: 4, core:multiply mymod:step/0: 4 -> 2 = 2"). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1138)
+- <a id="World-attribute"></a>`.attribute(entity: u64, attribute: &Attribute) -> f64` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1143)
+- <a id="World-attribute_explain"></a>`.attribute_explain(entity: u64, attribute: &Attribute) -> (f64, String)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1147)
+- <a id="World-attribute_add_modifier"></a>`.attribute_add_modifier(entity: u64, id: &str, m: &Modifier, ticks: u64)`: Puts modifier `m` on an entity as `id` (replacing one of that id on the same attribute) for `ticks` (0 = until removed). Saved with it; `worn` and `when` don't apply here. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1154)
+- <a id="World-attribute_remove_modifier"></a>`.attribute_remove_modifier(entity: u64, attr: &Attribute, id: &str)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1170)
+- <a id="World-holds"></a>`.holds(c: &Cond, pos: crate::Vec3, entity: u64) -> bool`: Whether `c` holds at `pos` for `entity` (0 for nobody): `w.holds(&Cond::new("night"), pos, 0)`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1175)
+- <a id="World-roll_loot"></a>`.roll_loot(table: &dyn LootSource, ctx: &LootCtx) -> Vec<ItemStack>` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1179)
+- <a id="World-break_block"></a>`.break_block(pos: impl Into<BlockPos>, tool: ItemStack, player: u64, drops: bool) -> bool`: Breaks a block as if mined with `tool` by `player` (0 = nobody), with its loot when `drops`. False if nothing broke or the question said no. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/extend.rs#L1200)
+- <a id="World-action_play"></a>`.action_play(id: u64, name: &str, looping: bool)`: Entity `id` plays keyframe animation `name` for everyone who sees it (looping until another starts); an empty name goes back to idle and walk. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L132)
+- <a id="World-action_stop"></a>`.action_stop(id: u64)`: Stops the action `action_play` started. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L137)
+- <a id="World-action_override"></a>`.action_override(id: u64, from: &str, to: &str)`: While this holds, entity `id` plays action `to` wherever it would play `from`: a mob running from a cat plays its own run instead of `walk`. Everyone who sees it sees it, and without a clip for `to` it goes on playing `from`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L144)
+- <a id="World-action_override_clear"></a>`.action_override_clear(id: u64, from: &str)`: Ends `action_override`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L149)
+- <a id="World-light"></a>`.light(pos: impl Into<BlockPos>) -> u32` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L153)
+- <a id="World-biome"></a>`.biome(pos: impl Into<BlockPos>) -> u32`: Biome id at `pos` (`Biome::id`, `Tag::on_biome`); underground biomes differ from the surface's. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L159)
+- <a id="World-sky_light"></a>`.sky_light(pos: impl Into<BlockPos>) -> u32`: Sky light level at `pos` (0..15). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L164)
+- <a id="World-block_light"></a>`.block_light(pos: impl Into<BlockPos>) -> u32`: Strongest block light channel at `pos`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L168)
+- <a id="World-daylight"></a>`.daylight() -> f32` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L171)
+- <a id="World-spawn"></a>`.spawn(kind: impl Into<Id<EntityKind>>, pos: impl Into<Vec3>) -> u64`: An entity of a kind (a handle, or its id); 0 if there is no such kind. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L175)
+- <a id="World-spawn_with"></a>`.spawn_with(kind: impl Into<Id<EntityKind>>, pos: impl Into<Vec3>, how: &Spawn) -> u64`: `spawn` with what it starts with: `Spawn::new().velocity(v).yaw(1.57)`, and for an item entity its stack. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L181)
+- <a id="World-despawn"></a>`.despawn(id: u64)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L186)
+- <a id="World-entity"></a>`.entity(id: u64) -> Option<EntityState>` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L189)
+- <a id="World-place_template"></a>`.place_template( &self, template: &crate::Template, pos: impl Into<BlockPos>, transform: crate::Transform, palette: Option<&crate::Palette>) -> Option<u64>`: Places `template` with its lowest corner at `pos` once placed with `transform`, its slots filled from `palette` (else its defaults). What undoes it (`unplace`), `None` (and nothing placed) when part of it isn't loaded. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L196)
+- <a id="World-place_feature"></a>`.place_feature(feature: &crate::Feature, pos: impl Into<BlockPos>) -> Option<u64>`: Puts feature `feature` into the world now as if it started at `pos` (its plan or template, with what they bring). What undoes it, `None` when part of it isn't loaded. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L210)
+- <a id="World-unplace"></a>`.unplace(placing: u64) -> bool`: Puts back what a placing replaced (the last 16 of a dimension are kept); whether it could. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L216)
+- <a id="World-entity_modify"></a>`.entity_modify(id: u64) -> EntityModify`: Changes what the entity is now, only what is named, when the edit is dropped: `w.entity_modify(id).velocity(v).yaw(y);`. Players' own clients follow. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L221)
+- <a id="World-push"></a>`.push(id: u64, v: impl Into<Vec3>)`: Adds `v` (blocks per second) to its velocity, players included: a trampoline, a blast. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L225)
+- <a id="World-set_size"></a>`.set_size(id: u64, size: Option<abi::EntitySize>)`: The entity's own box; `None` goes back to its kind's. Crouching still shrinks it. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L230)
+- <a id="World-set_appearance"></a>`.set_appearance(id: u64, kind: Option<&str>)`: Draws the entity as another kind (model, texture, animations); `None` as itself. It stays the same entity with its own behavior. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L235)
+- <a id="World-kind_size"></a>`.kind_size(kind: &str) -> Option<abi::EntitySize>`: The box entities of a kind have. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L239)
+- <a id="World-navigate"></a>`.navigate(id: u64, target: impl Into<Vec3>, speed: f32) -> bool`: `id` walks to `target` by itself, around obstacles, at `speed` times its walking speed (0 stops it). Call it again as the target moves. The path is found later in the tick; `navigating` turns false when the walk ends (arrived, or stuck for two seconds). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L246)
+- <a id="World-session"></a>`.session() -> u64`: A number of its own for each time a world is opened. Entity ids and time start over in another world: state a mod keeps by them in its own memory goes by this too. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L252)
+- <a id="World-seed"></a>`.seed() -> u64`: The world's seed, the one its terrain comes from. The same in every dimension. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L256)
+- <a id="World-seed_at"></a>`.seed_at(pos: impl Into<BlockPos>) -> u64`: A random number that belongs to this block of this world and never changes: what a chest should hold when first opened, a villager's trades. Several from one spot: `noise::hash(w.seed_at(pos), 1, 0, 0)`, and so on. On a body `pos` is in the body's coordinates, like anything there. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L263)
+- <a id="World-seed_of_cube"></a>`.seed_of_cube(pos: impl Into<BlockPos>) -> u64`: The same for the whole cube (16 blocks each way) `pos` is in. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L268)
+- <a id="World-structure_near"></a>`.structure_near(name: &str, pos: impl Into<BlockPos>, radius: i32) -> Option<BlockPos>`: Lowest corner of the nearest structure `name` (full name) within `radius` blocks of `pos`, generated yet or not. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L274)
+- <a id="World-fall_block"></a>`.fall_block(pos: impl Into<BlockPos>) -> u64`: The block at `pos` falls as an entity (sand, gravel) and is placed again where it lands: `body_fall` of a body of that one block. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L281)
+- <a id="World-navigating"></a>`.navigating(id: u64) -> bool`: Whether `id` is still walking where `navigate` sent it. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L286)
+- <a id="World-walk"></a>`.walk(id: u64, w: Walk)`: Moves `id` this tick as a player's keys would (`Walk`): the same physics and poses. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L290)
+- <a id="World-raycast"></a>`.raycast(from: impl Into<Vec3>, dir: impl Into<Vec3>, max: f64, ray: Ray) -> Option<abi::RayHit>`: What a ray from `from` along `dir` hits first within `max` blocks, of what `ray` looks for (`Ray::blocks()`, `.liquids()`, `.entities()`, `.skip(id)`): a block or an entity, the face it went in by and where on it (`RayHit::local`). A turret's line, a mob checking whether it sees a player, which part of a block a player clicked. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L297)
+- <a id="World-looked_at"></a>`.looked_at(id: u64, max: f64, ray: Ray) -> Option<abi::RayHit>`: What `id` looks at within `max` blocks: `raycast` from its eyes along its look, past itself. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L304)
+- <a id="World-heal"></a>`.heal(id: u64, amount: f32) -> bool`: Up to its maximum: `damage` with a negative amount. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L309)
+- <a id="World-damage"></a>`.damage(id: u64, d: Damage) -> bool`: Hurts `id` as `d` says: the `HURT` question, `question::RECOVERING`, the `DAMAGE` chain, knockback, the `actions::HURT` event, death as the cause says. A negative amount heals instead, through the `HEAL` chain and the `ENTITY_HEALED` event, with none of damage's consequences. True if health changed. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L316)
+- <a id="World-attack"></a>`.attack(id: u64, target: u64) -> bool`: `id` hits `target` with what it holds, which wears, or bare handed with its kind's `.attack_damage(..)`, as strong as its swing is charged (`swing_strength`, by its `.attack_speed(..)` when bare handed). Other mods can forbid it (`question::ATTACK`) or change it (`attribute::ATTACK_DAMAGE`, `chain::MELEE`, `question::CRIT`). True if it landed. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L323)
+- <a id="World-in_reach"></a>`.in_reach(id: u64, target: u64) -> bool`: Whether `target` is within `id`'s reach (the `ENTITY_REACH` attribute, from its eyes to the nearest point of the target's box): the same test for players and mobs. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L328)
+- <a id="World-in_liquid"></a>`.in_liquid(pos: impl Into<Vec3>) -> bool`: Whether that point is under a liquid's surface, which a block that isn't full lies below its top: for what the block alone can't tell, like a head above shallow water. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L334)
+- <a id="World-use_item"></a>`.use_item(id: u64, off_hand: bool) -> bool`: `id` uses what is in its main hand (or the other one, `off_hand`), on nothing, as a player's right click in the air does: a witch drinking, a skeleton drawing its bow. True if it did something or started to; what takes time goes on while it holds the item. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L341)
+- <a id="World-release_item"></a>`.release_item(id: u64)`: `id` lets go of what it is using, as a player's use button going up: a drawn bow shoots (`on_release`, after how long it was held). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L346)
+- <a id="World-use_item_on"></a>`.use_item_on(id: u64, off_hand: bool, pos: impl Into<BlockPos>, face: u32) -> bool`: `use_item` on the block at `pos`, from `face` (-X, +X, -Y, +Y, -Z, +Z): a bucket filled. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L350)
+- <a id="World-start_mining"></a>`.start_mining(id: u64, pos: impl Into<BlockPos>) -> bool`: `id` starts breaking the block at `pos` as a player holding the button does: as fast as what it holds mines it (`attribute::MINING_SPEED`), cracks showing, broken when done if still within its reach, the tool wearing. False when it may not (`actions::BREAK_BLOCK`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L357)
+- <a id="World-stop_mining"></a>`.stop_mining(id: u64)`: `id` stops breaking what it was. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L362)
+- <a id="World-key"></a>`.key(player: u64, key: &crate::Key) -> abi::KeyState`: What player `player` holds of action `key` (yours from `Registry::key`, or `keys::*`, the mouse buttons' `keys::USE` and `keys::ATTACK` too): `held` and `held_ticks`, as its client last said. Presses and releases come as `KEY` events. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L368)
+- <a id="World-swing_strength"></a>`.swing_strength(id: u64) -> f32`: How charged `id`'s next swing is, 0..1, with what it holds now. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L374)
+- <a id="World-component"></a>`.component<T: Value>(h: impl Into<Holder>, c: &Component<T>) -> Option<T>`: The value of `c` on any holder: an entity, a block's entity, a stack in a slot. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L378)
+- <a id="World-set_component"></a>`.set_component<T: Value>(h: impl Into<Holder>, c: &Component<T>, v: T) -> bool`: Sets `c` on any holder. An entity has it only if its kind attaches it; a stack takes any. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L384)
+- <a id="World-component_mut"></a>`.component_mut<T: Value>(id: u64, c: &Component<T>) -> Option<&mut T>`: An entity's component changed in place (a stack's is a value: `set_component`); changes are saved and synced like any other. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L390)
+- <a id="World-set_pose"></a>`.set_pose(id: u64, pose: Option<&crate::Pose>, facing: Option<f32>)`: Holds `id` in `pose` (a pet sitting, a zombie crawling, a player in a chair; its client follows), or with `None` gives it back to what its movement makes. With `facing` (degrees, feet that way when lying) it also stays still and turned so: in a bed. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L397)
+- <a id="World-creative"></a>`.creative(id: u64) -> bool`: A player in creative mode. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L402)
+- <a id="World-outside_survival"></a>`.outside_survival(id: u64) -> bool`: What is spared damage, hunger and air (creative, spectator, `attribute::INVULNERABLE`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L406)
+- <a id="World-game_mode"></a>`.game_mode(id: u64) -> u32`: The id of its game mode (`game_modes::CREATIVE.id()`): survival for what isn't a player. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L410)
+- <a id="World-energy_move"></a>`.energy_move(h: impl Into<Holder>, amount: i64, simulate: bool) -> i64`: Energy (the `ENERGY` component, read and set like any other) moves `amount` in (positive) or out (negative) within capacity and rate limits; returns what moved (or would, with `simulate`), with the same sign. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L415)
+- <a id="World-players"></a>`.players() -> Vec<u64>` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L419)
+- <a id="World-players_iter"></a>`.players_iter() -> impl Iterator<Item = u64> + '_`: `players` without collecting them (mob AI asks every tick). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L423)
+- <a id="World-inventory"></a>`.inventory(h: impl Into<Holder>) -> Inventory`: The inventory of an entity, a block (`[x, y, z]`, through its block entity) or a held stack (`Holder::held(player, slot)`, a backpack). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L429)
+- <a id="World-selected_slot"></a>`.selected_slot(player: u64) -> u32` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L432)
+- <a id="World-spawn_item"></a>`.spawn_item(pos: impl Into<Vec3>, stack: ItemStack) -> u64`: A dropped stack, tossed a little; 0 for an empty one. `spawn_with(&ITEM, ..)` to throw it somewhere. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L437)
+- <a id="World-block_entity"></a>`.block_entity(pos: impl Into<BlockPos>) -> u64`: Entity attached to the block at `pos` (furnace, chest), 0 if none. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L442)
+- <a id="World-open_menu"></a>`.open_menu(player: u64, menu: impl Into<Id<Menu>>, h: impl Into<Holder>) -> bool`: Opens a menu (a handle, or its id) on a holder: an entity, a block, a held stack, or `Holder::NONE` for menus without one. False (and a logged reason) when the holder isn't there or holds no items. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L449)
+- <a id="World-gizmo_shown"></a>`.gizmo_shown(group: &GizmoGroup) -> bool`: Whether a player here shows the gizmo group `group` (`/gizmo mymod:pipes`; the mod's namespace is added to bare names). Check before computing what to draw. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L455)
+- <a id="World-teleport"></a>`.teleport(id: u64, dim: Option<&crate::Dimension>, pos: impl Into<Vec3>)`: Moves an entity (players included) at the end of the tick, to `dim` or the same dimension. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L459)
+- <a id="World-set_weather"></a>`.set_weather(weather: impl Into<crate::Id<crate::Weather>>, ticks: u32)`: Rain or thunder in this dimension for `ticks`, after which it changes by itself. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L466)
+- <a id="World-weather"></a>`.weather() -> u32`: The weather's id now (`weathers::RAIN.id()`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L471)
+- <a id="World-entity_effect"></a>`.entity_effect(id: u64, effect: impl Into<crate::Id<crate::EntityEffect>>, level: u32, ticks: u32)`: Effect `effect` on an entity at `level` (1 and up) for `ticks` (0 ends it, `abi::INFINITE_TICKS` never): `w.entity_effect(id, &entity_effects::GLOW, 1, 200)`, or one of your own (`Registry::entity_effect`). Several at once, one of each: giving one again replaces it. An instant one acts once and doesn't stay. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L480)
+- <a id="World-effects"></a>`.effects(id: u64) -> Vec<abi::EffectOn>`: The effects on `id`: which, at what level, for how many ticks yet. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L484)
+- <a id="World-flash"></a>`.flash(id: u64)`: A white flash on an entity for everyone who sees it (something about to go off). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L496)
+- <a id="World-permission"></a>`.permission(player: u64) -> u32`: A player's `abi::permission` level: ask it before anything only some may do. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L501)
+- <a id="World-set_permission"></a>`.set_permission(player: u64, level: u32)`: Gives a player a level, remembered with the world. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L506)
+- <a id="World-set_day_time"></a>`.set_day_time(time: u64)`: Sets this dimension's time of day (0 sunrise, 6000 noon, 18000 midnight). Only the sky and what follows the day move: what waits on ticks keeps its pace. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L512)
+- <a id="World-day_time"></a>`.day_time() -> u64`: This dimension's time of day, counting on past a day. `w.time()` is another clock: ticks the world has run, which nothing moves. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L518)
+- <a id="World-skip_ticks"></a>`.skip_ticks(ticks: u64)`: As if `ticks` passed at once: the day moves on, and growth, machines and timers catch up. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L523)
+- <a id="World-set_game_mode"></a>`.set_game_mode(player: u64, mode: impl Into<crate::Id<crate::GameMode>>)`: `w.set_game_mode(player, &game_modes::CREATIVE)`, or a mod's own mode. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L528)
+- <a id="World-mount"></a>`.mount(rider: u64, mount: u64) -> bool`: Puts `rider` on `mount`, in its first free seat; false when it can't (no free seat, a mod said no, the mount rides the rider). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/riding.rs#L206)
+- <a id="World-mount_seat"></a>`.mount_seat(rider: u64, mount: u64, seat: u32) -> bool`: `mount` in seat `seat`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/riding.rs#L210)
+- <a id="World-dismount"></a>`.dismount(rider: u64)`: Takes `rider` off what it rides, where its seat's `Exit` says. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/riding.rs#L214)
+- <a id="World-vehicle"></a>`.vehicle(rider: u64) -> Option<(u64, u32)>`: What `rider` sits on, and in which seat. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/riding.rs#L218)
+- <a id="World-riders"></a>`.riders(mount: u64) -> Vec<Option<u64>>`: Who sits in each seat of `mount`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/riding.rs#L224)
+- <a id="World-fill"></a>`.fill(shape: Shape, state: u32) -> Fill`: Every block whose middle is inside `shape` becomes `state` (air for a crater), at the end of the tick and across the whole dimension: loaded cubes at once on every core, the rest when they load. Far faster than `set_block` per block for anything big. It doesn't ask `BREAK_BLOCK` or drop anything. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L242)
+- <a id="World-entities_in"></a>`.entities_in(shape: &Shape, filter: EntityFilter) -> Vec<u64>`: Entities in `shape` that `filter` lets through. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L246)
+- <a id="World-entities_near"></a>`.entities_near(pos: impl Into<Vec3>, radius: f64, kind: Option<&crate::EntityKind>) -> Vec<u64>`: Entity ids whose feet are within `radius`; `kind` None = any kind. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L260)
+- <a id="World-targets_near"></a>`.targets_near(pos: impl Into<Vec3>, radius: f64, kind: Option<&crate::EntityKind>) -> Vec<u64>`: Like `entities_near`, only what can be hit. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/shape.rs#L265)
+- <a id="World-block"></a>`.block(pos: impl Into<BlockPos>) -> u32` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L20)
+- <a id="World-block_loaded"></a>`.block_loaded(pos: impl Into<BlockPos>) -> Option<u32>`: `block` that tells air from what isn't loaded here: `None` for that. A callback sees the region it runs in, so that is also anything far from the players around it. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L26)
+- <a id="World-dimension"></a>`.dimension() -> u32`: The id of this dimension (`Dimension::id`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L33)
+- <a id="World-set_block"></a>`.set_block(pos: impl Into<BlockPos>, state: u32) -> bool`: False if the position is not loaded. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L38)
+- <a id="World-on_body"></a>`.on_body(body: u64) -> Option<OnBody<'_>>`: The same world for the blocks of moving body `body`, in its own coordinates (block (0, 0, 0) centered on its entity): everything about blocks through it (`block`, `set_block`, `prop_set`, parts, timers, light, signals) reaches the body's, as in its own blocks' callbacks. Meant for one statement, `w.on_body(ship).prop_set(pos, "lit", "true")`, or a short scope: while it lives, `w` itself is the body's too. `None` if `body` isn't one. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L48)
+- <a id="World-body_from_blocks"></a>`.body_from_blocks(center: impl Into<BlockPos>, cells: &[BlockPos]) -> u64`: Takes `cells` out of the world into a new moving body, whose block (0, 0, 0) is at `center` and which they keep their places around. Chests and the like go along with what is in them, and it stands there till told otherwise: `entity_modify(id).velocity(..)` for a speed, `body_move_to` to go somewhere, `body_to_blocks` to be blocks again. Its entity, or 0 if nothing came. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L56)
+- <a id="World-body_to_blocks"></a>`.body_to_blocks(entity: u64)`: A moving body goes back into the world at the nearest whole block. What found its place taken drops. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L63)
+- <a id="World-body_move_to"></a>`.body_move_to(entity: u64, pos: impl Into<Vec3>, ticks: u32)`: A moving body goes to `pos` in exactly `ticks`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L68)
+- <a id="World-push_blocks"></a>`.push_blocks(pos: impl Into<BlockPos>, dir: crate::Dir) -> bool`: Moves what a piston behind `pos` facing `dir` would push one block that way, the way a piston does (sticky blocks bring their neighbors, immovable ones stop it): a drawbridge turned by a machine, a conveyor of blocks. Pulling is pushing the other way from the far side. False if it can't go. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L77)
+- <a id="World-body_fall"></a>`.body_fall(entity: u64)`: A moving body falls under its weight and lands as blocks, each where it comes down if it can stand there, else as its drops: a felled tree, a collapsing roof (`let id = w.body_from_blocks(base, &cells); w.body_fall(id);`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L85)
+- <a id="World-signal_read_changed"></a>`.signal_read_changed(pos: impl Into<BlockPos>)`: What a comparator reads of the block at `pos` (`signal_read`) may be different now. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L90)
+- <a id="World-game_time"></a>`.game_time() -> u64` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L95)
+- <a id="World-random"></a>`.random() -> u64` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L99)
+- <a id="World-random_below"></a>`.random_below(n: u32) -> u32`: Uniform in `0..n`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L104)
+- <a id="World-block_flags"></a>`.block_flags(pos: impl Into<BlockPos>) -> u32` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L108)
+- <a id="World-signal"></a>`.signal(pos: impl Into<BlockPos>) -> u8`: The strongest redstone power coming into a cell, 0..15. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L113)
+- <a id="World-prop"></a>`.prop(pos: impl Into<BlockPos>, name: &str) -> Option<&'static str>`: The value of property `name` of the block at `pos`: `w.prop(pos, "lit")`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L119)
+- <a id="World-prop_int"></a>`.prop_int(pos: impl Into<BlockPos>, name: &str) -> Option<u32>`: A number property of the block at `pos` (`age`, `fuse`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L129)
+- <a id="World-prop_cycle"></a>`.prop_cycle(pos: impl Into<BlockPos>, name: &str) -> bool`: The block at `pos` goes on to the next value of a property, the first after the last: a lever's power, a repeater's delay. False if it has no such property. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L135)
+- <a id="World-prop_set"></a>`.prop_set(pos: impl Into<BlockPos>, name: &str, value: &str) -> bool`: Changes one property of the block at `pos`, keeping the others (its facing stays): `w.prop_set(pos, "lit", "true")`. False if the block has no such property or value. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L155)
+- <a id="World-parts"></a>`.parts(pos: impl Into<BlockPos>) -> Vec<u32>`: All that is in a cell, which may hold any number of blocks: the one `block` gives first, a slab and the water in it, a flower and the snow on it. Air has none. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L167)
+- <a id="World-part_add"></a>`.part_add(pos: impl Into<BlockPos>, state: u32) -> bool`: Puts another block in a cell with what is there, whatever its shape; `set_block` would replace all of it. Only one thing in a cell can have a block entity, a circuit, light of its own or growth: false if there would be two, or the cell isn't loaded. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L182)
+- <a id="World-part_remove"></a>`.part_remove(pos: impl Into<BlockPos>, state: u32) -> bool`: Takes one block out of a cell, the others staying. False if it isn't there. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L188)
+- <a id="World-part_replace"></a>`.part_replace(pos: impl Into<BlockPos>, old: u32, new: u32) -> bool`: One block of a cell becomes another state, the others staying. False if it isn't there. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L193)
+- <a id="World-keep_loaded"></a>`.keep_loaded(key: u64, from: impl Into<BlockPos>, to: impl Into<BlockPos>, loading: Loading, ticks: u32) -> bool`: Keeps the cubes from block `from` to `to` loaded for `ticks` more under ticket `key` (a block entity's id, say): call again before it runs out to keep them, with other blocks to move it. Kept across restarts. False when a mod refused (`question::FORCE_LOAD`); one past `core:max_forced_cubes` in all is dropped. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L434)
+- <a id="World-release_loaded"></a>`.release_loaded(key: u64)`: Lets ticket `key`'s cubes go. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/world.rs#L443)

@@ -6,11 +6,11 @@
 //! idle                # until nothing is left to generate, light, send or mesh
 //! press core:inventory
 //! hold core:forward 1.5
-//! click 0             # mouse button
+//! click 0             # mouse button; `click 0 1.5` holds it that long (drag meanwhile)
 //! cursor 0.5 0.4      # mouse at fractions of the window
 //! scroll -3
 //! type /give dia      # text into the focused field
-//! key Tab             # a key by its settings name
+//! key Tab             # a key by its settings name; `key ShiftLeft 0.5` holds it that long
 //! look 90 -20         # yaw, pitch in degrees
 //! chat /give stone 10
 //! say_config testmod:x  # a config's value as this client has it, into the chat
@@ -80,13 +80,16 @@ pub async fn run(t: T, src: String) -> R {
                 let (a, secs) = rest.rsplit_once(' ').unwrap_or((rest, "1"));
                 t.hold(a.trim(), secs.parse().unwrap_or(1.0));
             }
-            "click" => t.c().input_click(num(0, 0.0) as u32, 0.0),
+            "click" => t.c().input_click(num(0, 0.0) as u32, num(1, 0.0)),
             "cursor" => t.c().input_cursor(num(0, 0.5), num(1, 0.5)),
             "scroll" => t.c().input_scroll(num(0, -1.0)),
             "type" => t.c().input_type(rest),
             "key" => {
-                if !t.c().input_key(rest, 0.0) {
-                    t.fail(format!("unknown key {rest}"));
+                let (name, secs) = rest
+                    .split_once(' ')
+                    .map_or((rest, 0.0), |(n, s)| (n, s.trim().parse().unwrap_or(0.0)));
+                if !t.c().input_key(name, secs) {
+                    t.fail(format!("unknown key {name}"));
                 }
             }
             "look" => t.c().set_look(num(0, 0.0), num(1, 0.0)),

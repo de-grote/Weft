@@ -87,6 +87,14 @@ pub fn damage(stack: &ItemStack) -> u32 {
     u32_of(stack, crate::content::try_content().and_then(|c| c.ids.damage))
 }
 
+pub fn embedded(stack: &ItemStack) -> Vec<weft_abi::EmbeddedProjectile> {
+    crate::content::try_content()
+        .and_then(|c| c.components.id(weft_abi::comp::EMBEDDED_PROJECTILES))
+        .and_then(|id| value(stack.data, id))
+        .and_then(weft_abi::data::from_bytes)
+        .unwrap_or_default()
+}
+
 /// The pictures a stack shows as (`abi::comp::LAYERS`): its own, else what its item's
 /// `condition` gives it, else its item's when that is more than its one untinted icon.
 /// `None`: the item's icon.
@@ -255,7 +263,7 @@ pub fn worn(c: &crate::content::Content, stack: ItemStack, amount: u32) -> ItemS
     if most == 0 || stack.is_empty() {
         return stack;
     }
-    let total = damage(&stack) + amount;
+    let total = damage(&stack).saturating_add(amount);
     if total >= most { ItemStack::EMPTY } else { with_damage(stack, total) }
 }
 

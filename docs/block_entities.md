@@ -129,7 +129,7 @@ r.menu(&FURNACE_MENU)
 if let Some((output, time)) = recipe_process(&SMELTING_RECIPES, input.item) { .. }
 ```
 `recipe_process` gives the output and the time in ticks for one input. Recipes are added the usual way, `r.shapeless(&SMELTING_RECIPES, "ruby", 1, &["ruby_ore"], 200)`, so everything that uses the kind smelts it, whichever mod it comes from. `recipes(..)` makes the menu's `ui.recipe_arrow_bind(..)` (or `ui.recipe_arrow()` without progress) open the kind in the recipe viewer, with "Recipes" over it, and shows the blocks opening it there as where those recipes are made.
-An ordinary menu works the same way: `r.menu(&CRAFTING).recipes(&CRAFTING_RECIPES)`, and a block with `.opens(&CRAFTING)` opens it and becomes a station of those recipes (that's the whole crafting table). The grid's size comes from its group, `m.group("grid").cols()`.
+An ordinary menu works the same way: `r.menu(&CRAFTING).recipes(&CRAFTING_RECIPES)`, and a block with `.opens(&CRAFTING)` opens it and becomes a station of those recipes (that's the whole crafting table). A group made `Slots::grid(3, 3).crafting()` is its crafting grid: the engine shows what it makes in the menu's `output()` group and uses it up when that is taken, as each recipe says (`.keep`, `.wear`, `.leaves`), and a shift-click crafts all the runs whose results fit in the inventory at once. `on_take` is still called, `m.times()` saying how many runs it was. Machines get the same from `recipe.consume(&mut stacks)`, except that what an ingredient leaves takes its slot only once it is used up.
 
 A recipe can say more than one output and a time:
 ```rust

@@ -3,6 +3,7 @@
 - **Windows:** run `weft.exe`.
 - **Linux (x64):** `chmod +x Weft-*-linux-x64.AppImage`, then run it. If it asks for FUSE, run it with `--appimage-extract-and-run`. Or the same as a folder: `tar xf Weft-*-linux-x64.tar.gz`, then `Weft/weft`. Needs your GPU's Vulkan driver.
 - **macOS (Apple Silicon, macOS 12 or newer):** `tar xf Weft-*-macos-arm64.tar.gz`, then `xattr -dr com.apple.quarantine Weft`, as the game is not signed by Apple, then `Weft/weft`. Vulkan comes with the game (MoltenVK).
+- **Android (64-bit ARM, Android 8 or newer, Vulkan 1.1):** install `Weft-*-android-arm64.apk` (allow installing from your browser or file manager when asked). The first world waits about a minute while the phone compiles its shaders, once. Saves, settings and the `mods` folder are in `Android/data/org.weft.game/files`.
 
 **Textures:** the game comes with its own. If Minecraft is installed through the official launcher or Prism, Weft builds a resource pack from your copy on the first start (Settings > Resource Packs to turn it off). Nothing from Mojang is included or downloaded.
 

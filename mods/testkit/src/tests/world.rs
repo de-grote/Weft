@@ -160,6 +160,8 @@ pub async fn edits(t: T) -> R {
             .to_string(),
         "max stack, damage, warmth, tag, a weather's tags, an attribute's default, a recipe removed, a loot table's pools, a liquid's id, its block's and item's tag, a column of Mars, Mars' tag, an entity kind's size and eye, its value after the edits, a block's states after an edit of every state and one of a key (light, opacity, a value set by tag, a tag set on one state), a stair's states and their edited light",
     );
+    // Records: testmod's own as testkit changed it, and one testkit added with its tag.
+    t.check_eq(t.op("records").await?, "testkit:brick_style=1 testmod:stone_style=5".to_string(), "records of a tag, edited");
     // The edit of the menu adds two slots to the equipment (four and the other hand) and the
     // player's 36.
     t.op(&format!("emenu testkit:gear {}", t.c().player()))
@@ -329,7 +331,7 @@ pub async fn fly_load(t: T) -> R {
     // The way with the most mountains: their slopes ask the most of what comes first.
     let mountains = |x: i32| {
         (0..24)
-            .filter(|i| name_of(ek::BIOME, OVERWORLD.column(5, x, -400 * i).biome) == "base:mountains")
+            .filter(|i| matches!(name_of(ek::BIOME, OVERWORLD.column(5, x, -400 * i).biome), "base:mountains" | "base:snowy_peaks"))
             .count()
     };
     let way = (-40..40)
@@ -1126,6 +1128,27 @@ pub async fn worldgen(t: T) -> R {
         "w.place puts a template",
     );
     t.check_eq(t.block([f[0] + 5, f[1] + 11, f[2] + 1]).await?, "testmod:glow_crystal".to_string(), "its glowing core");
+    // A box of the world saved, placed again mirrored, and taken back.
+    let (sx, sy, sz) = (f[0] + 12, f[1] + 12, f[2]);
+    t.cmd(&format!("/setblock {sx} {sy} {sz} base:stone_stairs[facing=east]"))
+        .await?;
+    t.cmd(&format!("/setblock {} {sy} {sz} base:chest", sx + 1))
+        .await?;
+    t.cmd(&format!("/insert {} {sy} {sz} base:diamond 5", sx + 1))
+        .await?;
+    t.cmd(&format!("/structure save test_mirror {sx} {sy} {sz} {} {sy} {sz}", sx + 1))
+        .await?;
+    let (lx, lz) = (sx, sz + 3);
+    t.cmd(&format!("/structure load test_mirror {lx} {sy} {lz} 4"))
+        .await?;
+    let stairs = t.block([lx + 1, sy, lz]).await?;
+    t.check(stairs.contains("facing=west"), format!("mirrored, the stairs face the other way: {stairs}"));
+    let chest = t.block([lx, sy, lz]).await?;
+    t.check(chest.starts_with("base:chest"), format!("and the chest is on the other side: {chest}"));
+    let held = t.op(&format!("inv {lx} {sy} {lz}")).await?;
+    t.check(held.contains("base:diamond:5"), format!("with what it held when saved: {held}"));
+    t.cmd("/structure undo").await?;
+    t.check_eq(t.block([lx + 1, sy, lz]).await?, "core:air".to_string(), "undone, what was there is back");
 
     // Testmod puts base's forest on Mars; the engine scatters its trees there like at home.
     static MARS: Dimension = Dimension::named("testmod:mars");
@@ -1168,6 +1191,40 @@ pub async fn worldgen(t: T) -> R {
         t.secs(0.5).await?;
         t.loaded().await?;
         t.check_eq(t.block([cx + 1, cy + 4, cz + 1]).await?, "testmod:glow_crystal".to_string(), "an obelisk stands at its site");
+    }
+    // An outpost: its hub and the halls its joints took, in the palette's bricks, its chest
+    // filled, its pig there, and mods told it stands.
+    let at = t.op("structure testmod:outpost 3000").await?;
+    let hub: Vec<i32> = at
+        .split_whitespace()
+        .filter_map(|v| v.parse().ok())
+        .collect();
+    t.check(hub.len() == 3, format!("outposts on Mars ({at})"));
+    if let [hx, hy, hz] = hub[..] {
+        t.cmd(&format!("/tp {} {} {}", hx + 2, hy + 6, hz + 2))
+            .await?;
+        t.secs(0.5).await?;
+        t.loaded().await?;
+        t.check_eq(t.block([hx, hy, hz]).await?, "base:bricks".to_string(), "the hub in the palette's block");
+        let roof = t.block([hx, hy + 3, hz]).await?;
+        t.check(roof.starts_with("base:bricks_slab"), format!("its roof the slabs made of it: {roof}"));
+        t.check_eq(t.block([hx + 2, hy + 1, hz - 1]).await?, "core:air".to_string(), "a hall goes on from its north door");
+        t.check_eq(t.block([hx + 1, hy + 1, hz - 1]).await?, "base:bricks".to_string(), "between the hall's walls");
+        let inv = t
+            .op(&format!("inv {} {} {}", hx + 2, hy + 1, hz + 2))
+            .await?;
+        let diamonds: u32 = inv
+            .split_whitespace()
+            .filter(|e| e.contains("base:diamond"))
+            .filter_map(|e| e.rsplit(':').next()?.parse::<u32>().ok())
+            .sum();
+        t.check_eq(diamonds, 3, &format!("the chest filled from its loot table: {inv}"));
+        let near = t
+            .op(&format!("near {} {} {} 4", hx + 1, hy + 1, hz + 1))
+            .await?;
+        t.check(near.contains("base:pig"), format!("the template's pig is there: {near}"));
+        let placed = t.op("placed").await?;
+        t.check(placed.contains(&format!("testmod:outpost {hx} {hy} {hz}")), format!("FEATURE_PLACED told of it: {placed}"));
     }
     let (mut caves, mut inside, mut outside) = (0, 0, 0);
     for (i, x) in [0, 200].into_iter().enumerate() {

@@ -20,11 +20,13 @@ pub struct MenuScreen {
     /// Creative inventory filter and open tab.
     search: Rc<RefCell<String>>,
     tab: Rc<std::cell::Cell<usize>>,
+    /// Its panel has its X in the corner (`Screen::draws_close`).
+    closes: bool,
 }
 
 impl MenuScreen {
     pub fn new(kind: u32) -> MenuScreen {
-        MenuScreen { kind, effects: Vec::new(), search: Default::default(), tab: Default::default() }
+        MenuScreen { kind, effects: Vec::new(), search: Default::default(), tab: Default::default(), closes: false }
     }
 }
 
@@ -55,25 +57,33 @@ fn creative_panel(ui: &mut Ui, cx: &BuildCx, search: &Rc<RefCell<String>>, tab: 
             })
             .collect()
     };
+    let grid_w = 9.0 * 18.0 + crate::ui::Scrollbar::ROOM;
+    let tabs_per_row = ((grid_w + 1.0) / 21.0) as usize;
     ui.panel("panel", Style::default().pad(7.0).gap(4.0), |ui| {
-        ui.container(Style::row().gap(1.0), |ui| {
-            for (i, t) in c.creative_tabs.iter().enumerate() {
-                let tab = tab.clone();
-                let b = ui.button(
-                    "button",
-                    Style::default().size(20.0, 20.0),
-                    Rc::new(move |ctx: &mut Ctx| {
-                        tab.set(i);
-                        ctx.requests.push(Request::Rebuild);
-                    }),
-                    |ui| {
-                        ui.add(Kind::Custom { tag: modui::TAG_ICON, data: t.icon as u64 }, Style::default().size(16.0, 16.0));
-                    },
-                );
-                if let Kind::Button { selected, .. } = &mut ui.nodes[b].kind {
-                    *selected = i == open && filter.is_empty();
-                }
-                ui.nodes[b].tooltip = Some(tab_title(cx, &t.name));
+        ui.container(Style::default().w(grid_w).gap(1.0), |ui| {
+            for (row_index, row) in c.creative_tabs.chunks(tabs_per_row).enumerate() {
+                ui.container(Style::row().gap(1.0), |ui| {
+                    for (column, t) in row.iter().enumerate() {
+                        let i = row_index * tabs_per_row + column;
+                        let tab = tab.clone();
+                        let b = ui.button(
+                            "button",
+                            Style::default().size(20.0, 20.0).center(),
+                            Rc::new(move |ctx: &mut Ctx| {
+                                tab.set(i);
+                                ctx.requests.push(Request::Rebuild);
+                            }),
+                            |ui| {
+                                ui.add(Kind::Custom { tag: modui::TAG_ICON, data: t.icon as u64 }, Style::default().size(16.0, 16.0));
+                            },
+                        );
+                        if let Kind::Button { selected, .. } = &mut ui.nodes[b].kind {
+                            *selected = i == open && filter.is_empty();
+                        }
+                        ui.nodes[b].tooltip = Some(tab_title(cx, &t.name));
+                        ui.set_id(b, &format!("creative_tab:{}", t.name));
+                    }
+                });
             }
         });
         if let Some(t) = c.creative_tabs.get(open).filter(|_| filter.is_empty()) {
@@ -85,6 +95,7 @@ fn creative_panel(ui: &mut Ui, cx: &BuildCx, search: &Rc<RefCell<String>>, tab: 
                 value: search.borrow().clone(),
                 caret: search.borrow().chars().count(),
                 max: 32,
+                area: None,
                 on_change: Some(Rc::new(move |ctx: &mut Ctx, v: &str| {
                     *s.borrow_mut() = v.to_string();
                     ctx.requests.push(Request::Rebuild);
@@ -181,6 +192,10 @@ impl Screen for MenuScreen {
         "core:menu"
     }
 
+    fn draws_close(&self) -> bool {
+        self.closes
+    }
+
     /// Built again when an effect comes, goes or changes level while it is open.
     fn pointer(&mut self, _cursor: glam::Vec2, _ui: &mut Ui, ctx: &mut Ctx, _hud: &mut crate::hud::Hud) -> bool {
         let c = content();
@@ -219,9 +234,10 @@ impl Screen for MenuScreen {
                         let first = ui.nodes.len();
                         modui::build(ui, cx.lang, Some(cx.input), by, cb, cx.client);
                         // What mods add in the top right corner inside the menu's panel: this
-                        // menu's place, then every menu's.
+                        // menu's place, then every menu's, then the X closing it.
                         let corner = [(def.name.as_str(), "corner"), (MENUS, "corner")];
-                        if first < ui.nodes.len() && has_parts(&corner) {
+                        self.closes = first < ui.nodes.len();
+                        if self.closes {
                             ui.open_existing(first);
                             ui.container(
                                 Style::row()
@@ -231,6 +247,7 @@ impl Screen for MenuScreen {
                                     for (screen, area) in corner {
                                         crate::client::modui::parts(ui, cx.lang, Some(cx.input), cx.client, screen, area);
                                     }
+                                    crate::screens::close_button(ui, 8.0);
                                 },
                             );
                             ui.close();
@@ -436,6 +453,7 @@ impl Screen for Chat {
                         value: st.text.clone(),
                         caret: st.text.chars().count(),
                         max: 256,
+                        area: None,
                         on_change: Some(Rc::new(move |ctx: &mut Ctx, v: &str| {
                             let players = ctx
                                 .client
@@ -544,15 +562,22 @@ pub struct RecipeView {
     pub query: RecipeQuery,
     /// (tab, page), kept while the screen rebuilds.
     state: Rc<std::cell::Cell<(usize, usize)>>,
+    pages: usize,
 }
 
 impl RecipeView {
     pub fn new(query: RecipeQuery) -> RecipeView {
-        RecipeView { query, state: Rc::new(std::cell::Cell::new((0, 0))) }
+        RecipeView { query, state: Rc::new(std::cell::Cell::new((0, 0))), pages: 1 }
     }
 
     pub fn item(item: u32, uses: bool) -> RecipeView {
         RecipeView::new(if uses { RecipeQuery::UsedIn(item) } else { RecipeQuery::MadeBy(item) })
+    }
+
+    fn turn(state: &std::cell::Cell<(usize, usize)>, pages: usize, by: isize, ctx: &mut Ctx) {
+        let (tab, page) = state.get();
+        state.set((tab, (page as isize + by).rem_euclid(pages as isize) as usize));
+        ctx.requests.push(Request::Rebuild);
     }
 }
 
@@ -638,6 +663,15 @@ impl Screen for RecipeView {
         "core:recipes"
     }
 
+    fn pointer(&mut self, _cursor: glam::Vec2, _ui: &mut Ui, ctx: &mut Ctx, _hud: &mut crate::hud::Hud) -> bool {
+        if ctx.input.scroll == 0.0 {
+            return false;
+        }
+        let steps = ctx.input.scroll.abs().round().max(1.0) as isize;
+        Self::turn(&self.state, self.pages, -ctx.input.scroll.signum() as isize * steps, ctx);
+        true
+    }
+
     fn build(&mut self, ui: &mut Ui, cx: &BuildCx) {
         let found = found_recipes(&self.query);
         let (mut tab, mut page) = self.state.get();
@@ -656,6 +690,7 @@ impl Screen for RecipeView {
             .map_or(1, |(_, l)| l.len().div_ceil(per_page))
             .max(1);
         page = page.min(pages - 1);
+        self.pages = pages;
         self.state.set((tab, page));
         ui.root_style(Style::default().stretch());
         ui.panel("overlay", Style::default().grow().center().pad(10.0).gap(6.0), |ui| {
@@ -707,9 +742,7 @@ impl Screen for RecipeView {
                 let turn = |d: isize| {
                     let state = self.state.clone();
                     Rc::new(move |c: &mut Ctx| {
-                        let (t, p) = state.get();
-                        state.set((t, (p as isize + d).rem_euclid(pages as isize) as usize));
-                        c.requests.push(Request::Rebuild);
+                        Self::turn(&state, pages, d, c);
                     }) as crate::ui::Action
                 };
                 let prev = ui.button("button", Style::default().size(20.0, 20.0).center(), turn(-1), |ui| {
@@ -783,6 +816,11 @@ fn recipe_entry(ui: &mut Ui, cx: &BuildCx, kind: &str, index: usize) {
                     Kind::Progress { class: "arrow".into(), bind: Box::new(|_: &Ctx| 0.0), value: 0.0, dir: weft_abi::ui_dir::RIGHT },
                     Style::default().size(w, h),
                 );
+                if r.shaped.is_none() && grid_size(kind, r, false).0 * grid_size(kind, r, false).1 > 1 {
+                    let marker = ui
+                        .add(Kind::Image { texture: "core:gui/icon_shapeless".into(), color: 0xFFFFFFFF }, Style::default().size(9.0, 9.0));
+                    ui.nodes[marker].tooltip = Some(cx.t("recipes.shapeless", &[]));
+                }
                 if r.time > 0 && def.is_none_or(|d| d.info.is_none()) {
                     label(ui, cx, "recipes.time", &[text::Arg::Float(r.time as f64 / crate::world::TPS as f64, 1)], "dim");
                 }
@@ -989,6 +1027,7 @@ impl Screen for TagList {
                     value: self.filter.borrow().clone(),
                     caret: self.filter.borrow().chars().count(),
                     max: 48,
+                    area: None,
                     on_change: Some(Rc::new(move |ctx: &mut Ctx, v: &str| {
                         *f.borrow_mut() = v.to_string();
                         ctx.requests.push(Request::Rebuild);

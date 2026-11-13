@@ -6,6 +6,7 @@ use crate::runner::{R, T};
 
 /// Screens open by name and lay out inside the window: the engine's menus and a mod's own.
 pub async fn screens(t: T) -> R {
+    t.c().menu_open(&screens::TITLE);
     t.screen("core:title").await?;
     t.shot("title").await?;
     t.laid_out(&[
@@ -270,6 +271,62 @@ pub async fn inventory_crafting(t: T) -> R {
     t.sync_inventory().await
 }
 
+pub async fn target_info(t: T) -> R {
+    t.flat().await?;
+    let f = t.feet();
+    let p = super::add(f, [0, 1, -3]);
+    for (block, name) in [("stone", "Stone"), ("oak_log", "Oak Log")] {
+        t.fill(p, p, block).await?;
+        t.look_at(p);
+        t.until("target name follows the block", Duration::from_secs(5), |t| t.c().ui_rect(&format!("text:{name}")).is_some())
+            .await?;
+        let target = t.c().target().ok_or("no target")?;
+        t.check_eq(target.pos.to_array(), p, "target uses block coordinates");
+        t.check_eq(target.entity, 0, "a block target is not an entity");
+        t.laid_out(&["id:hud:base:target_info", "text:Tool:"]);
+        let r = t
+            .c()
+            .ui_rect("id:hud:base:target_info")
+            .ok_or("no target panel")?;
+        t.check((r.x + r.w / 2.0 - 0.5).abs() < 0.01, "the target panel stays centered as its width changes");
+        t.shot(block).await?;
+    }
+    t.fill(p, p, "air").await?;
+    let at = super::add(f, [0, 0, -2]);
+    let cow: u64 = t
+        .op(&format!("spawn base:cow {} {} {}", at[0], at[1], at[2]))
+        .await?
+        .parse()
+        .map_err(|_| "bad cow id")?;
+    t.look_at(at);
+    t.until("entity wins the target", Duration::from_secs(5), |t| t.c().target().is_some_and(|a| a.entity == cow))
+        .await?;
+    t.until("entity name and health shown", Duration::from_secs(5), |t| {
+        t.c().ui_rect("text:Cow").is_some() && t.c().ui_rect("text:Health:").is_some()
+    })
+    .await?;
+    let health = t.c().entity(cow).ok_or("cow not visible")?;
+    t.check(health.max_health > 0.0 && health.health <= health.max_health, "a newly seen entity has a valid health maximum");
+    t.op(&format!("attr_mod {cow} core:max_health testkit:target_health core:set 40 100"))
+        .await?;
+    t.until("server health maximum reaches the client", Duration::from_secs(5), |t| {
+        t.c().entity(cow).is_some_and(|e| e.max_health == 40.0)
+    })
+    .await?;
+    t.until("target health binding updates", Duration::from_secs(5), |t| t.c().ui_rect("text:/ 40").is_some())
+        .await?;
+    t.shot("entity").await?;
+    t.c().set_look(0.0, 80.0);
+    t.until("no stale panel after looking away", Duration::from_secs(5), |t| {
+        t.c().target().is_none()
+            && t.c()
+                .ui_rect("id:hud:base:target_info")
+                .is_none_or(|r| r.w == 0.0 || r.h == 0.0)
+    })
+    .await?;
+    Ok(())
+}
+
 pub async fn creative_inventory(t: T) -> R {
     t.flat().await?;
     t.op("mode creative").await?;
@@ -532,6 +589,11 @@ pub async fn recipe_viewer(t: T) -> R {
     t.frames(3).await?;
     t.check(t.c().ui_rect("id:tab:base:smelting").is_some(), "smelting recipes for the ingot");
     t.shot("iron_recipes").await?;
+    t.click_ui(&format!("icon:{}", id("base:iron_ingot")), 1);
+    t.frames(4).await?;
+    t.check(t.c().ui_rect("text:uses").is_some(), "right click opens uses of the displayed item");
+    t.c().menu_close();
+    t.screen("core:recipes").await?;
     t.c().menu_close();
     t.screen("core:menu").await?;
     t.c().input_cursor(x + w / 2.0, y + h / 2.0);
@@ -543,6 +605,12 @@ pub async fn recipe_viewer(t: T) -> R {
     t.shot("iron_uses").await?;
     // One tab per kind; the test mod's alloying shows its info line from the recipe's values.
     t.check(t.c().ui_rect("id:tab:base:crafting").is_some(), "a crafting tab");
+    t.c().input_scroll(-1.0);
+    t.frames(4).await?;
+    t.check(t.c().ui_rect("text:2 /").is_some(), "wheel turns to the next page");
+    t.c().input_scroll(1.0);
+    t.frames(4).await?;
+    t.check(t.c().ui_rect("text:1 /").is_some(), "wheel returns to the previous page");
     t.check(t.click_ui("id:tab:testmod:alloying", 0), "an alloying tab");
     t.secs(0.2).await?;
     t.frames(3).await?;
@@ -775,10 +843,10 @@ pub async fn rebind(t: T) -> R {
     t.secs(0.1).await?;
     t.c().input_key("KeyJ", 0.05);
     t.secs(0.5).await?;
-    t.check(t.c().ui_rect("text:Jx2").is_some(), "a key pressed twice binds a double tap");
+    t.check(t.c().ui_rect("text:J*2").is_some(), "a key pressed twice binds a double tap");
     t.click_ui("id:bind:core:forward:1", 1);
     t.frames(4).await?;
-    t.check(t.c().ui_rect("text:Jx2").is_none(), "a right click clears it");
+    t.check(t.c().ui_rect("text:J*2").is_none(), "a right click clears it");
     t.c().menu_close();
     t.no_screen().await?;
     t.check(k > 1.0, format!("K walks after rebinding forward to it (moved {k:.2})"));

@@ -129,6 +129,40 @@ pub fn bone_named(parts: &[Part], name: &str) -> Option<usize> {
     parts.iter().position(|p| plain(&p.name).eq(plain(name)))
 }
 
+/// Per bone, the bone it is worn on: a bone called `armor_<bone>` (case and `_` don't matter)
+/// and all that hang on it are what is worn on `<bone>`, drawn with a worn item's texture and
+/// never with the skin. Parents come before their children.
+pub fn worn_targets(parts: &[Part]) -> Vec<Option<usize>> {
+    let mut out: Vec<Option<usize>> = vec![None; parts.len()];
+    for i in 0..parts.len() {
+        let plain: String = parts[i]
+            .name
+            .chars()
+            .filter(|c| *c != '_')
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let named = plain
+            .strip_prefix("armor")
+            .filter(|rest| !rest.is_empty())
+            .and_then(|rest| bone_named(parts, rest))
+            .filter(|&t| t != i && out[t].is_none());
+        out[i] = named.or_else(|| parts[i].parent.and_then(|q| out[q as usize]));
+    }
+    out
+}
+
+/// Where vanilla armor's piece for a bone is on its 64x32 texture, and the size it is drawn
+/// for there: the head, `body`, arms and legs have one.
+pub fn armor_unwrap(p: &Part) -> Option<([f32; 2], [f32; 3])> {
+    match p.role {
+        role::HEAD => Some(([0.0, 0.0], [8.0; 3])),
+        role::ARM_LEFT | role::ARM_RIGHT => Some(([40.0, 16.0], [4.0, 12.0, 4.0])),
+        role::LEG_LEFT | role::LEG_RIGHT | role::LEG_FRONT_LEFT | role::LEG_FRONT_RIGHT => Some(([0.0, 16.0], [4.0, 12.0, 4.0])),
+        _ if p.name.eq_ignore_ascii_case("body") => Some(([16.0, 16.0], [8.0, 12.0, 4.0])),
+        _ => None,
+    }
+}
+
 /// A corner of each box of a bone and each point of its triangles, in the model's pixels.
 pub fn part_points(p: &Part, mut each: impl FnMut(Vec3)) {
     let pivot = Vec3::from_array(p.pivot);

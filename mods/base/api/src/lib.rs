@@ -13,6 +13,10 @@ value! {
 }
 pub static SMELTED: Event<Smelted> = Event::named("base:smelted");
 
+/// Information about the crosshair's target; `screen_part(&TARGET_INFO, "details", ..)` adds
+/// bound text, icons or bars inside its panel. `ui.view().target()` identifies what is shown.
+pub static TARGET_INFO: HudElement = HudElement::named("base:target_info");
+
 value! {
     /// A furnace's state, synced to whoever has it open.
     pub struct Smelting { pub burn: u32, pub burn_max: u32, pub cook: u32, pub cook_max: u32, pub cooking_item: u32 }

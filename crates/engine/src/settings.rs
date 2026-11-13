@@ -89,6 +89,10 @@ pub fn language() -> String {
 pub fn gui_scale() -> u32 {
     number("core:gui_scale") as u32
 }
+/// The part of the screen's size the world is drawn at.
+pub fn render_scale() -> f32 {
+    number("core:render_scale") as f32
+}
 pub fn view_distance() -> i32 {
     number("core:view_distance") as i32
 }
@@ -122,9 +126,16 @@ pub fn brightness() -> f32 {
 pub fn debug_groups() -> u32 {
     number("core:debug_groups") as u32
 }
+pub fn advanced_tooltips() -> bool {
+    number("core:advanced_tooltips") != 0.0
+}
 /// Mouse up looks down instead.
 pub fn invert_y() -> bool {
     number("core:invert_y") != 0.0
+}
+/// The HUD's buttons and steering for fingers.
+pub fn touch_controls() -> bool {
+    number("core:touch_controls") != 0.0
 }
 pub fn name() -> String {
     config::text(id("core:name"))
@@ -146,6 +157,9 @@ pub fn shader_pack() -> Option<String> {
 
 pub fn occlusion_culling() -> bool {
     number("core:occlusion_culling") != 0.0
+}
+pub fn frustum_culling() -> bool {
+    number("core:frustum_culling") != 0.0
 }
 
 pub fn show_avatars() -> bool {
@@ -181,101 +195,41 @@ pub fn set_bind(action: &str, keys: &Slots) {
     config::set_text(id(&format!("core:key.{action}")), &Binding::slots_id(keys));
 }
 
-/// Brings settings files written by older versions up to date.
-pub fn migrate(run_dir: &Path) {
-    let config = crate::paths::config(run_dir);
-    merge_settings(&config);
-    for dir in [config, run_dir.join("test-config")] {
-        migrate_bindings(&dir.join("core.txt"));
-    }
-}
-
-/// Sneak and sprint switched by two settings of their own become toggled bindings, and a sprint
-/// or fly key saved when they had one binding gets the double tap the engine now gives them.;
-/// TODO remove in 26.11.3
-fn migrate_bindings(path: &Path) {
-    let Ok(src) = std::fs::read_to_string(path) else { return };
-    let mut pairs: Vec<(String, String)> = crate::kv::pairs(&src)
-        .map(|(_, k, v)| (k.to_string(), v.to_string()))
-        .collect();
-    let before = pairs.clone();
-    let mut toggled = Vec::new();
-    pairs.retain(|(k, v)| match k.strip_prefix("toggle_") {
-        Some(action @ ("sneak" | "sprint")) => {
-            if matches!(v.as_str(), "true" | "1") {
-                toggled.push(format!("key.core:{action}"));
-            }
-            false
-        }
-        _ => true,
-    });
-    for (k, v) in &mut pairs {
-        match (k.as_str(), v.as_str()) {
-            ("key.core:sprint", "ControlLeft") => *v = "ControlLeft, double KeyW".into(),
-            ("key.core:fly", "KeyF") => *v = "KeyF, double Space".into(),
-            _ => {}
-        }
-        if toggled.contains(k) && !v.starts_with("toggle ") {
-            *v = format!("toggle {v}");
-        }
-    }
-    if pairs != before {
-        let out: String = pairs
-            .iter()
-            .map(|(k, v)| {
-                format!(
-                    "{k} = {v}
-"
-                )
-            })
-            .collect();
-        let _ = std::fs::write(path, out);
-    }
-}
-
-/// The old `config/settings.txt` joins `config/core.txt` once (lists were one line per entry).
-fn merge_settings(config: &Path) {
-    let (old, new) = (config.join("settings.txt"), config.join("core.txt"));
-    let Ok(src) = std::fs::read_to_string(&old) else { return };
-    let mut out = std::fs::read_to_string(&new).unwrap_or_default();
-    let (mut packs, mut relays) = (Vec::new(), Vec::new());
-    for (_, k, v) in crate::kv::pairs(&src) {
-        match k {
-            "resource_pack" => packs.push(v),
-            "relay" => relays.push(v),
-            _ => out.push_str(&format!(
-                "{k} = {v}
-"
-            )),
-        }
-    }
-    out.push_str(&format!(
-        "resource_packs = {}
-relays = {}
-",
-        packs.join(","),
-        relays.join(",")
-    ));
-    if std::fs::write(&new, out).is_ok() {
-        let _ = std::fs::remove_file(&old);
-    }
-}
-
+/// The system's language as a lang code (`ru_ru`), English when the system doesn't say.
 pub fn system_language() -> String {
-    let lang = std::env::var("LANG").unwrap_or_default().to_lowercase();
-    if lang.starts_with("ru") || sys_locale_ru() { "ru_ru".into() } else { "en_us".into() }
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))
+        .or_else(os_language)
+        .and_then(|locale| lang_code(&locale))
+        .unwrap_or_else(|| crate::ui::lang::FALLBACK.into())
+}
+
+/// `ru_RU.UTF-8` and `ru-RU` are `ru_ru`; `C`, `POSIX` and a language without a region are none.
+fn lang_code(locale: &str) -> Option<String> {
+    let code = locale
+        .split(['.', '@'])
+        .next()?
+        .replace('-', "_")
+        .to_lowercase();
+    let (lang, region) = code.split_once('_')?;
+    (!lang.is_empty() && !region.is_empty()).then_some(code)
 }
 
 #[cfg(windows)]
-fn sys_locale_ru() -> bool {
+fn os_language() -> Option<String> {
     unsafe extern "system" {
         fn GetUserDefaultUILanguage() -> u16;
+        fn LCIDToLocaleName(lcid: u32, name: *mut u16, len: i32, flags: u32) -> i32;
     }
-    // Primary language id 0x19 is Russian.
-    unsafe { GetUserDefaultUILanguage() & 0x3FF == 0x19 }
+    const LOCALE_NAME_MAX_LENGTH: usize = 85;
+    let mut name = [0u16; LOCALE_NAME_MAX_LENGTH];
+    // Characters written with the closing zero, 0 when the language has no name.
+    let written = unsafe { LCIDToLocaleName(GetUserDefaultUILanguage().into(), name.as_mut_ptr(), name.len() as i32, 0) };
+    (written > 1).then(|| String::from_utf16_lossy(&name[..written as usize - 1]))
 }
 
 #[cfg(not(windows))]
-fn sys_locale_ru() -> bool {
-    false
+fn os_language() -> Option<String> {
+    None
 }

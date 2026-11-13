@@ -9,6 +9,7 @@ use super::dim::Dim;
 use super::holder::{self, At, Inv};
 use crate::content::Content;
 use crate::host;
+use crate::registry::Use;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Owner {
@@ -148,6 +149,19 @@ fn call(
     slot: u32,
     pick: impl Fn(&crate::registry::MenuDef) -> Option<(abi::ModId, abi::Callback)>,
 ) {
+    call_times(m, dim, c, player, slot, 1, pick);
+}
+
+/// `call` telling `times` (`abi::MenuArgs::times`).
+fn call_times(
+    m: &mut OpenMenu,
+    dim: &mut Dim,
+    c: &Content,
+    player: u64,
+    slot: u32,
+    times: u32,
+    pick: impl Fn(&crate::registry::MenuDef) -> Option<(abi::ModId, abi::Callback)>,
+) {
     let def = &c.game.menus[m.kind as usize];
     let Some((by, cb)) = pick(def) else { return };
     let owner = match m.on {
@@ -157,7 +171,7 @@ fn call(
     };
     let mut call = MenuCall { menu: m as *mut OpenMenu, dim: dim as *mut Dim, player };
     let mut ctx = host::CallCtx { dim: dim as *mut Dim };
-    let mut args = abi::MenuArgs { world: ctx.raw(), menu: &mut call as *mut MenuCall as *mut abi::MenuCtx, player, owner, slot };
+    let mut args = abi::MenuArgs { world: ctx.raw(), menu: &mut call as *mut MenuCall as *mut abi::MenuCtx, player, owner, slot, times };
     host::invoke(by, cb, &mut args);
 }
 
@@ -214,7 +228,7 @@ pub fn open(dim: &mut Dim, c: &'static Content, player: u64, kind: u32, on: Opti
         sent_cursor: ItemStack::EMPTY,
         comps_sent: false,
     };
-    call(&mut m, dim, c, player, 0, |d| d.on_change);
+    changed(&mut m, dim, c, player, 0);
     m
 }
 
@@ -341,9 +355,9 @@ fn liquid_click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u6
     set(m, dim, player, slot, new_slot);
     m.cursor = new_cursor;
     if taken && s.flags & sf::OUTPUT != 0 {
-        call(m, dim, c, player, slot, |d| d.on_take);
+        took(m, dim, c, player, slot, 1);
     }
-    call(m, dim, c, player, slot, |d| d.on_change);
+    changed(m, dim, c, player, slot);
 }
 
 /// `button` 2..=10 over a slot: number key 1..9, swaps it with that hotbar slot (vanilla).
@@ -419,7 +433,7 @@ fn sort(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, slot:
         let s = stacks.get(k).copied().unwrap_or(ItemStack::EMPTY);
         if get(m, dim, player, i) != s {
             set(m, dim, player, i, s);
-            call(m, dim, c, player, i, |d| d.on_change);
+            changed(m, dim, c, player, i);
         }
     }
 }
@@ -439,7 +453,7 @@ pub fn creative_to_hotbar(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, 
         return;
     };
     set(m, dim, player, h, ItemStack::new(item, c.max_stack(&ItemStack::new(item, 1))));
-    call(m, dim, c, player, h, |d| d.on_change);
+    changed(m, dim, c, player, h);
 }
 
 /// The trash key over a slot: its stack goes to the player's trash, what was there gone.
@@ -513,10 +527,10 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
         set(m, dim, player, slot, sb);
         set(m, dim, player, h, sa);
         if output {
-            call(m, dim, c, player, slot, |d| d.on_take);
+            took(m, dim, c, player, slot, 1);
         }
-        call(m, dim, c, player, slot, |d| d.on_change);
-        call(m, dim, c, player, h, |d| d.on_change);
+        changed(m, dim, c, player, slot);
+        changed(m, dim, c, player, h);
         return;
     }
     if button == CLONE {
@@ -556,7 +570,7 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
                 let n = s.count.min(max - m.cursor.count);
                 m.cursor.count += n;
                 set(m, dim, player, i, if n == s.count { ItemStack::EMPTY } else { ItemStack { count: s.count - n, ..s } });
-                call(m, dim, c, player, i, |d| d.on_change);
+                changed(m, dim, c, player, i);
             }
         }
         return;
@@ -591,7 +605,7 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
         }
         into_trash(m, dim, cur);
         set(m, dim, player, slot, ItemStack::EMPTY);
-        call(m, dim, c, player, slot, |d| d.on_change);
+        changed(m, dim, c, player, slot);
         return;
     }
     if m.slots
@@ -631,9 +645,9 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
         };
         set(m, dim, player, slot, if n == cur.count { ItemStack::EMPTY } else { ItemStack { count: cur.count - n, ..cur } });
         if output {
-            call(m, dim, c, player, slot, |d| d.on_take);
+            took(m, dim, c, player, slot, 1);
         }
-        call(m, dim, c, player, slot, |d| d.on_change);
+        changed(m, dim, c, player, slot);
         return;
     }
     if slot == u32::MAX {
@@ -668,9 +682,13 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
                 if rest.count != cur.count {
                     dim.entities.dirty_inv.insert(player);
                     set(m, dim, player, slot, rest);
-                    call(m, dim, c, player, slot, |d| d.on_take);
-                    call(m, dim, c, player, slot, |d| d.on_change);
+                    took(m, dim, c, player, slot, 1);
+                    changed(m, dim, c, player, slot);
                 }
+                return;
+            }
+            if grid_of(c, m).is_some_and(|g| g.out == slot) {
+                craft_all(m, dim, c, player, slot);
                 return;
             }
             for _ in 0..max(&cur).max(64) {
@@ -687,8 +705,8 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
                 }
                 dim.entities.dirty_inv.insert(player);
                 set(m, dim, player, slot, ItemStack::EMPTY);
-                call(m, dim, c, player, slot, |d| d.on_take);
-                call(m, dim, c, player, slot, |d| d.on_change);
+                took(m, dim, c, player, slot, 1);
+                changed(m, dim, c, player, slot);
             }
             return;
         } else if m.cursor.is_empty() {
@@ -699,8 +717,8 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
             return;
         }
         set(m, dim, player, slot, ItemStack::EMPTY);
-        call(m, dim, c, player, slot, |d| d.on_take);
-        call(m, dim, c, player, slot, |d| d.on_change);
+        took(m, dim, c, player, slot, 1);
+        changed(m, dim, c, player, slot);
         return;
     }
 
@@ -761,55 +779,60 @@ pub fn click(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, 
     }
     m.cursor = cursor;
     set(m, dim, player, slot, slot_stack);
-    call(m, dim, c, player, slot, |d| d.on_change);
+    changed(m, dim, c, player, slot);
 }
 
 /// Where a shift-click sends items of `slot`, in order, `item` being what goes (`None`: any, the
 /// slots items may come from instead). Player slots go to the container part (groups with a higher
-/// priority first), container slots to the player part, slots made for the item (armor) before
-/// others; in the inventory screen hotbar <-> main, what is worn or in the other hand to the main
-/// part first, then the hotbar, as vanilla's.
+/// priority first) or, worn there, into slots made for the item (armor); the rest of a menu
+/// (a crafting grid, a chest) to the player's main inventory and then the hotbar, never into what
+/// is worn or the other hand; in the inventory screen hotbar <-> main, what is worn or in the
+/// other hand to the main part first, as vanilla's.
 fn other_side(m: &OpenMenu, dim: &Dim, c: &Content, player: u64, slot: u32, item: Option<u32>) -> Vec<u32> {
     let r = m.slots[slot as usize];
     let fits_item = |s: &SlotRef| item.is_none_or(|i| fits(c, s, i));
-    let from_player = r.owner == Owner::Player;
-    let mut targets: Vec<u32> = (0..m.slots.len() as u32)
-        .filter(|&i| {
-            let s = m.slots[i as usize];
-            // Not into a crafting grid: temporary slots are filled by hand.
-            i != slot
-                && s.flags & sf::OUTPUT == 0
-                && s.owner != Owner::Temp
-                && s.owner != Owner::Trash
-                && (s.owner == Owner::Player) != from_player
-                && fits_item(&s)
-        })
-        .collect();
-    targets.sort_by_key(|&i| -m.slots[i as usize].priority);
+    let layout = &c.game.player_layout;
+    // The player's main inventory 0, the hotbar 1, the rest none.
+    let part = |s: &SlotRef| match s.index {
+        i if layout.worn.contains(&i) || s.flags & sf::OFF_HAND != 0 || i >= layout.slots => None,
+        i if i < layout.hotbar => Some(1),
+        _ => Some(0),
+    };
+    let player_part = |from: Option<u32>| {
+        let mut to: Vec<u32> = (0..m.slots.len() as u32)
+            .filter(|&i| {
+                let s = m.slots[i as usize];
+                i != slot
+                    && s.owner == Owner::Player
+                    && s.flags & sf::LOCKED == 0
+                    && part(&s).is_some_and(|p| Some(p) != from)
+                    && fits_item(&s)
+            })
+            .collect();
+        to.sort_by_key(|&i| part(&m.slots[i as usize]));
+        to
+    };
+    if r.owner != Owner::Player {
+        return player_part(None);
+    }
     let fitted: Vec<u32> = (0..m.slots.len() as u32)
         .filter(|&i| {
             let s = m.slots[i as usize];
             item.is_some() && s.accepts.is_some() && fits_item(&s) && get(m, dim, player, i).is_empty()
         })
         .collect();
-    let layout = &c.game.player_layout;
+    let mut targets: Vec<u32> = (0..m.slots.len() as u32)
+        .filter(|&i| {
+            let s = m.slots[i as usize];
+            // Not into a crafting grid: temporary slots are filled by hand.
+            s.flags & sf::OUTPUT == 0 && !matches!(s.owner, Owner::Player | Owner::Temp | Owner::Trash) && fits_item(&s)
+        })
+        .collect();
+    targets.sort_by_key(|&i| -m.slots[i as usize].priority);
     if r.accepts.is_none() && !fitted.is_empty() {
         fitted
-    } else if targets.is_empty() && from_player {
-        let part = |s: &SlotRef| match s.index {
-            i if layout.worn.contains(&i) || s.flags & sf::OFF_HAND != 0 || i >= layout.slots => None,
-            i if i < layout.hotbar => Some(1),
-            _ => Some(0),
-        };
-        let from = part(&r);
-        let mut to: Vec<u32> = (0..m.slots.len() as u32)
-            .filter(|&i| {
-                let s = m.slots[i as usize];
-                s.owner == Owner::Player && s.flags & sf::LOCKED == 0 && part(&s).is_some_and(|p| Some(p) != from)
-            })
-            .collect();
-        to.sort_by_key(|&i| part(&m.slots[i as usize]));
-        to
+    } else if targets.is_empty() {
+        player_part(part(&r))
     } else {
         targets
     }
@@ -844,7 +867,7 @@ fn move_out(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, s
     if moved > 0 {
         let left = cur.count - moved;
         set(m, dim, player, slot, if left == 0 { ItemStack::EMPTY } else { ItemStack { count: left, ..cur } });
-        call(m, dim, c, player, slot, |d| d.on_change);
+        changed(m, dim, c, player, slot);
     }
 }
 
@@ -871,8 +894,230 @@ fn pull_in(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, sl
         left -= k;
     }
     if left < n {
-        call(m, dim, c, player, slot, |d| d.on_change);
+        changed(m, dim, c, player, slot);
     }
+}
+
+/// A slot changed: the crafting grid's result shown again, then the menu's `on_change`.
+fn changed(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, slot: u32) {
+    show_craft(m, dim, c, player);
+    call(m, dim, c, player, slot, |d| d.on_change);
+}
+
+/// A result taken: from a crafting grid, `times` runs of its recipe use the grid up; then the
+/// menu's `on_take`.
+fn took(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, slot: u32, times: u32) {
+    if let Some(g) = grid_of(c, m).filter(|g| g.out == slot)
+        && let Some((r, cells, _)) = craft_runs(m, dim, c, player, &g)
+    {
+        use_grid(m, dim, c, player, &g, r, &cells, times);
+    }
+    call_times(m, dim, c, player, slot, times, |d| d.on_take);
+}
+
+/// A menu's crafting grid (`slot_flags::GRID`): its slots, columns, result slot and recipe kind.
+struct Grid {
+    first: u32,
+    len: u32,
+    cols: u32,
+    out: u32,
+    kind: &'static str,
+}
+
+fn grid_of(c: &'static Content, m: &OpenMenu) -> Option<Grid> {
+    let def = &c.game.menus[m.kind as usize];
+    let kind = def.recipes.first()?;
+    let layout = &c.game.player_layout;
+    let (g, first, len) = def
+        .slot_groups(layout)
+        .find(|g| g.0.flags & sf::GRID != 0)?;
+    let out = def
+        .slot_groups(layout)
+        .find(|g| g.0.flags & sf::OUTPUT != 0 && g.0.owner == abi::slot_owner::MENU)?
+        .1;
+    Some(Grid { first, len, cols: g.cols.max(1), out, kind })
+}
+
+/// What the grid makes, in its result slot.
+fn show_craft(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64) {
+    let Some(g) = grid_of(c, m) else { return };
+    let made = craft_runs(m, dim, c, player, &g).map_or(ItemStack::EMPTY, |(r, ..)| r.result());
+    if get(m, dim, player, g.out) != made {
+        set(m, dim, player, g.out, made);
+    }
+}
+
+/// The grid's recipe, the ingredient in each of its slots, and how many runs they last: until
+/// one is used up or a tool wears out (it may break on the last).
+fn craft_runs(
+    m: &OpenMenu,
+    dim: &Dim,
+    c: &'static Content,
+    player: u64,
+    g: &Grid,
+) -> Option<(&'static crate::registry::Recipe, Vec<Option<usize>>, u32)> {
+    let stacks: Vec<ItemStack> = (g.first..g.first + g.len)
+        .map(|i| get(m, dim, player, i))
+        .collect();
+    let ids: Vec<u32> = stacks
+        .iter()
+        .map(|s| if s.is_empty() { 0 } else { s.item })
+        .collect();
+    let (r, cells) = c
+        .game
+        .match_cells(g.kind, &ids, g.cols, g.len / g.cols, &c.components)?;
+    let runs = cells
+        .iter()
+        .zip(&stacks)
+        .filter_map(|(k, s)| Some((k.as_ref()?, s)))
+        .map(|(&k, s)| match r.uses[k] {
+            Use::Keep => u32::MAX,
+            Use::Wear(w) => match c.durability(s) {
+                0 => u32::MAX,
+                most => most.saturating_sub(crate::stack::damage(s)).div_ceil(w),
+            },
+            Use::Consume | Use::Leaves(_) => s.count / per_run(r, k),
+        })
+        .min()
+        .unwrap_or(0);
+    (runs > 0).then_some((r, cells, runs))
+}
+
+/// How many of ingredient `k` a run takes: one a cell of a pattern, else as the recipe says.
+fn per_run(r: &crate::registry::Recipe, k: usize) -> u32 {
+    if r.shaped.is_some() { 1 } else { r.input_counts.get(k).copied().unwrap_or(1).max(1) }
+}
+
+fn remainder(c: &Content, item: u32) -> Option<u32> {
+    let id = c.components.id(abi::comp::REMAINDER)?;
+    c.components
+        .get::<u32>(crate::components::ITEM, item, id)
+        .filter(|&r| r != 0)
+}
+
+/// `times` runs of the grid's recipe: each ingredient used as it says. What is left of one used
+/// up (what it `leaves`, else its `remainder`) goes into its slot when that empties, the rest
+/// to the player.
+#[allow(clippy::too_many_arguments)]
+fn use_grid(
+    m: &mut OpenMenu,
+    dim: &mut Dim,
+    c: &'static Content,
+    player: u64,
+    g: &Grid,
+    r: &crate::registry::Recipe,
+    cells: &[Option<usize>],
+    times: u32,
+) {
+    let mut spare = Vec::new();
+    for (i, k) in cells.iter().enumerate() {
+        let Some(k) = *k else { continue };
+        let slot = g.first + i as u32;
+        let s = get(m, dim, player, slot);
+        let left = match r.uses[k] {
+            Use::Keep => continue,
+            Use::Wear(w) => match crate::stack::worn(c, s, w.saturating_mul(times)) {
+                broken if broken.is_empty() => remainder(c, s.item).map_or(ItemStack::EMPTY, |x| ItemStack::new(x, 1)),
+                after => after,
+            },
+            use_ => {
+                let n = per_run(r, k).saturating_mul(times).min(s.count);
+                let rest = if n == s.count { ItemStack::EMPTY } else { ItemStack { count: s.count - n, ..s } };
+                let back = match use_ {
+                    Use::Leaves(x) => Some(x),
+                    _ => remainder(c, s.item),
+                };
+                match back {
+                    Some(x) if rest.is_empty() => {
+                        let made = ItemStack::new(x, n);
+                        let fit = c.max_stack(&made).min(n);
+                        if n > fit {
+                            spare.push(ItemStack { count: n - fit, ..made });
+                        }
+                        ItemStack { count: fit, ..made }
+                    }
+                    Some(x) => {
+                        spare.push(ItemStack::new(x, n));
+                        rest
+                    }
+                    None => rest,
+                }
+            }
+        };
+        set(m, dim, player, slot, left);
+    }
+    for s in spare {
+        give(dim, c, player, s, s.count);
+    }
+    // What else runs give, rolled for each.
+    for _ in 0..times.min(4096) {
+        for s in dim.roll_table(c, &r.extras, &Default::default(), glam::DVec3::ZERO, 0) {
+            give(dim, c, player, s, s.count);
+        }
+    }
+}
+
+/// `count` of `stack` into the player's inventory, a full stack at a time; what doesn't fit is
+/// thrown out unless `keep` is false, then it is left over (the count not given).
+fn give_up_to(dim: &mut Dim, c: &'static Content, player: u64, stack: ItemStack, count: u32, keep: bool) -> u32 {
+    let max = c.max_stack(&stack).max(1);
+    let mut left = count;
+    while left > 0 {
+        let n = left.min(max);
+        let rest = dim
+            .entities
+            .insert_item(c, player, ItemStack { count: n, ..stack });
+        left -= n - rest.count;
+        if !rest.is_empty() {
+            if keep {
+                dim.throw(c, player, ItemStack { count: left, ..stack });
+                left = 0;
+            }
+            break;
+        }
+    }
+    dim.entities.dirty_inv.insert(player);
+    left
+}
+
+fn give(dim: &mut Dim, c: &'static Content, player: u64, stack: ItemStack, count: u32) {
+    give_up_to(dim, c, player, stack, count, true);
+}
+
+/// Shift on a crafting grid's result: as many runs as its ingredients last and their results
+/// fit in the player's inventory, all at once.
+fn craft_all(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, slot: u32) {
+    let Some(g) = grid_of(c, m) else { return };
+    let Some((r, cells, runs)) = craft_runs(m, dim, c, player, &g) else { return };
+    let out = r.result();
+    if out.is_empty() {
+        return;
+    }
+    // The most runs whose results fit, tried on a copy of the inventory.
+    let room = dim
+        .entities
+        .inventories
+        .get(&player)
+        .map_or(0, |inv| inv.len() as u32)
+        * c.max_stack(&out);
+    let (mut lo, mut hi) = (0u32, runs.min(room / out.count.max(1)));
+    let backup = dim.entities.inventories.get(&player).cloned();
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        let fits = give_up_to(dim, c, player, out, out.count * mid, false) == 0;
+        if let Some(b) = &backup {
+            dim.entities.inventories.insert(player, b.clone());
+        }
+        if fits { lo = mid } else { hi = mid - 1 }
+    }
+    if lo == 0 {
+        return;
+    }
+    give(dim, c, player, out, out.count * lo);
+    set(m, dim, player, slot, ItemStack::EMPTY);
+    use_grid(m, dim, c, player, &g, r, &cells, lo);
+    call_times(m, dim, c, player, slot, lo, |d| d.on_take);
+    changed(m, dim, c, player, slot);
 }
 
 /// Dragging the cursor stack over `slots`: button 0 splits it evenly, button 1 leaves one item in
@@ -913,7 +1158,7 @@ pub fn drag(m: &mut OpenMenu, dim: &mut Dim, c: &'static Content, player: u64, s
     }
     m.cursor = if left == 0 { ItemStack::EMPTY } else { ItemStack { count: left, ..cur } };
     for &s in &valid {
-        call(m, dim, c, player, s, |d| d.on_change);
+        changed(m, dim, c, player, s);
     }
 }
 

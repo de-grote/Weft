@@ -11,6 +11,7 @@
 //! cubes not made or meshed yet (flying fast), and nowhere stand through them.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use glam::{DVec3, IVec2};
@@ -21,7 +22,7 @@ use crate::background;
 use crate::config;
 use crate::content::{Content, StateInfo, content};
 use crate::gpu_layout::terrain::lod as lod_gpu;
-use crate::gpu_layout::{CORNERS, face, lod_box, lod_record};
+use crate::gpu_layout::{CORNERS, face, lod_box, lod_face, lod_record};
 use crate::server::lod_tops::{LodColumn, Span, shows};
 
 /// Columns that differ from the terrain, as the server said.
@@ -33,12 +34,10 @@ pub const CELLS: i32 = 32;
 pub const SAMPLES: usize = lod_gpu::SAMPLES as usize;
 const SIDE: i32 = lod_gpu::SIDE as i32;
 const GRID: usize = (CELLS + 2) as usize;
-/// Words per tile coming back from the GPU.
-pub const LOD_WORDS_PER_TILE: usize = SAMPLES * 2;
+/// Words per sample and per tile coming back from the GPU.
+const WORDS: usize = lod_gpu::WORDS as usize;
+pub const LOD_WORDS_PER_TILE: usize = SAMPLES * WORDS;
 pub const MAX_LEVEL: u32 = 5;
-/// A tile splits into the level below while nearer than this many of its widths: a cell stays
-/// about the same size on screen (a 32-block cell at 4096 blocks).
-const SPLIT: f64 = 4.0;
 /// Blocks under the land from where distant terrain is left out.
 const UNDERGROUND: i32 = 32;
 /// Tiles asked for and not back yet, at most.
@@ -47,6 +46,8 @@ const IN_FLIGHT: usize = 256;
 const MAX_QUADS: usize = 48_000;
 /// More model boxes than this become one box around all of them.
 const MAX_MODEL_BOXES: usize = 6;
+/// Time taken to dither between a parent tile and its four children.
+const LOD_FADE: Duration = Duration::from_millis(250);
 
 /// A tile: its level and place in the grid of its level's tiles.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -95,14 +96,26 @@ pub struct LodJob {
     pub columns: Arc<Columns>,
 }
 
-/// A made tile's quads (`mesh`) and the heights they span.
+/// A made tile's quads (`mesh`), how many of each part and direction, and the heights they span.
 pub struct LodMesh {
     pub dim: u32,
     pub seed: u64,
     pub key: TileKey,
     pub quads: Vec<[u32; 4]>,
+    pub counts: Counts,
     pub y: (i32, i32),
 }
+
+/// How many quads a tile has, per part (`ALWAYS`, `BESIDE_CUBES`, `SURFACE`) and per direction
+/// rank (`mesher::DIR_RANK`), in that order.
+pub type Counts = [[u32; 6]; PARTS];
+/// All a tile shows that is opaque.
+pub const ALWAYS: usize = 0;
+/// Skirts beside a neighbor as high: only seen where that neighbor's pixels give way to cubes.
+pub const BESIDE_CUBES: usize = 1;
+/// A see-through surface over the ground (a sea), drawn after everything opaque.
+pub const SURFACE: usize = 2;
+const PARTS: usize = 3;
 
 /// What came back for `job`, meshed on a worker.
 pub fn made(job: LodJob, mut words: Vec<u32>) {
@@ -121,7 +134,8 @@ pub fn made(job: LodJob, mut words: Vec<u32>) {
             for k in 0..SAMPLES {
                 let (i, j) = ((k as i32 % SIDE) - 1, (k as i32 / SIDE) - 1);
                 let at = o + IVec2::new(i * s + s / 2, j * s + s / 2);
-                let (y, top, under) = ((words[k * 2] & 0xFFFF) as u16 as i16 as i32, words[k * 2] >> 16, words[k * 2 + 1] >> 16);
+                let w = k * WORDS;
+                let (y, top, under) = ((words[w] & 0xFFFF) as u16 as i16 as i32, words[w] >> 16, words[w + 1] >> 16);
                 let ground = match job.columns.get(&at) {
                     // One saved column must not repaint a coarse cell: a patch of dirt the width
                     // of the cell. Up close a cell is a dug column's width.
@@ -135,24 +149,26 @@ pub fn made(job: LodJob, mut words: Vec<u32>) {
                     _ => None,
                 };
                 if let Some((y, top, under)) = ground {
-                    words[k * 2] = (y as u32 & 0xFFFF) | (top << 16);
-                    words[k * 2 + 1] = (words[k * 2 + 1] & 0xFFFF) | (under << 16);
+                    words[w] = (y as u32 & 0xFFFF) | (top << 16);
+                    words[w + 1] = (words[w + 1] & 0xFFFF) | (under << 16);
                 }
             }
         }
-        let (quads, y) = mesh(content(), job.key, &words, &job.columns);
+        let (quads, counts, y) = mesh(content(), job.key, &words, &job.columns);
         let _ = job
             .done
-            .send(LodMesh { dim: job.dim, seed: job.seed, key: job.key, quads, y });
+            .send(LodMesh { dim: job.dim, seed: job.seed, key: job.key, quads, counts, y });
     });
 }
 
 /// A record of `world.wgsl`'s `vs_lod`: the `dir` face of a box at (x, y, z) in the tile, size
 /// (sx, sy, sz) blocks, drawn with texture `tex`, tinted for `biome` when `tint`, corners in `ao`,
-/// lit by block light `light` (`lod_tops::Span::light`).
+/// lit by block light `light` (`lod_tops::Span::light`) with how much of the sky's it lacks in
+/// the top byte.
 fn quad(dir: u32, x: i32, y: i32, z: i32, size: (i32, i32, i32), tex: u32, tint: u32, biome: u32, ao: u32, light: u32) -> [u32; 4] {
     let rgb = [0, 8, 16].map(|s| (light >> s) as u8);
-    let mut r = lod_record(dir, [x, y, z], [size.0, size.1, size.2], tex, tint, biome, rgb);
+    let sky = 15u8.saturating_sub((light >> 24) as u8);
+    let mut r = lod_record(dir, [x, y, z], [size.0, size.1, size.2], tex, tint, biome, sky, rgb);
     r[3] |= (ao & 0xFF) << 24;
     r
 }
@@ -160,7 +176,7 @@ fn quad(dir: u32, x: i32, y: i32, z: i32, size: (i32, i32, i32), tex: u32, tint:
 fn corner_y(words: &[u32], gi: i32, gj: i32) -> i32 {
     let gi = gi.clamp(-1, CELLS);
     let gj = gj.clamp(-1, CELLS);
-    let k = ((gj + 1) * SIDE + gi + 1) as usize * 2;
+    let k = ((gj + 1) * SIDE + gi + 1) as usize * WORDS;
     (words[k] & 0xFFFF) as u16 as i16 as i32
 }
 
@@ -176,17 +192,46 @@ fn sample_y(words: &[u32], gx: f32, gz: f32) -> i32 {
 
 /// The tile's top faces and the walls down to lower neighbors: the top block for its own
 /// height, then the block under it for the rest, lit as the column the cell is sampled at; then
-/// what stands on the ground (`add_structures`).
-pub fn mesh(c: &Content, key: TileKey, words: &[u32], columns: &Columns) -> (Vec<[u32; 4]>, (i32, i32)) {
+/// what stands on the ground (`add_structures`). Sorted by part and direction (`Counts`).
+pub fn mesh(c: &Content, key: TileKey, words: &[u32], columns: &Columns) -> (Vec<[u32; 4]>, Counts, (i32, i32)) {
     let s = 1 << key.level;
     let origin = key.origin();
     let at = |i: i32, j: i32| {
-        let k = ((j + 1) * SIDE + i + 1) as usize * 2;
+        let k = ((j + 1) * SIDE + i + 1) as usize * WORDS;
         let (a, b) = (words[k], words[k + 1]);
         let col = IVec2::new(origin.x + i * s + s / 2, origin.y + j * s + s / 2);
         (a >> 16, b & 0xFFFF, b >> 16, columns.get(&col).map_or(0, |c| c.light))
     };
-    let h = height_grid(words);
+    // What stands over a cell's ground: its top and block.
+    let over = |i: i32, j: i32| {
+        let w = words[((j + 1) * SIDE + i + 1) as usize * WORDS + 2];
+        ((w & 0xFFFF) as u16 as i16 as i32, w >> 16)
+    };
+    // Under a surface (a sea) the sky's light on the ground after `depth` blocks of it, as in the
+    // cubes.
+    let sky_under = |surface: u32, depth: i32| {
+        (0..depth.min(16)).fold(15, |v, _| crate::world::light::step(v, c.tight[surface as usize].opacity, true))
+    };
+    let light_of = |i: i32, j: i32, y: i32, light: u32| match over(i, j) {
+        (top_y, surface) if surface != 0 => light | ((15 - sky_under(surface, top_y - y)) as u32) << 24,
+        _ => light,
+    };
+    let mut h = height_grid(words);
+    // Ground deeper than the sky's light reaches is as dark at any depth: it is laid as high as
+    // that, a flat floor of few quads and no walls.
+    let deepest = h.iter().flatten().copied().min().unwrap_or(0);
+    for j in -1..=CELLS {
+        for i in -1..=CELLS {
+            let (top_y, surface) = over(i, j);
+            if let Some(dark) = (surface != 0)
+                .then(|| (1..=16).find(|&d| sky_under(surface, d) == 0))
+                .flatten()
+            {
+                let y = &mut h[(i + 1) as usize][(j + 1) as usize];
+                *y = (*y).max(top_y - dark);
+            }
+        }
+    }
     let looks = super::looks::current();
     let ctm = super::ctm::current();
     // Far off a face is its first layer.
@@ -202,15 +247,35 @@ pub fn mesh(c: &Content, key: TileKey, words: &[u32], columns: &Columns) -> (Vec
         for i in 0..CELLS {
             let y = column(&h, i, j);
             let (top, biome, _, light) = at(i, j);
+            let lit = light_of(i, j, y, light);
             let (tex, tint) = face_of(top, 3);
-            faces.push(Face { dir: 3, at: [i * s, y, j * s], size: [s, 1, s], tex, tint, biome, ao: ao_bits(&h, i, j, 3, y), light });
+            faces.push(Face {
+                dir: 3,
+                at: [i * s, y, j * s],
+                size: [s, 1, s],
+                tex,
+                tint,
+                biome,
+                ao: ao_bits(&h, i, j, 3, y),
+                light: lit,
+                part: ALWAYS,
+            });
             (lo, hi) = (lo.min(y), hi.max(y + 1));
+            // A sea's surface, unshaded as a liquid's.
+            let (top_y, surface) = over(i, j);
+            if surface != 0 && top_y > y {
+                let (tex, tint) = face_of(surface, 3);
+                let part = if c.states[surface as usize].layer == weft_abi::RenderLayer::Translucent { SURFACE } else { ALWAYS };
+                faces.push(Face { dir: 3, at: [i * s, top_y, j * s], size: [s, 1, s], tex, tint, biome, ao: 0xFF, light, part });
+                hi = hi.max(top_y + 1);
+            }
         }
     }
     for j in 0..CELLS {
         for i in 0..CELLS {
             let (top, biome, under, light) = at(i, j);
             let y = column(&h, i, j);
+            let light = light_of(i, j, y, light);
             for (dir, (di, dj)) in [(0usize, (-1, 0)), (1, (1, 0)), (4, (0, -1)), (5, (0, 1))] {
                 // At the tile's edge the tile beside may be of another level, its ground not
                 // where this one's sample says: the wall goes on down below it (a skirt), or
@@ -223,27 +288,44 @@ pub fn mesh(c: &Content, key: TileKey, words: &[u32], columns: &Columns) -> (Vec
                 if ny > y {
                     continue;
                 }
-                let skirt = ny.min(y - 1) - s - 2;
+                let mut skirt = ny.min(y - 1) - s - 2;
+                // Under a sea the wall goes on down to where the ground really is, the tile's
+                // deepest for all (their rows stay alike): seen from the cubes' water at the edge
+                // of the view, a look goes under the floor laid higher.
+                if over(i, j).1 != 0 {
+                    skirt = skirt.min(deepest - s - 2);
+                }
+                // Beside one as high inside the tile it is only ever seen where that one's
+                // pixels give way to cubes.
+                let part = if ny == y && (0..CELLS).contains(&ni) && (0..CELLS).contains(&nj) { BESIDE_CUBES } else { ALWAYS };
                 let dir = dir as u32;
                 if ny < y {
                     let (tex, tint) = face_of(top, dir as usize);
                     let ao = ao_bits(&h, i, j, dir as usize, y);
-                    faces.push(Face { dir, at: [i * s, y, j * s], size: [s, 1, s], tex, tint, biome, ao, light });
+                    faces.push(Face { dir, at: [i * s, y, j * s], size: [s, 1, s], tex, tint, biome, ao, light, part });
                 }
                 let (tex, tint) = face_of(under, dir as usize);
                 let top_y = if ny < y { y - 1 } else { y };
                 let ao = ao_span(&h, i, j, dir as usize, top_y, (ny + 1).min(top_y));
-                faces.push(Face { dir, at: [i * s, skirt + 1, j * s], size: [s, y - 1 - skirt, s], tex, tint, biome, ao, light });
+                faces.push(Face { dir, at: [i * s, skirt + 1, j * s], size: [s, y - 1 - skirt, s], tex, tint, biome, ao, light, part });
                 lo = lo.min(skirt + 1);
             }
         }
     }
-    let mut out: Vec<[u32; 4]> = merged(faces)
-        .into_iter()
-        .map(|f| quad(f.dir, f.at[0], f.at[1], f.at[2], (f.size[0], f.size[1], f.size[2]), f.tex, f.tint, f.biome, f.ao, f.light))
-        .collect();
-    add_structures(&mut out, &mut lo, &mut hi, c, key, words, columns, &h, &face_of, &ctm);
-    (out, (lo, hi))
+    let record =
+        |f: &Face| quad(f.dir, f.at[0], f.at[1], f.at[2], (f.size[0], f.size[1], f.size[2]), f.tex, f.tint, f.biome, f.ao, f.light);
+    let faces = merged(faces);
+    let mut parts: [Vec<[u32; 4]>; PARTS] = std::array::from_fn(|p| faces.iter().filter(|f| f.part == p).map(record).collect());
+    add_structures(&mut parts[ALWAYS], &mut lo, &mut hi, c, key, words, columns, &h, &face_of, &ctm);
+    let rank = |q: &[u32; 4]| super::mesher::DIR_RANK[((q[0] >> lod_face::DIR_SHIFT) & face::DIR_MASK) as usize] as usize;
+    let mut counts = [[0; 6]; PARTS];
+    for (part, n) in parts.iter_mut().zip(&mut counts) {
+        part.sort_by_key(rank);
+        for q in part.iter() {
+            n[rank(q)] += 1;
+        }
+    }
+    (parts.concat(), counts, (lo, hi))
 }
 
 /// A face of a tile before it is packed.
@@ -257,27 +339,39 @@ struct Face {
     biome: u32,
     ao: u32,
     light: u32,
+    /// Which of `Counts`' parts.
+    part: usize,
 }
 
-/// `faces` with each run of neighbors alike along a row made one face: a flat stretch of ground
-/// or a straight cliff is a few quads, not one a cell. Walls facing x run along z, the others
-/// along x; a face stretches only where its shading would (the corners at both ends of the
-/// stretch shaded alike), and no further than a quad's size field holds.
-fn merged(mut faces: Vec<Face>) -> Vec<Face> {
-    let along = |f: &Face| if f.dir <= 1 { 2 } else { 0 };
+/// `faces` with neighbors alike made one face: a flat stretch of ground is a few quads, a straight
+/// cliff a few strips, not one a cell. Runs along a row first (walls facing x along z, the others
+/// along x), then tops' runs alike side by side into rectangles; walls stop at strips, their
+/// rows being of other heights. A face stretches only where its shading would (the corners at
+/// both ends shaded alike).
+fn merged(faces: Vec<Face>) -> Vec<Face> {
+    let rows = merged_along(faces, |f| Some(if f.dir <= 1 { 2 } else { 0 }));
+    merged_along(rows, |f| (f.dir == 2 || f.dir == 3).then_some(2))
+}
+
+/// Runs of faces alike but for where they are along the axis `along` gives (none: kept as they
+/// are) made one face.
+fn merged_along(mut faces: Vec<Face>, along: impl Fn(&Face) -> Option<usize>) -> Vec<Face> {
     // Alike but for where along the row: sorted together, in order along it.
     let key = |f: &Face| {
         let a = along(f);
         let mut pos = f.at;
-        pos[a] = 0;
-        (f.dir, pos, f.size, f.tex, f.tint, f.biome, f.ao, f.light, f.at[a])
+        if let Some(a) = a {
+            pos[a] = 0;
+        }
+        (f.dir, f.part, pos, f.size, f.tex, f.tint, f.biome, f.ao, f.light, a.map_or(0, |a| f.at[a]))
     };
     faces.sort_unstable_by_key(key);
-    let most = (1 << crate::gpu_layout::lod_face::SIZE_BITS) - 1;
+    let most = 1 << crate::gpu_layout::lod_face::SIZE_BITS;
     let mut out: Vec<Face> = Vec::with_capacity(faces.len());
     for f in faces {
-        if let Some(last) = out.last_mut() {
-            let a = along(&f);
+        if let Some(last) = out.last_mut()
+            && let Some(a) = along(&f)
+        {
             let (mut a_pos, mut f_pos) = (last.at, f.at);
             (a_pos[a], f_pos[a]) = (0, 0);
             let mut a_size = last.size;
@@ -450,7 +544,7 @@ fn add_structures(
         }
         let Some(col) = columns.get(&p) else { continue };
         let (i, j) = ((p.x - x0) / s, (p.y - z0) / s);
-        let k = ((j + 1) * SIDE + i + 1) as usize * 2;
+        let k = ((j + 1) * SIDE + i + 1) as usize * WORDS;
         let biome = words[k + 1] & 0xFFFF;
         let ground = column(h, i, j);
         // How high the ground beside covers this column's sides.
@@ -598,6 +692,8 @@ pub struct Lod {
     columns_dim: u32,
     /// Made tiles to make again for columns that changed, shown as they are till then.
     stale: FxHashSet<TileKey>,
+    /// Parent tile and transition start; true means parent -> children.
+    transitions: FxHashMap<TileKey, (bool, Instant)>,
 }
 
 /// Columns the mask reaches past the view radius (cubes are kept that far).
@@ -623,6 +719,7 @@ impl Lod {
             columns: Arc::default(),
             columns_dim: u32::MAX,
             stale: FxHashSet::default(),
+            transitions: FxHashMap::default(),
         }
     }
 
@@ -707,6 +804,7 @@ impl Lod {
             self.pending.clear();
             self.wanted.clear();
             self.wanted_at = None;
+            self.transitions.clear();
         }
         if (dim, seed) != (self.dim, self.seed) {
             (self.dim, self.seed) = (dim, seed);
@@ -727,7 +825,7 @@ impl Lod {
             if (m.dim, m.seed) != (self.dim, self.seed) || !self.pending.remove(&m.key) {
                 continue;
             }
-            render.upload_lod(gpu, textures, m.key, &m.quads, m.y);
+            render.upload_lod(gpu, textures, m.key, &m.quads, m.counts, m.y);
             self.ready.insert(m.key);
         }
         if reach == 0 || !self.able {
@@ -742,26 +840,96 @@ impl Lod {
             self.wanted_at = Some((p, hide, reach));
             self.pick(p, hide as f64, reach as f64);
         }
-        // Shown: each wanted tile when made, else its children when all four are, else its
-        // nearest made ancestor.
-        let mut shown = FxHashSet::default();
-        let mut keep = FxHashSet::default();
+        // Find ready parent/children pairs.
+        let wanted: FxHashSet<TileKey> = self.wanted.iter().copied().collect();
+        let mut candidates = FxHashMap::default();
         for &key in &self.wanted {
-            keep.insert(key);
-            if self.ready.contains(&key) {
-                shown.insert(key);
+            if key.level > 0
+                && self.ready.contains(&key)
+                && key
+                    .children()
+                    .iter()
+                    .all(|child| self.ready.contains(child) && !wanted.contains(child))
+            {
+                candidates.insert(key, false);
+            }
+            if key.level < MAX_LEVEL {
+                let parent = key.parent();
+                if self.ready.contains(&parent)
+                    && parent
+                        .children()
+                        .iter()
+                        .all(|child| wanted.contains(child) && self.ready.contains(child))
+                {
+                    candidates.insert(parent, true);
+                }
+            }
+        }
+
+        self.transitions.retain(|key, (to_fine, _)| {
+            candidates
+                .get(key)
+                .is_some_and(|candidate| *candidate == *to_fine)
+        });
+        let now = Instant::now();
+        for (&key, &to_fine) in &candidates {
+            self.transitions.entry(key).or_insert((to_fine, now));
+        }
+
+        let mut active = FxHashMap::default();
+        for (&key, &(to_fine, start)) in &self.transitions {
+            let t = (now - start).as_secs_f32() / LOD_FADE.as_secs_f32();
+            if t < 1.0 {
+                active.insert(key, (to_fine, t.clamp(0.0, 1.0)));
+            }
+        }
+
+        let mut shown = FxHashMap::default();
+        let mut keep = FxHashSet::default();
+        let mut transitioning = FxHashSet::default();
+        for (&parent, &(to_fine, t)) in &active {
+            let children = parent.children();
+            keep.insert(parent);
+            keep.extend(children);
+            transitioning.insert(parent);
+            transitioning.extend(children);
+            if to_fine {
+                shown.insert(parent, t - 1.0);
+                for child in children {
+                    shown.insert(child, t);
+                }
+            } else {
+                shown.insert(parent, t);
+                for child in children {
+                    shown.insert(child, t - 1.0);
+                }
+            }
+        }
+
+        for &key in &self.wanted {
+            if transitioning.contains(&key) {
+                keep.insert(key);
                 continue;
             }
-            if key.level > 1 && key.children().iter().all(|k| self.ready.contains(k)) {
-                shown.extend(key.children());
-                keep.extend(key.children());
+            keep.insert(key);
+            if self.ready.contains(&key) {
+                shown.insert(key, 2.0);
+                continue;
+            }
+            if key.level > 0 && key.children().iter().all(|k| self.ready.contains(k)) {
+                for child in key.children() {
+                    shown.insert(child, 2.0);
+                    keep.insert(child);
+                }
                 continue;
             }
             let mut a = key;
             while a.level < MAX_LEVEL {
                 a = a.parent();
                 if self.ready.contains(&a) {
-                    shown.insert(a);
+                    if !transitioning.contains(&a) {
+                        shown.insert(a, 2.0);
+                    }
                     keep.insert(a);
                     break;
                 }
@@ -806,7 +974,9 @@ impl Lod {
     }
 
     /// Keeps the mask of columns shown by cubes current: columns that changed, and the ones
-    /// coming into the window when the camera moved to another column.
+    /// coming into the window when the camera moved to another column. A bit per column for
+    /// its ground (seen through what is clear), then a bit per column for its top (a sea's
+    /// surface): a sea with its floor not drawn yet shows the tile's floor under the cubes' water.
     fn update_mask(
         &mut self,
         gpu: &mut dyn weft_render::Backend,
@@ -820,23 +990,30 @@ impl Lod {
         let w = 2 * half + 1;
         let center = IVec2::new((cam.x / 16.0).floor() as i32, (cam.z / 16.0).floor() as i32);
         let slot = |col: IVec2| (col.y.rem_euclid(w) * w + col.x.rem_euclid(w)) as usize;
-        let set = |mask: &mut Vec<u32>, col: IVec2, on: bool| {
-            let i = slot(col);
-            let (word, bit) = (i / 32, 1u32 << (i % 32));
-            let old = mask[word];
-            mask[word] = if on { old | bit } else { old & !bit };
-            old != mask[word]
-        };
+        let words = ((w * w) as usize).div_ceil(32);
         let changed = world.take_changed_columns();
+        let world = &*world;
+        let set = |mask: &mut Vec<u32>, col: IVec2| {
+            let i = slot(col);
+            let bit = 1u32 << (i % 32);
+            let mut changed = false;
+            for (part, through) in [(0, true), (1, false)] {
+                let word = part * words + i / 32;
+                let old = mask[word];
+                mask[word] = if world.column_shown(col, seed, through) { old | bit } else { old & !bit };
+                changed |= old != mask[word];
+            }
+            changed
+        };
         let inside = |col: IVec2, at: IVec2| (col - at).abs().max_element() <= half;
         if half != self.half || self.mask.is_empty() {
             self.half = half;
-            self.mask = vec![0; ((w * w) as usize).div_ceil(32)];
+            self.mask = vec![0; 2 * words];
             self.center = center;
             for z in -half..=half {
                 for x in -half..=half {
                     let col = center + IVec2::new(x, z);
-                    set(&mut self.mask, col, world.column_shown(col, seed));
+                    set(&mut self.mask, col);
                 }
             }
             self.mask_changed = true;
@@ -847,14 +1024,14 @@ impl Lod {
                 for x in -half..=half {
                     let col = center + IVec2::new(x, z);
                     if !inside(col, old) {
-                        self.mask_changed |= set(&mut self.mask, col, world.column_shown(col, seed));
+                        self.mask_changed |= set(&mut self.mask, col);
                     }
                 }
             }
         }
         for col in changed {
             if inside(col, center) {
-                self.mask_changed |= set(&mut self.mask, col, world.column_shown(col, seed));
+                self.mask_changed |= set(&mut self.mask, col);
             }
         }
         render.lod_half = half as u32;
@@ -867,6 +1044,10 @@ impl Lod {
     /// The tiles to show: level 5 tiles within `reach`, split while near, leaving out what
     /// lies inside `hide` (where the view's cubes are always shown).
     fn pick(&mut self, p: glam::DVec2, hide: f64, reach: f64) {
+        // A tile splits into the level below while nearer than this many of its widths
+        // (`core:lod_detail`): a cell stays about the same size on screen, at 4 a 32-block cell
+        // at 4096 blocks. Half of it has a fourth of the tiles, what a phone's GPU can draw.
+        let split = config::by_name("core:lod_detail").map_or(4.0, config::get);
         let top = CELLS << MAX_LEVEL;
         let (lo, hi) = (((p - reach) / top as f64).floor().as_ivec2(), ((p + reach) / top as f64).floor().as_ivec2());
         let mut out = Vec::new();
@@ -881,7 +1062,7 @@ impl Lod {
             if near > reach || far < hide {
                 continue;
             }
-            if key.level > 1 && near < SPLIT * key.size() as f64 {
+            if key.level > 1 && near < split * key.size() as f64 {
                 stack.extend(key.children());
             } else {
                 out.push((near, key));

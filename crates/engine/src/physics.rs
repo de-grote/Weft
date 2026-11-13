@@ -1137,3 +1137,32 @@ mod knock_tests {
         assert!((d.height - 3.0).abs() < 1e-5);
     }
 }
+
+/// `a - b` as the shortest turn, radians in -PI..PI.
+pub fn angle_diff(a: f32, b: f32) -> f32 {
+    (a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
+
+/// One tick of vanilla's tickHeadTurn: the body turns toward where it walked this tick (`moved`,
+/// in the frame of what it stands on) or stays put, and the head drags it along only once it is
+/// more than 50 degrees away. The server and every client run it on the same ticks of the same
+/// moves, so all of them have the same body without sending it. Radians.
+pub fn turn_body(body: f32, head: f32, moved: DVec3) -> f32 {
+    let mut body = body;
+    let flat = moved.with_y(0.0);
+    if flat.length_squared() > 0.0025 * 0.0025 {
+        // Backing up, the body faces the way the head does.
+        let mut toward = (-flat.x as f32).atan2(-flat.z as f32);
+        if angle_diff(toward, head).abs() > 95f32.to_radians() {
+            toward += std::f32::consts::PI;
+        }
+        body += angle_diff(toward, body) * 0.3;
+    }
+    let off = angle_diff(head, body);
+    let limit = 50f32.to_radians();
+    if off.abs() > limit {
+        body += off - limit * off.signum();
+    }
+    // Kept near the head, so their difference never needs wrapping where it is used.
+    head - angle_diff(head, body)
+}

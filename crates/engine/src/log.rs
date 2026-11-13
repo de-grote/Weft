@@ -229,6 +229,7 @@ impl log::Log for Logger {
             return;
         }
         let t = self.start.elapsed().as_secs_f32();
+        #[cfg_attr(target_os = "android", allow(unused_variables))]
         let (color, name) = match record.level() {
             Level::Error => ("\x1b[1;31m", "ERROR"),
             Level::Warn => ("\x1b[33m", "WARN "),
@@ -238,8 +239,13 @@ impl log::Log for Logger {
         };
         let short = short(record.target());
         let line = format!("{t:9.3} {name} [{short}] {}", record.args());
-        let mut out = std::io::stderr().lock();
-        let _ = writeln!(out, "\x1b[90m{t:9.3}\x1b[0m {color}{name}\x1b[0m \x1b[90m[{short}]\x1b[0m {}", record.args());
+        #[cfg(target_os = "android")]
+        logcat(record.level(), &line);
+        #[cfg(not(target_os = "android"))]
+        {
+            let mut out = std::io::stderr().lock();
+            let _ = writeln!(out, "\x1b[90m{t:9.3}\x1b[0m {color}{name}\x1b[0m \x1b[90m[{short}]\x1b[0m {}", record.args());
+        }
         if let Some(f) = self.file.lock().as_mut() {
             let _ = f.write_all(line.as_bytes());
             let _ = f.write_all(b"\n");
@@ -400,4 +406,23 @@ mod tests {
         let b = stamp(1_700_000_061);
         assert!(a < b && a.len() == 19);
     }
+}
+
+/// Android has no terminal: its own log takes the lines (`adb logcat -s weft`).
+#[cfg(target_os = "android")]
+fn logcat(level: Level, line: &str) {
+    #[link(name = "log")]
+    unsafe extern "C" {
+        fn __android_log_write(prio: i32, tag: *const std::ffi::c_char, text: *const std::ffi::c_char) -> i32;
+    }
+    // android/log.h's priorities.
+    let prio = match level {
+        Level::Error => 6,
+        Level::Warn => 5,
+        Level::Info => 4,
+        Level::Debug => 3,
+        Level::Trace => 2,
+    };
+    let text = std::ffi::CString::new(line.replace('\0', "")).unwrap_or_default();
+    unsafe { __android_log_write(prio, c"weft".as_ptr(), text.as_ptr()) };
 }

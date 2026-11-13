@@ -82,6 +82,8 @@ pub const ENGINE_KEYS: &[(&str, &str, u32)] = {
         ("core:debug_options", "F3+F6", DEBUG),
         ("core:show_cubes", "F3+KeyG", DEBUG),
         ("core:show_hitboxes", "F3+KeyB", DEBUG),
+        ("core:advanced_tooltips", "F3+KeyH", DEBUG),
+        ("core:relight", "F3+KeyL", DEBUG),
         ("core:debug_group1", "F3+Digit1", DEBUG),
         ("core:debug_group2", "F3+Digit2", DEBUG),
         ("core:debug_group3", "F3+Digit3", DEBUG),

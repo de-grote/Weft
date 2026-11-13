@@ -29,7 +29,7 @@ use crate::ui::lang::Lang;
 use crate::ui::look::Look;
 use crate::ui::render::UiRenderer;
 use crate::ui::text::{self, Arg, Msg};
-use crate::ui::{Kind, Ui};
+use crate::ui::{Kind, Style, Ui};
 
 pub type BackendFactory = fn(&BackendDesc) -> Result<Box<dyn Backend>, weft_render::Error>;
 
@@ -225,6 +225,9 @@ pub(crate) struct Running {
     /// What is drawn over the world after its depth was taken (`Client::render`).
     after_list: CommandList,
     input: Input,
+    touches: crate::touch::Touches,
+    /// The phone's keyboard is up (`soft_keyboard`).
+    keyboard: bool,
     pub(crate) settings: Settings,
     lang: Lang,
     languages: Vec<(String, String)>,
@@ -265,6 +268,8 @@ pub(crate) struct Running {
     preview_shot: Option<(PathBuf, bool)>,
     /// Going into a world from its picture in the list (`Request::EnterWorld`).
     entering: Option<Entering>,
+    /// The world opened while shaders were compiling ahead, opening once they are done.
+    waiting_world: Option<WorldMeta>,
     /// When the world around the player was first loaded, the HUD coming in from then.
     seen_since: Option<Instant>,
     /// The HUD's quads among the cached ones.
@@ -315,7 +320,24 @@ struct App {
 }
 
 pub fn run(renderers: Renderers, opts: Options) -> Result<(), String> {
-    let event_loop = EventLoop::new().map_err(|e| e.to_string())?;
+    run_on(EventLoop::new().map_err(|e| e.to_string())?, renderers, opts)
+}
+
+/// `run` in an Android app's activity.
+#[cfg(target_os = "android")]
+pub fn run_android(app: winit::platform::android::activity::AndroidApp, renderers: Renderers, opts: Options) -> Result<(), String> {
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+    run_on(
+        EventLoop::builder()
+            .with_android_app(app)
+            .build()
+            .map_err(|e| e.to_string())?,
+        renderers,
+        opts,
+    )
+}
+
+fn run_on(event_loop: EventLoop<()>, renderers: Renderers, opts: Options) -> Result<(), String> {
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App { renderers, opts, run: None, error: None };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
@@ -325,13 +347,11 @@ pub fn run(renderers: Renderers, opts: Options) -> Result<(), String> {
     }
 }
 
-/// The engine's own assets: next to the executable in a distribution, else (a build run from the
-/// source tree, or `--dev`) the source tree's.
+/// The engine's own assets: those a distribution ships, else (a build run from the source tree, or
+/// `--dev`) the source tree's.
 fn engine_assets(dev: bool) -> PathBuf {
     let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
-    let shipped = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("assets").join("core")));
+    let shipped = crate::paths::shipped().map(|d| d.join("assets").join("core"));
     match shipped {
         Some(s) if !dev && s.is_dir() => s,
         _ => source,
@@ -345,6 +365,7 @@ struct Applied {
     view: i32,
     language: String,
     gui_scale: u32,
+    advanced_tooltips: bool,
     /// Resource and shader packs: put into effect once their screens are closed, however.
     packs: (Vec<String>, Option<String>),
 }
@@ -373,7 +394,6 @@ impl App {
         let off = modloader::off_file(&self.opts.run_dir, self.opts.automated);
         let mods = modloader::load(&self.opts.mod_dirs, &self.opts.cache_dir, &off, &self.opts.mods_off)?;
         crate::config::set_automated(self.opts.automated);
-        crate::settings::migrate(&self.opts.run_dir);
         crate::config::load(&self.opts.run_dir);
         if self.opts.no_vsync {
             crate::config::override_for_run("core:vsync", "false");
@@ -414,6 +434,7 @@ impl App {
             height: size.height,
             vsync: crate::settings::vsync(),
             debug: self.opts.gpu_debug,
+            cache: Some(&self.opts.cache_dir),
         };
         // The chosen renderer, and the others if it can't start on this machine.
         let chosen = crate::settings::renderer();
@@ -453,6 +474,7 @@ impl App {
         let lang = Lang::load(&assets, &crate::settings::language(), self.opts.dev);
         let look = Look::new(&assets, &mod_ids(), &lang);
         let textures = GameTextures::new(&mut *gpu, content(), &assets);
+        crate::client::terrain_gpu::GpuTerrain::precompile(&mut *gpu, &assets);
         let ui = UiRenderer::new(&mut *gpu, &assets)?;
         let post = crate::post::Post::new(&mut *gpu, &assets);
         let mut input = Input::default();
@@ -474,6 +496,8 @@ impl App {
             world_list: CommandList::default(),
             after_list: CommandList::default(),
             input,
+            touches: Default::default(),
+            keyboard: false,
             settings,
             lang,
             languages: Vec::new(),
@@ -491,6 +515,7 @@ impl App {
             hud: {
                 let mut h = Hud::default();
                 h.load_layout(&self.opts.run_dir);
+                crate::touch::load(&self.opts.run_dir);
                 h
             },
             game: None,
@@ -518,6 +543,7 @@ impl App {
             world_dir: None,
             preview_shot: None,
             entering: None,
+            waiting_world: None,
             seen_since: None,
             hud_quads: 0..0,
             reload_requested: false,
@@ -559,10 +585,20 @@ impl App {
                     Some(s) => r.open(s),
                     None => log::warn!("--screen: no screen {name}"),
                 }
+            } else if !crate::modloader::newly_disabled().is_empty() {
+                r.open(screens::engine("core:disabled_mods"));
             }
         }
         Ok(r)
     }
+}
+
+/// The frame the world is drawn in: the screen's, or smaller (`core:render_scale`) to be
+/// stretched over it.
+fn world_frame(r: &Running, info: &weft_render::FrameInfo) -> weft_render::FrameInfo {
+    let scale = if r.game.is_some() && r.post.stretches() { crate::settings::render_scale().clamp(0.25, 1.0) } else { 1.0 };
+    let size = |n: u32| ((n as f32 * scale).round() as u32).max(1);
+    weft_render::FrameInfo { width: size(info.width), height: size(info.height), ..*info }
 }
 
 fn make_depth(gpu: &mut dyn Backend, w: u32, h: u32) -> (TextureId, u32, u32) {
@@ -603,15 +639,25 @@ impl Running {
             self.languages = Lang::available(&self.assets);
         }
         let mut ui = Ui::new();
-        s.build(&mut ui, &self.build_cx());
+        let depth = self.screens.len() + 1;
+        self.build_screen(&mut *s, &mut ui, depth);
         self.screens.push((s, ui));
         self.quads_dirty = true;
         self.set_capture(false);
     }
 
+    /// A screen's tree, and over it an X closing it as Escape would (`escape`): there is no Escape
+    /// on a phone, and on a computer it is one more way.
+    fn build_screen(&self, s: &mut dyn Screen, ui: &mut Ui, depth: usize) {
+        s.build(ui, &self.build_cx());
+        if s.escape_closes() && !s.draws_close() && (depth > 1 || self.game.is_some()) {
+            ui.container(Style::default().at_from([1.0, 0.0], -4.0, 4.0, [1.0, 0.0]), |ui| screens::close_button(ui, 16.0));
+        }
+    }
+
     fn rebuild_all(&mut self) {
         let mut screens = std::mem::take(&mut self.screens);
-        for (s, ui) in &mut screens {
+        for (depth, (s, ui)) in screens.iter_mut().enumerate() {
             let (hover, focus) = (ui.hovered, ui.focused);
             let focus_id = focus
                 .and_then(|f| ui.nodes.get(f))
@@ -625,7 +671,7 @@ impl Running {
                 })
                 .collect();
             ui.clear();
-            s.build(ui, &self.build_cx());
+            self.build_screen(&mut **s, ui, depth + 1);
             // Typed text survives rebuilds (language switch, resize).
             for (id, v, c) in inputs {
                 if let Some(n) = ui.find(&id) {
@@ -671,6 +717,47 @@ impl Running {
         self.input.captured = on;
     }
 
+    /// A finger on a touch screen (`touch`).
+    fn touch(&mut self, t: winit::event::Touch) {
+        // Off, a computer's touch screen is the system's mouse (Windows makes one of it); a phone
+        // has only fingers, which then still work the menus, the setting among them.
+        let controls = crate::settings::touch_controls();
+        if !controls && !cfg!(target_os = "android") {
+            return;
+        }
+        let world = controls && self.game.is_some() && self.screens.is_empty();
+        if world && !self.input.captured && t.phase == winit::event::TouchPhase::Started {
+            self.set_capture(true);
+        }
+        let at = Vec2::new(t.location.x as f32, t.location.y as f32);
+        let (scale, aim) = (self.gui_scale(), self.aim());
+        let hud = &self.hud;
+        let stick = hud.element_rect(crate::touch::STICK);
+        let element = |p| {
+            hud.element_at(p)
+                .and_then(|e| hud.element_rect(&e).map(|r| (e, r)))
+        };
+        self.touches
+            .finger(&mut self.input, t.id, t.phase, at, scale, world, aim, &element, stick);
+    }
+
+    /// What the crosshair is on, for what a finger on the view does.
+    fn aim(&self) -> crate::touch::Aim {
+        let Some(g) = &self.game else { return Default::default() };
+        let held = [g.client.shown_held(), g.client.off_held()];
+        crate::touch::Aim {
+            entity: g.client.target_entity.is_some(),
+            block: g.client.target.is_some(),
+            usable: g
+                .client
+                .target
+                .is_some_and(|h| content().block_of(h.state).usable()),
+            holding_item: held
+                .iter()
+                .any(|s| crate::content::use_ticks(content(), s) > 0),
+        }
+    }
+
     fn grab_cursor(&self) {
         let _ = self
             .window
@@ -700,6 +787,13 @@ impl Running {
         }
         for m in meta.missing_mods(content()) {
             log::warn!("the world was played with mod {m}, which is not loaded");
+        }
+        if self.gpu.compiling() {
+            log::info!("waiting for shaders to compile");
+            self.waiting_world = Some(meta);
+            self.screens.clear();
+            self.open(Box::new(screens::Compiling));
+            return;
         }
         let storage = saves::Storage::open(meta.clone(), content());
         let server = server::spawn(
@@ -815,6 +909,8 @@ impl Running {
                 Request::Open(s) => self.open(s),
                 Request::Close => self.close_top(),
                 Request::Quit => self.quit = true,
+                // A phone's app can't start itself again: it closes, to be opened again.
+                Request::Restart if cfg!(target_os = "android") => self.quit = true,
                 Request::Restart => {
                     match crate::paths::own_program().and_then(|exe| {
                         std::process::Command::new(exe)
@@ -894,6 +990,7 @@ impl Running {
                 Request::Respawn => {
                     if let Some(g) = &mut self.game {
                         g.client.send(net::ToServer::Respawn);
+                        g.client.dead = false;
                     }
                     self.close_screens(|s| s.closes_on_respawn());
                 }
@@ -1211,6 +1308,13 @@ impl Running {
             ui.pressed = hovered;
             ui.focused = hovered.filter(|&h| matches!(ui.nodes[h].kind, Kind::Input { .. } | Kind::Slider { .. }));
             ui.anchor = None;
+            if let Some(f) = ui.focused
+                && let Some(at) = self.ui.caret_at(ui, f, cursor)
+                && let Kind::Input { caret, .. } = &mut ui.nodes[f].kind
+            {
+                *caret = at;
+                self.quads_dirty = true;
+            }
             if let Some(h) = hovered {
                 if let Kind::Text(t) = &ui.nodes[h].kind {
                     let r = ui.nodes[h].rect;
@@ -1225,6 +1329,17 @@ impl Running {
                     match target.as_deref().map(|t| t.strip_prefix("open:").ok_or(t)) {
                         // A file or folder, opened with what the system opens it with.
                         Some(Ok(path)) => crate::packs::open_path(std::path::Path::new(path)),
+                        Some(Err(t)) if t.starts_with("suggest:") => {
+                            if let Some(n) = ui.find("chat") {
+                                if let Kind::Input { value, caret, max, on_change, .. } = &mut ui.nodes[n].kind {
+                                    *value = t["suggest:".len()..].chars().take(*max as usize).collect();
+                                    *caret = value.chars().count();
+                                    text_changed = on_change.as_ref().map(|cb| (cb.clone(), value.clone()));
+                                    ui.focused = Some(n);
+                                    ui.dirty = true;
+                                }
+                            }
+                        }
                         Some(Err(t)) => {
                             if let Some(n) = ui.find(t) {
                                 ui.focused = Some(n);
@@ -1273,8 +1388,9 @@ impl Running {
             self.quads_dirty = true;
         }
         if let Some(f) = ui.focused {
-            if let Kind::Input { value, caret, max, on_change } = &mut ui.nodes[f].kind {
-                let outcome = crate::ui::edit::Field { value, caret, anchor: &mut ui.anchor, max: *max }.handle(&self.input);
+            if let Kind::Input { value, caret, max, on_change, area } = &mut ui.nodes[f].kind {
+                let lines = area.is_some();
+                let outcome = crate::ui::edit::Field { value, caret, anchor: &mut ui.anchor, max: *max, lines }.handle(&self.input);
                 let (changed, moved) = (outcome.changed, outcome.moved);
                 if moved {
                     self.quads_dirty = true;
@@ -1307,12 +1423,13 @@ impl Running {
 
     /// Recipes of (or uses for) the item under the cursor, in any screen.
     fn recipe_keys(&mut self, requests: &mut Vec<Request>) {
-        let Some((_, ui)) = self.screens.last_mut() else { return };
+        let Some((screen, ui)) = self.screens.last_mut() else { return };
         let typing = ui
             .focused
             .is_some_and(|f| matches!(ui.nodes[f].kind, Kind::Input { .. }));
         for (action, uses) in [("core:recipes", false), ("core:uses", true)] {
-            if !typing && self.input.pressed(action) {
+            let right_click = uses && matches!(screen.name(), "core:recipes" | "core:tag") && self.input.pressed_button(1);
+            if !typing && (self.input.pressed(action) || right_click) {
                 if let Some(item) = crate::game_screens::hovered_item(ui, self.game.as_ref().map(|g| &g.client)) {
                     requests.push(Request::Open(Box::new(crate::game_screens::RecipeView::item(item, uses))));
                 }
@@ -1403,6 +1520,7 @@ impl Running {
             view: s::view_distance(),
             language: s::language(),
             gui_scale: s::gui_scale(),
+            advanced_tooltips: s::advanced_tooltips(),
             packs: (s::resource_packs(), s::shader_pack()),
         };
         if now.vsync != self.applied.vsync {
@@ -1419,7 +1537,7 @@ impl Running {
             self.look = Look::new(&self.assets, &mod_ids(), &self.lang);
         }
         s::apply_binds(&mut self.input);
-        if relang || now.gui_scale != self.applied.gui_scale {
+        if relang || now.gui_scale != self.applied.gui_scale || now.advanced_tooltips != self.applied.advanced_tooltips {
             self.rebuild_all();
         }
         // Not while choosing: every click would reload everything.
@@ -1668,7 +1786,8 @@ fn text_condition(text: &str, client: Option<&Client>, debug: bool, dev: bool) -
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
-        if self.run.is_some() {
+        if let Some(r) = &mut self.run {
+            r.gpu.set_surface(Some(&*r.window));
             return;
         }
         match self.start(el) {
@@ -1677,6 +1796,19 @@ impl ApplicationHandler for App {
                 self.error = Some(e);
                 el.exit();
             }
+        }
+    }
+
+    /// An Android app sent to the background: its window has no surface until it comes back.
+    fn suspended(&mut self, _el: &ActiveEventLoop) {
+        if let Some(r) = &mut self.run {
+            r.input.release_all();
+            r.touches = Default::default();
+            // At once: `pause` waits for a frame to take the world's picture, and none comes now.
+            if r.game.is_some() && r.screens.is_empty() {
+                r.open(screens::engine("core:pause"));
+            }
+            r.gpu.set_surface(None);
         }
     }
 
@@ -1703,13 +1835,17 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Focused(false) if !self.opts.automated => {
                 r.input.release_all();
+                r.touches = Default::default();
                 if r.game.is_some() && r.screens.is_empty() {
                     r.pause();
                 }
                 r.set_capture(false);
             }
+            WindowEvent::Touch(t) => r.touch(t),
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    // A phone's back button: what Escape does.
+                    let code = if code == KeyCode::BrowserBack { KeyCode::Escape } else { code };
                     match event.state {
                         ElementState::Pressed if event.repeat => r.input.key_repeat(Key::Code(code)),
                         ElementState::Pressed => r.input.key_down(Key::Code(code)),
@@ -1751,6 +1887,8 @@ impl ApplicationHandler for App {
                 r.input.cursor = Vec2::new(position.x as f32, position.y as f32);
             }
             WindowEvent::RedrawRequested => {
+                let aim = r.aim();
+                r.touches.tick(&mut r.input, aim);
                 if frame(r, &self.opts) || r.quit {
                     r.leave_world_silent();
                     el.exit();
@@ -1820,6 +1958,12 @@ fn frame(r: &mut Running, opts: &Options) -> bool {
     window_keys(r);
     r.screen_input(scale, &mut requests);
     r.handle(requests);
+    soft_keyboard(r);
+    if !r.gpu.compiling()
+        && let Some(meta) = r.waiting_world.take()
+    {
+        r.start_world(meta);
+    }
     update_game(r, dt, now);
     r.entity_ticks(dt as f32);
     r.client_packets();
@@ -1837,9 +1981,10 @@ fn frame(r: &mut Running, opts: &Options) -> bool {
     let Some(info) = r.gpu.begin_frame() else { return false };
     let t2 = Instant::now();
     r.prof[2] = t2.duration_since(t).as_secs_f32() * 1000.0;
-    if (r.depth.1, r.depth.2) != (info.width, info.height) {
+    let world = world_frame(r, &info);
+    if (r.depth.1, r.depth.2) != (world.width, world.height) {
         r.gpu.destroy_texture(r.depth.0);
-        r.depth = make_depth(&mut *r.gpu, info.width, info.height);
+        r.depth = make_depth(&mut *r.gpu, world.width, world.height);
     }
     // Block items in slots take the colors of the biome the player is in.
     let biome = r.game.as_ref().and_then(|g| {
@@ -1867,6 +2012,25 @@ fn frame(r: &mut Running, opts: &Options) -> bool {
     }
     count_fps(r);
     false
+}
+
+/// A phone's keyboard comes up while a text field has the focus (the chat) and goes away after.
+/// A computer's text comes with its keys: asking for an input method there would turn it into
+/// composition events instead.
+fn soft_keyboard(r: &mut Running) {
+    if !cfg!(target_os = "android") {
+        return;
+    }
+    let typing = r
+        .screens
+        .last()
+        .and_then(|(_, ui)| ui.focused.and_then(|f| ui.nodes.get(f)))
+        .map(|n| matches!(n.kind, Kind::Input { .. }))
+        .unwrap_or(false);
+    if typing != r.keyboard {
+        r.keyboard = typing;
+        r.window.set_ime_allowed(typing);
+    }
 }
 
 fn start_frame(r: &mut Running, opts: &Options, dt: f64) {
@@ -1937,6 +2101,9 @@ fn escape(r: &mut Running, requests: &mut Vec<Request>) {
 
 /// The debug overlay and what goes with it (F3 and F3 plus a key by default).
 fn debug_keys(r: &mut Running) {
+    if r.input.pressed("core:advanced_tooltips") {
+        crate::settings::set("advanced_tooltips", (!crate::settings::advanced_tooltips()) as u8 as f64);
+    }
     if r.input.pressed("core:debug") {
         r.debug = !r.debug;
         r.hud.invalidate();
@@ -1952,6 +2119,9 @@ fn debug_keys(r: &mut Running) {
     }
     if r.input.pressed("core:debug_options") && r.screens.is_empty() {
         r.open(screens::engine("core:debug_options"));
+    }
+    if let Some(g) = r.game.as_mut().filter(|_| r.input.pressed("core:relight")) {
+        g.client.relight();
     }
     for (key, group) in [("core:show_cubes", "cubes"), ("core:show_hitboxes", "hitboxes")] {
         if let Some(g) = r.game.as_mut().filter(|_| r.input.pressed(key)) {
@@ -2091,11 +2261,13 @@ fn client_events(r: &mut Running) {
                 r.open(Box::new(crate::game_screens::MenuScreen::new(kind)));
             }
             crate::client::ClientEvent::CloseMenu => r.close_screens(|s| s.shows_menu()),
-            crate::client::ClientEvent::Died => {
-                r.screens.clear();
-                r.open(screens::engine("core:death"));
-            }
         }
+    }
+    let dead = r.game.as_ref().is_some_and(|g| g.client.dead);
+    let shown = r.entering.as_ref().is_none_or(|e| e.shown.is_some());
+    if dead && shown && !r.screens.iter().any(|(s, _)| s.name() == "core:death") {
+        r.screens.clear();
+        r.open(screens::engine("core:death"));
     }
 }
 
@@ -2202,6 +2374,7 @@ fn refresh_hud(r: &mut Running) {
         {
             r.hud.set_edit(None);
         }
+        r.hud.knob = r.touches.knob();
         if r.hud
             .update(&g.client, r.debug, crate::settings::debug_groups(), chat_open, &r.lang, &r.input)
         {
@@ -2233,22 +2406,40 @@ fn layout_uis(r: &mut Running, scale: f32) -> f32 {
     // Whole physical pixels per pixel of the font's design.
     let p = r.ui.font.pixel;
     let text_unit = (scale * 0.5 * p).round().max(1.0) / (scale * p);
+    // A phone's keyboard covers the bottom of the window: screens are laid out above it, so the
+    // chat line stays in sight while it is typed in. The HUD keeps the whole window.
+    let screen_size = Vec2::new(gui_size.x, visible_height(r).map_or(gui_size.y, |h| (h / scale).min(gui_size.y)));
     {
-        let mut uis: Vec<&mut Ui> = Vec::new();
+        let mut uis: Vec<(&mut Ui, Vec2)> = Vec::new();
         if r.game.is_some() {
-            uis.push(&mut r.hud.ui);
+            uis.push((&mut r.hud.ui, gui_size));
         }
-        uis.extend(r.screens.iter_mut().map(|(_, u)| u));
-        for ui in uis {
-            if ui.dirty || ui.size != gui_size || ui.text_unit != text_unit {
+        uis.extend(r.screens.iter_mut().map(|(_, u)| (u, screen_size)));
+        for (ui, size) in uis {
+            if ui.dirty || ui.size != size || ui.text_unit != text_unit {
                 ui.text_unit = text_unit;
-                ui.layout(gui_size, &r.ui.font);
+                ui.layout(size, &r.ui.font);
                 ui.dirty = false;
                 r.quads_dirty = true;
             }
         }
     }
     text_unit
+}
+
+/// Physical pixels from the window's top down to what covers it (a phone's keyboard).
+fn visible_height(r: &Running) -> Option<f32> {
+    #[cfg(target_os = "android")]
+    {
+        use winit::platform::android::WindowExtAndroid;
+        let rect = r.window.content_rect();
+        (rect.bottom > rect.top).then_some(rect.bottom as f32)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = r;
+        None
+    }
 }
 
 fn build_ui_quads(r: &mut Running, scale: f32) {
@@ -2269,15 +2460,17 @@ fn build_ui_quads(r: &mut Running, scale: f32) {
     if with_hud {
         layers.push(&r.hud.ui);
     }
-    // Only the top screen shows, like vanilla: the ones under it are not drawn through its
-    // see-through overlay.
-    layers.extend(r.screens.last().map(|(_, u)| u));
+    let first = r
+        .screens
+        .iter()
+        .rposition(|(s, _)| !s.overlays())
+        .unwrap_or(0);
+    layers.extend(r.screens[first..].iter().map(|(_, ui)| ui));
     for ui in layers {
         let look = &r.look;
         let textures = &r.textures;
-        let unit = ui.text_unit;
         let mut custom = |ren: &mut UiRenderer, tag: u32, data: u64, rect: crate::ui::Rect, hovered: bool, icon: Option<u32>| {
-            crate::hud::draw_custom(ren, look, textures, client, tag, data, rect, hovered, icon, scale, unit);
+            crate::hud::draw_custom(ren, look, textures, client, tag, data, rect, hovered, icon, scale);
             if tag == crate::client::modui::TAG_ENTITY {
                 let inner = crate::ui::Rect { x: rect.x + scale, y: rect.y + scale, w: rect.w - 2.0 * scale, h: rect.h - 2.0 * scale };
                 previews.push([inner.x, inner.y, inner.w, inner.h]);
@@ -2441,10 +2634,11 @@ fn record_passes(r: &mut Running, info: &weft_render::FrameInfo, scale: f32) {
         .game
         .as_ref()
         .map_or([0.02, 0.02, 0.03, 1.0], |g| g.client.fog_color());
-    // Screen effects need the world in an image they can read.
+    // Screen effects need the world in an image they can read, and so does stretching it.
     effect_screens(r);
-    let post = r.post.on() && r.game.is_some();
-    let world_target = if post { Target::Texture(r.post.scene_target(&mut *r.gpu, info.width, info.height)) } else { Target::Surface };
+    let world = world_frame(r, info);
+    let post = r.game.is_some() && (r.post.on() || (world.width, world.height) != (info.width, info.height));
+    let world_target = if post { Target::Texture(r.post.scene_target(&mut *r.gpu, world.width, world.height)) } else { Target::Surface };
     if let Some(g) = &mut r.game {
         g.client
             .gpu_terrain
@@ -2456,17 +2650,20 @@ fn record_passes(r: &mut Running, info: &weft_render::FrameInfo, scale: f32) {
         g.client.update_wires(&mut *r.gpu, &r.textures);
     }
     // What the world's draws go by has to be done before its pass, and is known only making them.
-    let (mut world, mut after) = (std::mem::take(&mut r.world_list), std::mem::take(&mut r.after_list));
-    world.clear();
+    let (mut world_list, mut after) = (std::mem::take(&mut r.world_list), std::mem::take(&mut r.after_list));
+    world_list.clear();
     after.clear();
     if let Some(g) = &mut r.game {
         g.client
-            .render(&mut *r.gpu, &mut world, &mut after, &mut r.list, info, &r.textures);
+            .render(&mut *r.gpu, &mut world_list, &mut after, &mut r.list, &world, &r.textures);
     }
     r.list
         .push(Cmd::BeginPass { color: Some((world_target, Some(clear))), depth: Some((r.depth.0, Some(0.0))) });
-    r.list.append(&mut world);
+    r.list.append(&mut world_list);
     r.list.push(Cmd::EndPass);
+    // Between passes: a tiled GPU (phones) draws a pass all at once, so a mark inside one tells
+    // nothing there.
+    r.list.push(Cmd::Mark);
     // The solid world's depth: clouds and the hand would hide chunks behind them in the next frame.
     if let Some(g) = &mut r.game {
         g.client
@@ -2480,7 +2677,7 @@ fn record_passes(r: &mut Running, info: &weft_render::FrameInfo, scale: f32) {
         r.list.append(&mut after);
         r.list.push(Cmd::EndPass);
     }
-    (r.world_list, r.after_list) = (world, after);
+    (r.world_list, r.after_list) = (world_list, after);
     if post {
         r.post.apply(&mut *r.gpu, &mut r.list, info);
     } else {
@@ -2512,13 +2709,16 @@ fn report_frame(r: &mut Running, dt: f64) {
         if b.done() {
             let extra = match &r.game {
                 Some(g) => format!(
-                    "pos {:.1} {:.1} {:.1}, cubes {}, draws {}, faces {}k, entities {}, regions {}",
+                    "pos {:.1} {:.1} {:.1}, cubes {}, draws {}, faces {}k, lod {} tiles {}k quads {}k drawn, entities {}, regions {}",
                     g.client.player.pos.x,
                     g.client.player.pos.y,
                     g.client.player.pos.z,
                     g.client.world.len(),
                     g.client.render.drawn,
                     g.client.render.faces_drawn / 1000,
+                    g.client.lod_stats().0,
+                    g.client.lod_stats().2 / 1000,
+                    g.client.render.lod_drawn / 1000,
                     g.client.entities.len(),
                     g.server.as_ref().map_or(0, |s| s.regions())
                 ),

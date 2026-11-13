@@ -9,6 +9,7 @@ pub mod energy;
 pub mod entity;
 pub(crate) mod extend;
 pub mod forced;
+mod guard;
 pub mod holder;
 mod liquid;
 mod load;
@@ -25,6 +26,7 @@ use load::send_far;
 use player_file::save_player;
 pub mod menu;
 pub mod persist;
+mod placing;
 pub mod regions;
 pub mod riding;
 pub mod structure;
@@ -385,6 +387,12 @@ impl Server {
             },
             _ => log::info!("commands here: stop, list, say <text>, op <player> [level], deop <player>"),
         }
+    }
+
+    /// Where `/structure save` writes and `load` reads: `structures/` beside the saves.
+    pub fn structures_dir(&self) -> Option<std::path::PathBuf> {
+        let dir = self.storage.as_ref()?.lock().meta.dir.clone();
+        Some(dir.parent()?.parent()?.join("structures"))
     }
 
     pub fn new(cfg: ServerConfig, incoming: Receiver<ServerConn>, storage: Option<Storage>, shared: Arc<Shared>) -> Server {
@@ -1373,25 +1381,6 @@ impl Server {
     }
 }
 
-/// The nearest structure `name` of dimension `dim` within `radius` of `pos`: its lowest corner.
-pub fn structure_near(c: &Content, dim: u32, seed: u64, name: &str, pos: IVec3, radius: i32) -> Option<IVec3> {
-    let def = &c.dims[dim as usize];
-    let s = def.scatters.iter().find(|s| s.name == name)?;
-    let cells = |v: i32| (v - radius).div_euclid(s.cell)..=(v + radius).div_euclid(s.cell);
-    let mut best: Option<IVec3> = None;
-    for cz in cells(pos.z) {
-        for cx in cells(pos.x) {
-            if let Some((a, ..)) = dim::scatter_site(def, c, s, seed, (cx, cz)) {
-                let d = |p: IVec3| (p - pos).with_y(0).as_vec3().length();
-                if d(a) <= radius as f32 && best.is_none_or(|b| d(a) < d(b)) {
-                    best = Some(a);
-                }
-            }
-        }
-    }
-    best
-}
-
 /// Items in an entity's equipment slots that show on the model.
 fn worn_of(c: &Content, ents: &entity::Entities, id: u64) -> Vec<u32> {
     let Some(e) = ents.get(id) else { return Vec::new() };
@@ -1409,7 +1398,7 @@ fn worn_of(c: &Content, ents: &entity::Entities, id: u64) -> Vec<u32> {
         .collect()
 }
 
-fn serialize(c: &Content, d: &Dim, ids: &[u64]) -> Vec<u8> {
+pub(super) fn serialize(c: &Content, d: &Dim, ids: &[u64]) -> Vec<u8> {
     // What is on a body comes right after it, for it to be there when those are read back.
     let ids: Vec<u64> = ids
         .iter()

@@ -40,6 +40,11 @@ pub enum In {
         specs: Vec<String>,
         all: bool,
     },
+    /// Every cube held within `reach` cubes of `center` lit again from nothing (`area::relight_anew`).
+    Relight {
+        center: IVec3,
+        reach: i32,
+    },
     /// What came from the server in one frame, handled in one round (one batch out).
     Many(Vec<In>),
 }
@@ -520,6 +525,19 @@ impl Terrain {
                         self.edited.push(p);
                     }
                 }
+                self.emit_all(dirty);
+            }
+            In::Relight { center, reach } => {
+                let start = std::time::Instant::now();
+                let set: Vec<IVec3> = self
+                    .cubes
+                    .keys()
+                    .filter(|p| (**p - center).abs().max_element() <= reach)
+                    .copied()
+                    .collect();
+                let mut dirty = FxHashSet::default();
+                area::relight_anew(c, self.dim, &mut self.cubes, &mut dirty, &set);
+                log::info!("relit {} cubes ({} changed) in {:.0} ms", set.len(), dirty.len(), start.elapsed().as_secs_f64() * 1000.0);
                 self.emit_all(dirty);
             }
         }

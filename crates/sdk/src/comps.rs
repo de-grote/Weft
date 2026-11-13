@@ -2,6 +2,12 @@
 //! is a weather's. The builders' methods set them; `r.edit(&X).set(&comps::..)` changes one of
 //! another mod's, and the engine reads them when the game loads (absent: its default).
 
+pub static BLOCKS_ATTACKS: crate::Component<crate::Blocking> = crate::Component::named(crate::abi::comp::BLOCKS_ATTACKS);
+pub static DISABLE_BLOCKING: crate::Component<f32> = crate::Component::named(crate::abi::comp::DISABLE_BLOCKING);
+pub static CATCH_PROJECTILES: crate::Component<crate::ProjectileCatch> = crate::Component::named(crate::abi::comp::CATCH_PROJECTILES);
+pub static EMBEDDED_PROJECTILES: crate::Component<Vec<crate::EmbeddedProjectile>> =
+    crate::Component::named(crate::abi::comp::EMBEDDED_PROJECTILES);
+
 /// What a weather is made of: rain's look and flags where nothing is set.
 pub mod weather {
     use crate::abi::comp::weather as w;
@@ -74,6 +80,7 @@ pub mod damage_cause {
     use crate::kind::DamageCause;
     use crate::{Component, Tag, Text};
     pub static BYPASSES_ARMOR: Tag<DamageCause> = Tag::named(d::BYPASSES_ARMOR);
+    pub static BYPASSES_BLOCKING: Tag<DamageCause> = Tag::named(d::BYPASSES_BLOCKING);
     pub static PIERCES_INVULNERABLE: Tag<DamageCause> = Tag::named(d::PIERCES_INVULNERABLE);
     pub static IGNORES_COOLDOWN: Tag<DamageCause> = Tag::named(d::IGNORES_COOLDOWN);
     pub static BURNING: Tag<DamageCause> = Tag::named(d::BURNING);
@@ -292,6 +299,7 @@ pub mod hud_element {
     pub static ANCHOR: Component<Text, HudElement> = Component::named(h::ANCHOR);
     pub static ORDER: Component<i32, HudElement> = Component::named(h::ORDER);
     pub static CALL: Component<crate::abi::Callback, HudElement> = Component::named(h::CALL);
+    pub static REBUILD: Component<crate::abi::Callback, HudElement> = Component::named(h::REBUILD);
 }
 
 /// What a screen part is made of.
@@ -337,6 +345,7 @@ pub mod recipe {
     pub static COUNT: Component<u32, Recipe> = Component::named(r::COUNT);
     pub static TIME: Component<u32, Recipe> = Component::named(r::TIME);
     pub static OUTPUTS: Component<Vec<crate::abi::LootPool>, Recipe> = Component::named(r::OUTPUTS);
+    pub static USES: Component<Vec<crate::abi::RecipeUse>, Recipe> = Component::named(r::USES);
 }
 
 /// What a loot table is made of.
@@ -357,19 +366,43 @@ pub mod common {
     pub static Y: Component<[i32; 2], Placement> = Component::named(c::Y);
 }
 
-/// What an ore is made of (`abi::comp::ore`).
-pub mod ore {
-    use crate::Component;
-    use crate::abi::{self, comp::ore as o};
-    use crate::kind::Ore;
-    pub static VEINS: Component<u32, Ore> = Component::named(o::VEINS);
-    pub static SIZE: Component<u32, Ore> = Component::named(o::SIZE);
-    pub static SHAPE: Component<abi::VeinShape, Ore> = Component::named(o::SHAPE);
-    pub static STEPS: Component<Vec<abi::ShapeStep>, Ore> = Component::named(o::STEPS);
-    pub static HEIGHT: Component<abi::OreHeight, Ore> = Component::named(o::HEIGHT);
-    pub static REPLACES: Component<crate::Matcher, Ore> = Component::named(o::REPLACES);
-    pub static REPLACES_WITH: Component<Vec<abi::OreVariant>, Ore> = Component::named(o::REPLACES_WITH);
-    pub static EXPOSED: Component<f32, Ore> = Component::named(o::EXPOSED);
+/// What a feature is made of (`abi::comp::feature`).
+pub mod feature {
+    use crate::abi::{self, comp::feature as f};
+    use crate::kind::Feature;
+    use crate::{Component, Tag, Text};
+    pub static STAGE: Component<u32, Feature> = Component::named(f::STAGE);
+    pub static AFTER: Component<Vec<String>, Feature> = Component::named(f::AFTER);
+    pub static BEFORE: Component<Vec<String>, Feature> = Component::named(f::BEFORE);
+    pub static SPREAD: Component<u32, Feature> = Component::named(f::SPREAD);
+    pub static COUNT: Component<u32, Feature> = Component::named(f::COUNT);
+    pub static HEIGHT: Component<abi::HeightCurve, Feature> = Component::named(f::HEIGHT);
+    pub static SPACING: Component<i32, Feature> = Component::named(f::SPACING);
+    pub static CHANCE: Component<f32, Feature> = Component::named(f::CHANCE);
+    pub static DENSITY: Component<Text, Feature> = Component::named(f::DENSITY);
+    pub static GROUND: Component<crate::Matcher, Feature> = Component::named(f::GROUND);
+    pub static OVER_WATER: Tag<Feature> = Tag::named(f::OVER_WATER);
+    pub static OVER_CAVES: Tag<Feature> = Tag::named(f::OVER_CAVES);
+    pub static MAX_SLOPE: Component<i32, Feature> = Component::named(f::MAX_SLOPE);
+    pub static BURIED: Component<i32, Feature> = Component::named(f::BURIED);
+    pub static PRIORITY: Component<i32, Feature> = Component::named(f::PRIORITY);
+    pub static SEPARATION: Component<i32, Feature> = Component::named(f::SEPARATION);
+    pub static GENERATE: Component<abi::Callback, Feature> = Component::named(f::GENERATE);
+    pub static SHAPE: Component<u32, Feature> = Component::named(f::SHAPE);
+    pub static VEIN: Component<abi::VeinShape, Feature> = Component::named(f::VEIN);
+    pub static SIZE: Component<u32, Feature> = Component::named(f::SIZE);
+    pub static STEPS: Component<Vec<abi::ShapeStep>, Feature> = Component::named(f::STEPS);
+    pub static TEMPLATE: Component<Text, Feature> = Component::named(f::TEMPLATE);
+    pub static TRANSFORMS: Component<u32, Feature> = Component::named(f::TRANSFORMS);
+    pub static PALETTES: Component<Vec<String>, Feature> = Component::named(f::PALETTES);
+    pub static PLAN: Component<abi::Callback, Feature> = Component::named(f::PLAN);
+    pub static REACH: Component<[i32; 3], Feature> = Component::named(f::REACH);
+    pub static BLOCK: Component<Text, Feature> = Component::named(f::BLOCK);
+    pub static REPLACES: Component<crate::Matcher, Feature> = Component::named(f::REPLACES);
+    pub static REPLACES_WITH: Component<Vec<abi::Variant>, Feature> = Component::named(f::REPLACES_WITH);
+    pub static EXPOSED: Component<f32, Feature> = Component::named(f::EXPOSED);
+    pub static FOUNDATION: Component<Text, Feature> = Component::named(f::FOUNDATION);
+    pub static CLEAR_ABOVE: Tag<Feature> = Tag::named(f::CLEAR_ABOVE);
 }
 
 /// How a liquid flows and looks from inside (`abi::comp::liquid`).
@@ -399,43 +432,24 @@ pub mod reaction {
     pub static FALLS_INTO: Component<Text, Reaction> = Component::named(r::FALLS_INTO);
 }
 
-/// What a scatter is made of (`abi::comp::scatter`).
-pub mod scatter {
-    use crate::abi::comp::scatter as s;
-    use crate::kind::Scatter;
-    use crate::{Component, Text};
-    pub static CELL: Component<i32, Scatter> = Component::named(s::CELL);
-    pub static REACH: Component<i32, Scatter> = Component::named(s::REACH);
-    pub static REACH_UP: Component<i32, Scatter> = Component::named(s::REACH_UP);
-    pub static REACH_DOWN: Component<i32, Scatter> = Component::named(s::REACH_DOWN);
-    pub static DENSITY: Component<Text, Scatter> = Component::named(s::DENSITY);
-    pub static GROUND: Component<crate::Matcher, Scatter> = Component::named(s::GROUND);
-    pub static SHAPE: Component<crate::abi::Callback, Scatter> = Component::named(s::SHAPE);
-}
-
-/// What a decoration runs.
-pub mod decoration {
-    use crate::Component;
-    use crate::kind::Decoration;
-    pub static GENERATE: Component<crate::abi::Callback, Decoration> = Component::named(crate::abi::comp::decoration::GENERATE);
-}
-
-/// How often a structure comes (`abi::comp::structure`).
-pub mod structure {
-    use crate::Component;
-    use crate::abi::comp::structure as s;
-    use crate::kind::Structure;
-    pub static SPACING: Component<u32, Structure> = Component::named(s::SPACING);
-    pub static CHANCE: Component<f32, Structure> = Component::named(s::CHANCE);
-    pub static BURIED: Component<i32, Structure> = Component::named(s::BURIED);
-    pub static TURNS: crate::Tag<Structure> = crate::Tag::named(s::TURNS);
-}
-
-/// A template's blocks.
+/// A template's blocks and what else it holds (`abi::comp::template`).
 pub mod template {
     use crate::Component;
+    use crate::abi::{self, comp::template as t};
     use crate::kind::Template;
-    pub static BLOCKS: Component<Vec<crate::abi::TemplateBlock>, Template> = Component::named(crate::abi::comp::template::BLOCKS);
+    pub static BLOCKS: Component<Vec<abi::TemplateBlock>, Template> = Component::named(t::BLOCKS);
+    pub static SLOTS: Component<Vec<abi::PaletteSlot>, Template> = Component::named(t::SLOTS);
+    pub static ENTITIES: Component<Vec<abi::TemplateEntity>, Template> = Component::named(t::ENTITIES);
+    pub static LOOT: Component<Vec<abi::TemplateLoot>, Template> = Component::named(t::LOOT);
+    pub static DATA: Component<Vec<abi::TemplateData>, Template> = Component::named(t::DATA);
+    pub static JOINTS: Component<Vec<abi::TemplateJoint>, Template> = Component::named(t::JOINTS);
+}
+
+/// The blocks a palette fills slots with (`abi::comp::palette`).
+pub mod palette {
+    use crate::Component;
+    use crate::kind::Palette;
+    pub static SLOTS: Component<Vec<crate::abi::PaletteSlot>, Palette> = Component::named(crate::abi::comp::palette::SLOTS);
 }
 
 /// What a natural spawning rule is made of (`abi::comp::spawn`).
@@ -462,8 +476,8 @@ pub mod terrain {
     pub static SEA: Component<abi::TerrainSea, Terrain> = Component::named(t::SEA);
     pub static CAVES: Component<abi::TerrainCaves, Terrain> = Component::named(t::CAVES);
     pub static FIELDS: Component<Vec<abi::TerrainField>, Terrain> = Component::named(t::FIELDS);
-    pub static FEATURES: Component<Vec<abi::TerrainFeature>, Terrain> = Component::named(t::FEATURES);
-    pub static MASKS: Component<Vec<abi::FeatureMask>, Terrain> = Component::named(t::MASKS);
+    pub static LANDFORMS: Component<Vec<abi::Landform>, Terrain> = Component::named(t::LANDFORMS);
+    pub static MASKS: Component<Vec<abi::LandformMask>, Terrain> = Component::named(t::MASKS);
     pub static RULES: Component<Vec<abi::BiomeRule>, Terrain> = Component::named(t::RULES);
     pub static RULE_EDITS: Component<Vec<abi::BiomeRule>, Terrain> = Component::named(t::RULE_EDITS);
     pub static CAVE_BIOMES: Component<Vec<abi::CaveBiome>, Terrain> = Component::named(t::CAVE_BIOMES);
@@ -588,6 +602,7 @@ pub mod entity {
     pub static BLOCK: Component<Text, Entity> = Component::named(e::BLOCK);
     pub static SEATS: Component<Vec<abi::Seat>, Entity> = Component::named(e::SEATS);
     pub static PROJECTILE: Component<abi::Projectile, Entity> = Component::named(e::PROJECTILE);
+    pub static HITBOXES: Component<abi::Hitboxes, Entity> = Component::named(e::HITBOXES);
     pub static LIGHT_AT: Component<[f32; 3], Entity> = Component::named(e::LIGHT_AT);
     pub static SHOWN_SLOTS: Component<Vec<u32>, Entity> = Component::named(e::SHOWN_SLOTS);
     pub static ATTACH: Component<Vec<abi::Attach>, Entity> = Component::named(e::ATTACH);

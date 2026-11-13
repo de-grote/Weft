@@ -1,0 +1,11 @@
+# Status effects and potions
+
+
+
+## Status effects
+
+A status effect is a few attribute modifiers and hazards with an icon, nothing more: `r.entity_effect(&SPEED).icon("mob_effect/speed").color(0x33EBFF).beneficial().modifier(Modifier::percent(&attribute::MOVEMENT_SPEED, 0.2))`. The icon (18 pixels square, `textures/mob_effect/speed.png` here) puts it on the HUD and in the list beside the inventory, named `effect.<namespace>.<name>` in lang; the color gives the swirls everyone sees around who has it. Each modifier runs once a level and each hazard's damage goes times the level, so speed II is +40%; `modifier_at(level, ..)` and `hazard_at(level, ..)` give one level its own instead (mining fatigue's steep steps, poison hurting twice as often a level), for that attribute only, and the levels past the highest given go as that one. A `Modifier::set` sets the same at every level. `.on_tick(|t| for (id, level) in t.iter() { .. })` is code every tick with everyone who has it (your own levitation, a mana drain). `actions::EFFECT` asks before one takes hold and tells after, `EFFECT_ENDED` when it ran out or was taken off, and a kind tagged `immune_effect/base:poison` never takes it (base's undead). A hazard with negative damage heals (regeneration), `.instant()` makes an effect act once when given (healing), `.screen(&SHADER)` lays a `shaders/post` shader over what its player sees (blindness, nausea), `.hides()` keeps its entity from being drawn for others (invisibility). `w.entity_effect(id, &SPEED, level, ticks)` gives one (`abi::INFINITE_TICKS` for good, shown as infinity), `w.effects(id)` lists them, `/effect give @s base:speed 30 2` (or `infinite` for the seconds) and `/effect clear @s` do the same from the chat. They are saved with the entity, by name and with the ticks left, go with it to other dimensions and end when it dies. Base has vanilla's, `base::effects`.
+
+## Potions
+
+A potion is an item and nothing else: `r.item(&SWIFTNESS).use_ticks(32).gives_effect(&SPEED, 1, 180.0).remainder(&GLASS_BOTTLE)` is drunk in 32 ticks, gives speed for three minutes and leaves the bottle (`f32::INFINITY` seconds: for good). With an `on_use` of its own (food eaten) it gives them when that use goes through: a golden apple.

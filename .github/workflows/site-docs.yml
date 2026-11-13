@@ -1,0 +1,30 @@
+name: site-docs
+
+# Tells the website repository to rebuild its docs when the pages or the SDK's doc comments change.
+# Needs the secret WEBSITE_TOKEN (a fine-grained token with write access to Contents of
+# Weft-Rust/Weft-Website). Without it nothing happens here and the website's own schedule picks the
+# change up within half an hour.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "docs/**"
+      - "crates/sdk/**"
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch
+        env:
+          TOKEN: ${{ secrets.WEBSITE_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "no WEBSITE_TOKEN, the website rebuilds on its schedule"
+            exit 0
+          fi
+          curl -sS -f -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/Weft-Rust/Weft-Website/dispatches \
+            -d '{"event_type":"docs-changed"}'

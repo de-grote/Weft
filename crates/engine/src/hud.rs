@@ -34,6 +34,10 @@ enum Part {
     DebugMod(usize),
     DebugHelp,
     Mod(weft_abi::ModId, weft_abi::Callback),
+    /// `touch::buttons()[i]`.
+    Touch(usize),
+    /// Where a finger steers from (`touch::STICK`).
+    Stick,
 }
 pub const TAG_CROSSHAIR: u32 = 2;
 /// A status effect's icon in its frame (`data` the effect), fading its last ten seconds.
@@ -230,6 +234,9 @@ pub fn line_id(key: &str) -> &str {
 
 /// What the editor calls element `name`: `hud.element.<ns>.<name>`, else the name itself.
 pub fn element_title(lang: &Lang, name: &str) -> Vec<text::Span> {
+    if let Some(action) = crate::touch::action_of(name) {
+        return text::Msg::new("hud.element.touch", vec![crate::touch::action_name(action)]).spans(lang, None);
+    }
     let key = text::lang_key("hud.element", name);
     if let Some(m) = mod_debug_groups().iter().find(|m| m.3 == name) {
         return text::rich(lang.get(m.0), lang, None);
@@ -250,13 +257,16 @@ struct Placed {
 #[derive(Default)]
 pub struct Hud {
     pub ui: Ui,
-    key: Option<(bool, usize, [u32; 3], bool, bool, u32, u8, (i32, i32), (u32, u32, u8), u64)>,
+    revisions: Vec<u64>,
+    key: Option<(bool, usize, [u32; 3], bool, bool, u32, u8, (i32, i32), (u32, u32, u8), u64, (bool, [i32; 2], u64))>,
     /// Player overrides from `config/hud.txt` by element name.
     layout: rustc_hash::FxHashMap<String, Placement>,
     file: std::path::PathBuf,
     edit: Option<Edit>,
     /// The elements of the current tree.
     names: Vec<String>,
+    /// Where the joystick's knob is from its middle (`touch::Touches::knob`).
+    pub knob: glam::Vec2,
 }
 
 impl Hud {
@@ -353,6 +363,19 @@ impl Hud {
     /// `chat_open`: the chat screen shows the messages itself.
     /// `groups`: bit per `DEBUG_GROUPS` entry shown with the debug overlay.
     pub fn update(&mut self, client: &Client, debug: bool, groups: u32, chat_open: bool, lang: &Lang, input: &crate::input::Input) -> bool {
+        let huds = &content().game.huds;
+        self.revisions.resize(huds.len(), 0);
+        let mut view = modui::ClientView::new(Some(client));
+        for (h, previous) in huds.iter().zip(&mut self.revisions) {
+            if let Some((owner, cb)) = h.rebuild {
+                let mut args = weft_abi::UiRevisionArgs { client: view.raw(), revision: 0 };
+                crate::host::invoke(owner, cb, &mut args);
+                if *previous != args.revision {
+                    *previous = args.revision;
+                    self.key = None;
+                }
+            }
+        }
         let now = std::time::Instant::now();
         let chat_visible = if chat_open {
             0
@@ -395,6 +418,8 @@ impl Hud {
             h.wrapping_mul(31)
                 .wrapping_add((f.0 as u64) << 8 | f.1 as u64)
         });
+        let (touch, knob) = (crate::settings::touch_controls(), self.knob);
+        let touch_buttons = if touch { crate::touch::buttons() } else { Vec::new() };
         let key = (
             debug,
             chat_visible,
@@ -406,6 +431,7 @@ impl Hud {
             size,
             (held.item, held.data, fade),
             shown_steps,
+            (touch, knob.round().as_ivec2().to_array(), crate::touch::generation()),
         );
         if self.key == Some(key) {
             return false;
@@ -443,6 +469,13 @@ impl Hud {
             ("core:chat".into(), CHAT.into(), 0, Part::Chat),
             ("core:debug.help".into(), a::DEBUG_LEFT.into(), i32::MAX, Part::DebugHelp),
         ];
+        if touch {
+            all.push((crate::touch::STICK.into(), a::BOTTOM_LEFT.into(), 0, Part::Stick));
+            for (i, b) in touch_buttons.iter().enumerate() {
+                let (anchor, order) = crate::touch::place(&b.action, i);
+                all.push((crate::touch::element(&b.action), anchor.into(), order, Part::Touch(i)));
+            }
+        }
         for (i, p) in places()
             .iter()
             .enumerate()
@@ -574,6 +607,39 @@ impl Hud {
                 modui::build(ui, lang, Some(input), o, cb, Some(client))
             }),
             Part::DebugHelp => debug_help(ui, groups, align, &mods_debug),
+            Part::Touch(i) => {
+                let b = &touch_buttons[i];
+                ui.panel("touch_button", Style::default().size(b.size, b.size).center(), |ui| {
+                    match crate::touch::label(input, &b.action) {
+                        crate::touch::Label::Icon(icon) => {
+                            let side = (b.size * 0.6).round();
+                            ui.add(
+                                Kind::Image { texture: format!("core:gui/{icon}"), color: 0xFFFFFFC0 },
+                                Style::default().size(side, side),
+                            );
+                        }
+                        crate::touch::Label::Text(name) => {
+                            let t = ui.text(text::plain(&name), "label");
+                            // As big as fits: the font's cells are 6 by 8 pixels.
+                            let fit = (b.size * 0.8 / (6.0 * name.chars().count().max(1) as f32)).min(b.size * 0.5 / 8.0);
+                            if let Some(t) = ui.text_mut(t) {
+                                t.wrap = false;
+                                t.scale = fit.floor().max(1.0);
+                            }
+                        }
+                    }
+                });
+            }
+            Part::Stick => {
+                let side = crate::touch::stick_size();
+                ui.panel("touch_stick", Style::default().size(side, side), |ui| {
+                    let knob_side = side * (1.0 - 2.0 * crate::touch::KNOB_REACH);
+                    let at = Style::default()
+                        .size(knob_side, knob_side)
+                        .at_from([0.5, 0.5], knob.x, knob.y, [0.5, 0.5]);
+                    ui.add(Kind::Container { class: Some("touch_knob".into()) }, at);
+                });
+            }
         };
         let selected = edit.as_ref().and_then(|e| e.selected.clone());
         let labels = edit.as_ref().is_some_and(|e| e.labels);
@@ -594,6 +660,13 @@ impl Hud {
             draw(ui, e.part, align);
             if editing && ui.nodes[id].children.is_empty() {
                 ui.nodes[id].style.min = [40.0, 9.0];
+            }
+            // Touch controls are sized by their corner (`HudEditor`), which this shows.
+            if editing && crate::touch::is_touch(&e.name) {
+                let handle = Style::default()
+                    .size(HANDLE, HANDLE)
+                    .at_from([1.0, 0.0], 0.0, 0.0, [0.5, 0.5]);
+                ui.add(Kind::Container { class: Some("touch_handle".into()) }, handle);
             }
             if labels {
                 let t = ui.text(element_title(lang, &e.name), "debug");
@@ -628,6 +701,7 @@ impl Hud {
             stack(ui, &[a::DEBUG_LEFT, a::TOP_LEFT], false, Style::default().w(0.0).grow(), Align::Start);
             stack(ui, &[a::DEBUG_RIGHT, a::TOP_RIGHT], false, Style::default().w(0.0).grow(), Align::End);
         });
+        stack(ui, &[a::TOP_CENTER], false, Style::default().at(window.x / 2.0, 4.0, [0.5, 0.0]), Align::Center);
         for e in at(CENTER, false) {
             emit(ui, e, Style::default().self_align(Align::Center), Align::Start);
         }
@@ -689,6 +763,9 @@ impl Hud {
         true
     }
 }
+
+/// GUI pixels: the side of the corner a touch control is sized by in the editor.
+pub const HANDLE: f32 = 8.0;
 
 /// The engine's own anchors, which mods have no use for.
 const CENTER: &str = "core:center";
@@ -997,7 +1074,6 @@ pub fn draw_custom(
     hovered: bool,
     icon: Option<u32>,
     scale: f32,
-    text_unit: f32,
 ) {
     match tag {
         TAG_CROSSHAIR => loaded(ren, look, "crosshair", r, scale),
@@ -1028,29 +1104,36 @@ pub fn draw_custom(
                 .get(data as usize)
                 .copied()
                 .unwrap_or_default();
-            stack_icon(ren, textures, r, stack, scale, text_unit);
+            ren.defer_stack(r, stack);
         }
         TAG_ENTITY => {
             // Inset frame; the model itself is drawn in a later pass.
             loaded(ren, look, "well", r, scale);
         }
-        modui::TAG_ICON => stack_icon(ren, textures, r, ItemStack::new(data as u32, 1), scale, text_unit),
+        crate::editor::TAG_BLOCK => {
+            if let Some(c) = crate::content::try_content() {
+                crate::editor::draw_block(ren, c, textures, r, data);
+            }
+        }
+        crate::editor::TAG_PICTURE => ren.picture_icon(textures, r, data as u32),
+        modui::TAG_ICON => ren.defer_stack(r, ItemStack::new(data as u32, 1)),
         modui::TAG_CREATIVE => {
             slot_background(ren, look, "slot", r, false, scale);
-            stack_icon(ren, textures, r, ItemStack::new(data as u32, 1), scale, text_unit);
             if hovered {
-                loaded(
-                    ren,
-                    look,
-                    "slot_highlight",
-                    Rect { x: r.x + scale, y: r.y + scale, w: r.w - 2.0 * scale, h: r.h - 2.0 * scale },
-                    scale,
-                );
+                slot_highlight(ren, look, r, scale);
             }
+            ren.defer_stack(r, ItemStack::new(data as u32, 1));
         }
         TAG_SLOT => {
             let Some(client) = client else { return };
             slot_background(ren, look, "slot", r, false, scale);
+            let dragged = client
+                .drag
+                .as_ref()
+                .is_some_and(|d| d.1.contains(&(data as u32)));
+            if hovered || dragged {
+                slot_highlight(ren, look, r, scale);
+            }
             let stack = client
                 .menu
                 .as_ref()
@@ -1061,23 +1144,15 @@ pub fn draw_custom(
                 let s = 16.0 * scale;
                 ren.image(Rect { x: r.x + (r.w - s) / 2.0, y: r.y + (r.h - s) / 2.0, w: s, h: s }, t, [0.0, 0.0, 1.0, 1.0], 0xFFFFFFFF);
             }
-            stack_icon(ren, textures, r, stack, scale, text_unit);
-            let dragged = client
-                .drag
-                .as_ref()
-                .is_some_and(|d| d.1.contains(&(data as u32)));
-            if hovered || dragged {
-                loaded(
-                    ren,
-                    look,
-                    "slot_highlight",
-                    Rect { x: r.x + scale, y: r.y + scale, w: r.w - 2.0 * scale, h: r.h - 2.0 * scale },
-                    scale,
-                );
-            }
+            ren.defer_stack(r, stack);
         }
         _ => {}
     }
+}
+
+/// A slot under the cursor or dragged over: lit inside its frame, behind what it holds.
+fn slot_highlight(ren: &mut UiRenderer, look: &Look, r: Rect, scale: f32) {
+    loaded(ren, look, "slot_highlight", Rect { x: r.x + scale, y: r.y + scale, w: r.w - 2.0 * scale, h: r.h - 2.0 * scale }, scale);
 }
 
 /// A stack in `r` (`UiRenderer::stack_icon`).
@@ -1090,7 +1165,9 @@ pub fn stack_icon(ren: &mut UiRenderer, textures: &GameTextures, r: Rect, stack:
 pub fn slot_background(ren: &mut UiRenderer, look: &Look, class: &str, r: Rect, selected: bool, scale: f32) {
     loaded(ren, look, class, r, scale);
     if selected {
-        loaded(ren, look, "hotbar_selected", Rect { x: r.x - scale, y: r.y - scale, w: r.w + 2.0 * scale, h: r.h + 2.0 * scale }, scale);
+        ren.defer_overlay(|ren| {
+            loaded(ren, look, "hotbar_selected", Rect { x: r.x - scale, y: r.y - scale, w: r.w + 2.0 * scale, h: r.h + 2.0 * scale }, scale)
+        });
     }
 }
 
@@ -1207,6 +1284,13 @@ pub fn item_tooltip(lang: &Lang, input: &crate::input::Input, stack: weft_abi::I
         let damage = crate::stack::damage(&stack);
         line(lang.get("tooltip.durability"), &[text::Arg::Int((max - damage.min(max)) as i64), text::Arg::Int(max as i64)], None, &mut out);
     }
+    if crate::settings::advanced_tooltips() {
+        let id = &c.items[stack.item as usize].name;
+        line("{color:tooltip_dim}{0}{/}", &[text::Arg::Text(id.clone())], None, &mut out);
+        if let Some((ns, _)) = id.split_once(':') {
+            line("{#5555ff}{0}{/}", &[text::Arg::Name(text::Name::Mod(ns.to_string()))], None, &mut out);
+        }
+    }
     out
 }
 
@@ -1300,7 +1384,7 @@ fn debug_help(ui: &mut Ui, groups: u32, align: Align, mods: &[(&'static str, boo
                 t.wrap = false;
             }
         }
-        for key in ["hud.debug.options", "hud.debug.gamemode", "hud.debug.cubes", "hud.debug.hitboxes"] {
+        for key in ["hud.debug.options", "hud.debug.gamemode", "hud.debug.cubes", "hud.debug.hitboxes", "hud.debug.relight"] {
             let n = ui.text_bound("debug", Box::new(move |_: &Ctx| (key.into(), vec![])));
             if let Some(t) = ui.text_mut(n) {
                 t.wrap = false;

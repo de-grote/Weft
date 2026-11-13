@@ -245,7 +245,8 @@ fn init(r: &mut Registry) {
             Slots::single()
                 .accepts("#fuel")
                 .input()
-                .tooltip("testmod.fuel_slot")
+                .background("base:slot_fuel")
+                .tooltip("block.testmod.fuel_slot")
                 .holder(),
         )
         .player_inventory()
@@ -317,6 +318,21 @@ fn init(r: &mut Registry) {
     r.shaped(&CRAFTING, "generator", 1, &["iii", "ifi", "iii"], &[('i', "#ingots/iron"), ('f', "#furnaces")]);
     r.shaped(&CRAFTING, "electric_furnace", 1, &["iii", "iFi", "ici"], &[('i', "#ingots/iron"), ('F', "#furnaces"), ('c', "#cables")]);
     r.shaped(&CRAFTING, "cable", 8, &["iii"], &[('i', "#ingots/iron")]);
+    // What a recipe does to its ingredients besides using them up: a hammer stays and wears a
+    // point a run (a shift-click crushes as much as it lasts for at once), the water bucket
+    // leaves its bucket in its slot (the lava one does by its own `remainder`).
+    static HAMMER: Item = Item::named("hammer");
+    r.item(&HAMMER)
+        .texture("base:iron_pickaxe")
+        .tint(0xC08060)
+        .durability(16)
+        .max_stack(1)
+        .handheld()
+        .tab(&BASE_TOOLS);
+    r.shapeless(&CRAFTING, "base:gravel", 1, &["hammer", "base:cobblestone"], 0)
+        .wear(0, 1);
+    r.shapeless(&CRAFTING, "base:obsidian", 1, &["base:lava_bucket", "base:water_bucket"], 0)
+        .leaves(1, "base:bucket");
 
     r.block(&REGOLITH)
         .hardness(0.5)
@@ -419,7 +435,7 @@ fn init(r: &mut Registry) {
     r.ore(&TIN_ORE)
         .dimension(&MARS)
         .y(-64, 90)
-        .veins(5)
+        .per_cube(5)
         .vein_size(8)
         .replaces("#stone_ore_replaceables")
         .replaces_with("basalt", &BASALT_TIN_ORE)
@@ -427,11 +443,11 @@ fn init(r: &mut Registry) {
     r.terrain(&MARS)
         .stone("basalt")
         .base_height(60.0)
-        .feature(preset::hills(8.0, 220.0))
-        .feature(preset::plateaus(24.0, 320.0, 6.0).mask(Expr::noise(900.0).ramp(0.1, 0.4)))
-        .feature(preset::canyons(26.0, 9.0).mask(Expr::noise(1200.0).ramp(-0.2, 0.1)))
-        .feature(preset::craters(32.0, 16.0, 150.0))
-        .feature(preset::dunes(3.0, 22.0).mask(Expr::noise(500.0).ramp(0.15, 0.45)))
+        .landform(preset::hills(8.0, 220.0))
+        .landform(preset::plateaus(24.0, 320.0, 6.0).mask(Expr::noise(900.0).ramp(0.1, 0.4)))
+        .landform(preset::canyons(26.0, 9.0).mask(Expr::noise(1200.0).ramp(-0.2, 0.1)))
+        .landform(preset::craters(32.0, 16.0, 150.0))
+        .landform(preset::dunes(3.0, 22.0).mask(Expr::noise(500.0).ramp(0.15, 0.45)))
         // Base's forest in the cold parts of Mars (any humidity, unlike at home): it brings its
         // grass, and the engine grows its trees here like in base's overworld.
         .rule(
@@ -445,9 +461,9 @@ fn init(r: &mut Registry) {
     // of this mod's own, and boulders on the new biome.
     r.edit(MARS.terrain())
         .rule_before("testmod:dust", BiomeRule::new("scorched"))
-        .feature(
+        .landform(
             // 90 blocks up within 3 of the spot: a step where the distance passes 3.
-            Feature::new(
+            Landform::new(
                 ((Expr::x() - Expr::blocks(NEEDLE[0] as f64)).abs())
                     .max((Expr::z() - Expr::blocks(NEEDLE[1] as f64)).abs())
                     .ramp_blocks(3.0, 3.0)

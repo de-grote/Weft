@@ -192,22 +192,27 @@ fn draw_block(
             }
         }
         BlockModel::Cross => {
-            let l = light16(n.light[i]);
-            let b = [x as f32, y as f32, z as f32];
-            let e = 0.15;
-            let (a0, a1) = ([b[0] + e, b[1], b[2] + e], [b[0] + 1.0 - e, b[1] + 1.0, b[2] + 1.0 - e]);
-            let (c0, c1) = ([b[0] + e, b[1], b[2] + 1.0 - e], [b[0] + 1.0 - e, b[1] + 1.0, b[2] + e]);
-            for (k, layer) in face_layers(c, info, textures[0] & face::TEX_MASK, 0)
-                .iter()
-                .enumerate()
-            {
-                let t = ctm.resolve(c, n, x, y, z, 0, layer.tex);
-                let to = if k == 0 { RenderLayer::Cutout as usize } else { UPPER };
-                for (p0, p1) in [(a0, a1), (c0, c1)] {
-                    let corners = [[p0[0], p0[1], p0[2]], [p1[0], p0[1], p1[2]], [p1[0], p1[1], p1[2]], [p0[0], p1[1], p0[2]]];
-                    let back = [corners[1], corners[0], corners[3], corners[2]];
-                    for q in [corners, back] {
-                        mesh.quads[to].push(quad(q, WHOLE, t, biome, layer.tint | FLAT, [l; 4]));
+            // A tall plant (a cell above its own) has a cross there too, showing its top face's
+            // picture, as a plant shows its side's.
+            let tall = info.cells.iter().any(|c| c.0 == glam::IVec3::Y);
+            for (dy, side) in [(0, 0), (1, 3)].into_iter().take(1 + tall as usize) {
+                let l = light16(n.light[pidx(x, y + dy, z)]);
+                let b = [x as f32, (y + dy) as f32, z as f32];
+                let e = 0.15;
+                let (a0, a1) = ([b[0] + e, b[1], b[2] + e], [b[0] + 1.0 - e, b[1] + 1.0, b[2] + 1.0 - e]);
+                let (c0, c1) = ([b[0] + e, b[1], b[2] + 1.0 - e], [b[0] + 1.0 - e, b[1] + 1.0, b[2] + e]);
+                for (k, layer) in face_layers(c, info, textures[side] & face::TEX_MASK, side)
+                    .iter()
+                    .enumerate()
+                {
+                    let t = ctm.resolve(c, n, x, y + dy, z, 0, layer.tex);
+                    let to = if k == 0 { RenderLayer::Cutout as usize } else { UPPER };
+                    for (p0, p1) in [(a0, a1), (c0, c1)] {
+                        let corners = [[p0[0], p0[1], p0[2]], [p1[0], p0[1], p1[2]], [p1[0], p1[1], p1[2]], [p0[0], p1[1], p0[2]]];
+                        let back = [corners[1], corners[0], corners[3], corners[2]];
+                        for q in [corners, back] {
+                            mesh.quads[to].push(quad(q, WHOLE, t, biome, layer.tint | FLAT, [l; 4]));
+                        }
                     }
                 }
             }

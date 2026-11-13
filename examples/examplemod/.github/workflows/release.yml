@@ -1,4 +1,5 @@
-# Builds your mod for Windows, Linux and macOS and publishes one zip that works on all three.
+# Builds your mod for Windows, Linux, macOS and Android phones and publishes one zip that works on
+# all of them.
 # You don't need any of those systems yourself: push a tag like v1.0.0 and download the result
 # from your repository's Releases page.
 #
@@ -45,8 +46,37 @@ jobs:
             target/release/lib${{ env.MOD }}.so
             target/release/lib${{ env.MOD }}.dylib
 
+  # 64-bit ARM phones, with the runner's Android NDK. The library has the Linux one's name, so it
+  # goes in `android/` of the zip. A mod that can't build there (a C library without Android
+  # support) can drop this job and its name from `needs` below.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: |
+          tc="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$tc/aarch64-linux-android26-clang" \
+            AR_aarch64_linux_android="$tc/llvm-ar" \
+            CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$tc/aarch64-linux-android26-clang" \
+            CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
+          cargo build --release --target aarch64-linux-android
+          mod=$(grep -m1 '^name' Cargo.toml | cut -d'"' -f2)
+          mkdir -p out/android
+          cp "target/aarch64-linux-android/release/lib$mod.so" out/android/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: library-android
+          path: out
+          if-no-files-found: error
+
   publish:
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}

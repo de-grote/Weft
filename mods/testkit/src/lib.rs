@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 
 use weft_sdk::*;
 
-declare_mod!(deps: [], init: init);
+declare_mod!(deps: ["testmod"], init: init);
 
 static PLAN: OnceLock<(Option<String>, Option<String>)> = OnceLock::new();
 
@@ -77,6 +77,7 @@ pub(crate) fn same_conditions(c: &Client) {
     RESOURCE_PACKS.set("");
     SHADER_PACK.set("");
     DEBUG_GROUPS.set(u32::MAX);
+    ADVANCED_TOOLTIPS.set(false);
     DEBUG_LINES.set("");
     if packs {
         c.reload_assets();

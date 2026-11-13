@@ -132,7 +132,7 @@ pub fn memory() -> u64 {
 }
 
 /// A `<key> <value> kB` line of a `/proc` file, in bytes (0 where it is missing).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn proc_kb(path: &str, key: &str) -> u64 {
     let Ok(src) = std::fs::read_to_string(path) else { return 0 };
     let kb = src
@@ -144,12 +144,12 @@ fn proc_kb(path: &str, key: &str) -> u64 {
     kb * 1024
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn memory() -> u64 {
     proc_kb("/proc/self/status", "VmRSS:")
 }
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
 pub fn memory() -> u64 {
     0
 }
@@ -186,12 +186,12 @@ pub fn total_memory() -> u64 {
     if unsafe { GlobalMemoryStatusEx(&mut s) } != 0 { s.total_phys } else { 0 }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn total_memory() -> u64 {
     proc_kb("/proc/meminfo", "MemTotal:")
 }
 
-#[cfg(all(not(windows), not(target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
 pub fn total_memory() -> u64 {
     0
 }
@@ -222,6 +222,7 @@ pub fn cpu_name() -> String {
     std::env::var("PROCESSOR_IDENTIFIER").unwrap_or_default()
 }
 
+#[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 fn tidy_cpu_name(raw: &str) -> String {
     let mut s = raw
         .replace("(R)", "")

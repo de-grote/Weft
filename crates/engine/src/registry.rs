@@ -22,6 +22,7 @@ pub struct HudElement {
     pub order: i32,
     pub owner: ModId,
     pub cb: Callback,
+    pub rebuild: Option<(ModId, Callback)>,
 }
 pub const ITEM: &str = "core:item";
 /// A block falling as an entity (`Host::fall_block`), placed again where it lands.
@@ -142,6 +143,8 @@ pub struct EntityKind {
     pub seats: Vec<Seat>,
     /// How it flies when it is a projectile (`comp::entity::PROJECTILE`).
     pub projectile: Option<abi::Projectile>,
+    /// What hits land on, part by part (`comp::entity::HITBOXES`); none: its box.
+    pub hitboxes: Option<abi::Hitboxes>,
     /// What the keys of a player steering it do (`abi::SteerArgs`), and where riders get off
     /// when a seat asks it (`abi::DismountArgs`).
     pub steer: Option<(ModId, Callback)>,
@@ -285,10 +288,23 @@ impl Ingredient {
     }
 }
 
+/// What a run of a recipe does to an ingredient (`abi::RecipeUse`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Use {
+    /// Used up; the last of a stack leaves its item's `remainder`.
+    Consume,
+    Keep,
+    Wear(u32),
+    /// Used up, this item left in its place.
+    Leaves(u32),
+}
+
 pub struct Recipe {
     /// Shaped: width, height, cells (row major).
     pub shaped: Option<(u32, u32, Vec<Ingredient>)>,
     pub inputs: Vec<Ingredient>,
+    /// Per cell of a shaped one, else per input: what a run does to it.
+    pub uses: Vec<Use>,
     /// How many of each input (millibuckets for fluids).
     pub input_counts: Vec<u32>,
     /// The main result, then each its pools can give (`extras`) with the most of it and its chance.
@@ -683,8 +699,8 @@ fn engine_components() -> Vec<RawEntry> {
         (SHOWN, "bytes", shown, Vec::new()),
         (WORN, "bytes", shown, Vec::new()),
         (SHAPE, "bytes", own, shape),
-        (HELD, "u32", shown, vec![0; 4]),
-        (OFF_HELD, "u32", shown, vec![0; 4]),
+        (HELD, "bytes", shown, Vec::new()),
+        (OFF_HELD, "bytes", shown, Vec::new()),
         (USING, "u32", shown, vec![0; 4]),
         (SWAPS, "bytes", own | shown, Vec::new()),
         (LOOPING_ACTION, "bytes", shown, Vec::new()),
@@ -744,6 +760,7 @@ pub struct RawRecipe {
     pub time: u32,
     /// Pools for what else it gives; a liquid is its item.
     pub outputs: Vec<abi::LootPool>,
+    pub uses: Vec<abi::RecipeUse>,
     /// Its entry: recipes expanded from one share it.
     pub entry: u32,
 }
@@ -950,19 +967,19 @@ fn engine_damage_causes() -> Vec<RawEntry> {
     use abi::comp::damage_cause as d;
     let tags: [&[&str]; 14] = [
         &[],
-        &[d::BYPASSES_ARMOR],
+        &[d::BYPASSES_ARMOR, d::BYPASSES_BLOCKING],
         &[],
-        &[d::BURNING],
-        &[d::BYPASSES_ARMOR],
-        &[d::BYPASSES_ARMOR],
-        &[d::BYPASSES_ARMOR, d::PIERCES_INVULNERABLE, d::IGNORES_COOLDOWN],
-        &[d::BURNING],
+        &[d::BURNING, d::BYPASSES_BLOCKING],
+        &[d::BYPASSES_ARMOR, d::BYPASSES_BLOCKING],
+        &[d::BYPASSES_ARMOR, d::BYPASSES_BLOCKING],
+        &[d::BYPASSES_ARMOR, d::PIERCES_INVULNERABLE, d::IGNORES_COOLDOWN, d::BYPASSES_BLOCKING],
+        &[d::BURNING, d::BYPASSES_BLOCKING],
+        &[d::BYPASSES_BLOCKING],
+        &[d::BYPASSES_ARMOR, d::BYPASSES_BLOCKING],
         &[],
-        &[d::BYPASSES_ARMOR],
         &[],
         &[],
-        &[],
-        &[d::BYPASSES_ARMOR],
+        &[d::BYPASSES_ARMOR, d::BYPASSES_BLOCKING],
     ];
     let messages = [
         "generic",
@@ -1694,6 +1711,9 @@ fn bake_entity(e: &Entry) -> EntityKind {
             .map(|s| Seat { pos: crate::world::dvec(s.pos), steers: s.steers, exit: s.exit, exit_at: crate::world::dvec(s.exit_at) })
             .collect(),
         projectile: e.get::<abi::Projectile>(k::PROJECTILE),
+        hitboxes: e
+            .get::<abi::Hitboxes>(k::HITBOXES)
+            .filter(|h| !h.parts.is_empty()),
         steer: e.callback(k::STEER),
         dismount: e.callback(k::DISMOUNT),
         ride_camera: e.or(k::RIDE_CAMERA, f32::NAN),
@@ -1813,6 +1833,7 @@ fn raw_recipe(e: &Entry) -> RawRecipe {
         count: e.or(r::COUNT, 1u32).max(1),
         time: e.or(r::TIME, 0),
         outputs: e.or(r::OUTPUTS, Vec::new()),
+        uses: e.or(r::USES, Vec::new()),
         entry: 0,
     }
 }
@@ -1873,8 +1894,9 @@ pub const EFFECT: &str = "core:effect";
 pub const FORCED_POSE: &str = "core:forced_pose";
 /// What it rides (`u64` id) and its seat (`u32`), empty: nothing. Saved, and seen by everyone.
 pub const RIDING: &str = "core:riding";
-/// A projectile stuck in an entity: that entity (`u64`), where in its frame (`[f32; 3]`, turned
-/// with its yaw) and its own yaw there (`f32`); empty while it isn't. Clients hold it on the body.
+/// A projectile stuck in an entity: that entity (`u64`), where in its box (`[f32; 3]`, turned
+/// with its body) and its own yaw there (`f32`); empty while it isn't. Clients hold it on the
+/// bone of the model it went into.
 pub const STUCK: &str = "core:stuck";
 /// Entity component (`[u32]`, synced to watchers): the items in its kind's `SHOWN_SLOTS`, 0 empty.
 pub const SHOWN: &str = "core:shown";
@@ -2023,7 +2045,15 @@ pub fn freeze(
         use abi::comp::hud_element as h;
         let (owner, cb) = e.callback(h::CALL).unwrap_or((e.owner, Callback::NONE));
         let anchor = e.text(h::ANCHOR).unwrap_or_default().to_string();
-        HudElement { name: e.name.clone(), title: crate::ui::text::dotted(&e.name), anchor, order: e.or(h::ORDER, 0), owner, cb }
+        HudElement {
+            name: e.name.clone(),
+            title: crate::ui::text::dotted(&e.name),
+            anchor,
+            order: e.or(h::ORDER, 0),
+            owner,
+            cb,
+            rebuild: e.callback(h::REBUILD),
+        }
     });
     (g.bone_motions, _) = tables.bake(kind(ek::BONE_MOTION), ek::BONE_MOTION, mod_name, errors, |e, _| {
         use abi::comp::bone_motion as b;
@@ -2655,6 +2685,37 @@ fn freeze_recipes(
             Some((w, h, cells))
         };
         let inputs: Vec<Ingredient> = r.inputs.iter().map(|s| ing(s, errors)).collect();
+        // What runs do to each ingredient, by its pattern key or its place among the inputs.
+        let keys: Vec<String> = match &shaped {
+            Some((w, _, cells)) => (0..cells.len())
+                .map(|i| {
+                    let row = &r.pattern[i / *w as usize];
+                    row.chars().nth(i % *w as usize).unwrap_or(' ').to_string()
+                })
+                .collect(),
+            None => (0..inputs.len()).map(|i| i.to_string()).collect(),
+        };
+        let uses: Vec<Use> = keys
+            .iter()
+            .map(|k| match r.uses.iter().rfind(|u| u.key == *k) {
+                None => Use::Consume,
+                Some(u) => match u.how {
+                    abi::recipe_use::KEEP => Use::Keep,
+                    abi::recipe_use::WEAR => Use::Wear(u.amount.max(1)),
+                    abi::recipe_use::LEAVES => match one(&u.item) {
+                        Ok(i) => Use::Leaves(i),
+                        Err(e) => {
+                            errors.push(format!("recipe for {}: leaves {e}", r.output));
+                            Use::Consume
+                        }
+                    },
+                    _ => Use::Consume,
+                },
+            })
+            .collect();
+        for u in r.uses.iter().filter(|u| !keys.contains(&u.key)) {
+            errors.push(format!("recipe for {}: no ingredient {} to say how it is used", r.output, u.key));
+        }
         let input_counts = (0..inputs.len())
             .map(|i| r.input_counts.get(i).copied().unwrap_or(1).max(1))
             .collect();
@@ -2684,10 +2745,16 @@ fn freeze_recipes(
                     }),
             );
         }
-        g.recipes
-            .entry(r.kind)
-            .or_default()
-            .push(Recipe { shaped, inputs, input_counts, outputs, extras, time: r.time, entry: r.entry });
+        g.recipes.entry(r.kind).or_default().push(Recipe {
+            shaped,
+            inputs,
+            uses,
+            input_counts,
+            outputs,
+            extras,
+            time: r.time,
+            entry: r.entry,
+        });
     }
 }
 
@@ -2714,6 +2781,12 @@ impl Game {
     /// Finds the recipe whose pattern fits the grid (any position, mirrored allowed) or whose
     /// shapeless inputs match the grid contents exactly.
     pub fn match_grid(&self, kind: &str, grid: &[u32], w: u32, h: u32, tags: &Components) -> Option<&Recipe> {
+        self.match_cells(kind, grid, w, h, tags).map(|m| m.0)
+    }
+
+    /// `match_grid`, and per grid slot the recipe's ingredient there (its cell of a shaped one,
+    /// its input of another), what says how the slot is used up.
+    pub fn match_cells(&self, kind: &str, grid: &[u32], w: u32, h: u32, tags: &Components) -> Option<(&Recipe, Vec<Option<usize>>)> {
         let list = self.recipes.get(kind)?;
         // Trim the grid to the bounding box of its items.
         let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
@@ -2732,41 +2805,50 @@ impl Game {
         }
         let (bw, bh) = (x1 - x0, y1 - y0);
         let at = |x: u32, y: u32| grid[((y0 + y) * w + x0 + x) as usize];
-        let items: Vec<u32> = grid.iter().copied().filter(|&i| i != 0).collect();
-        list.iter().find(|r| match &r.shaped {
-            Some((rw, rh, cells)) => {
-                if *rw != bw || *rh != bh {
-                    return false;
-                }
-                let fits = |mirror: bool| {
-                    (0..bh).all(|y| {
-                        (0..bw).all(|x| {
-                            let cx = if mirror { bw - 1 - x } else { x };
-                            cells[(y * rw + cx) as usize].matches(at(x, y), tags)
-                        })
-                    })
-                };
-                fits(false) || fits(true)
-            }
-            None => {
-                if r.inputs.len() != items.len() {
-                    return false;
-                }
-                let mut used = vec![false; items.len()];
-                r.inputs.iter().all(|ing| {
-                    let found = items
-                        .iter()
-                        .enumerate()
-                        .find(|(i, it)| !used[*i] && ing.matches(**it, tags));
-                    match found {
-                        Some((i, _)) => {
-                            used[i] = true;
-                            true
-                        }
-                        None => false,
+        list.iter().find_map(|r| {
+            let mut cells = vec![None; grid.len()];
+            match &r.shaped {
+                Some((rw, rh, pattern)) => {
+                    if *rw != bw || *rh != bh {
+                        return None;
                     }
-                })
+                    let fits = |mirror: bool| {
+                        (0..bh).all(|y| {
+                            (0..bw).all(|x| {
+                                let cx = if mirror { bw - 1 - x } else { x };
+                                pattern[(y * rw + cx) as usize].matches(at(x, y), tags)
+                            })
+                        })
+                    };
+                    let mirror = if fits(false) {
+                        false
+                    } else if fits(true) {
+                        true
+                    } else {
+                        return None;
+                    };
+                    for y in 0..bh {
+                        for x in 0..bw {
+                            let cx = if mirror { bw - 1 - x } else { x };
+                            cells[((y0 + y) * w + x0 + x) as usize] = (at(x, y) != 0).then_some((y * rw + cx) as usize);
+                        }
+                    }
+                }
+                None => {
+                    let filled: Vec<usize> = (0..grid.len()).filter(|&i| grid[i] != 0).collect();
+                    if r.inputs.len() != filled.len() {
+                        return None;
+                    }
+                    for (k, ing) in r.inputs.iter().enumerate() {
+                        let i = filled
+                            .iter()
+                            .copied()
+                            .find(|&i| cells[i].is_none() && ing.matches(grid[i], tags))?;
+                        cells[i] = Some(k);
+                    }
+                }
             }
+            Some((r, cells))
         })
     }
 
@@ -3059,6 +3141,11 @@ fn expand_variables(r: RawRecipe, tags: &FxHashMap<&str, u32>) -> Result<Vec<Raw
                         ..p.clone()
                     })
                     .collect(),
+                uses: r
+                    .uses
+                    .iter()
+                    .map(|u| abi::RecipeUse { item: sub(&u.item), ..u.clone() })
+                    .collect(),
                 entry: r.entry,
             });
         }
@@ -3096,6 +3183,61 @@ mod box_unwrap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shaped_slots_follow_ingredients() {
+        let mut tags = crate::components::Builder::default();
+        tags.start(&[]);
+        let tags = tags.finish();
+        for mask in 1u32..512 {
+            let filled: Vec<_> = (0..9).filter(|i| mask & (1 << i) != 0).collect();
+            let x0 = filled.iter().map(|i| i % 3).min().unwrap();
+            let y0 = filled.iter().map(|i| i / 3).min().unwrap();
+            let w = filled.iter().map(|i| i % 3).max().unwrap() + 1 - x0;
+            let h = filled.iter().map(|i| i / 3).max().unwrap() + 1 - y0;
+            let pattern: Vec<_> = (0..h)
+                .flat_map(|y| (0..w).map(move |x| (y + y0) * 3 + x + x0))
+                .map(|i| if mask & (1 << i) == 0 { Ingredient::Empty } else { Ingredient::Item(i + 1) })
+                .collect();
+            let mut game = Game::default();
+            game.recipes.insert(
+                "crafting".into(),
+                vec![Recipe {
+                    shaped: Some((w, h, pattern.clone())),
+                    inputs: Vec::new(),
+                    uses: vec![Use::Consume; pattern.len()],
+                    input_counts: Vec::new(),
+                    outputs: Vec::new(),
+                    extras: Default::default(),
+                    time: 0,
+                    entry: 0,
+                }],
+            );
+            for mirror in [false, true] {
+                for top in 0..=3 - h {
+                    for left in 0..=3 - w {
+                        let mut grid = [0; 9];
+                        let mut expected = vec![None; 9];
+                        for y in 0..h {
+                            for x in 0..w {
+                                let k = (y * w + if mirror { w - 1 - x } else { x }) as usize;
+                                if let Ingredient::Item(item) = pattern[k] {
+                                    let slot = ((top + y) * 3 + left + x) as usize;
+                                    grid[slot] = item;
+                                    expected[slot] = Some(k);
+                                }
+                            }
+                        }
+                        let (_, cells) = game.match_cells("crafting", &grid, 3, 3, &tags).unwrap();
+                        assert_eq!(cells, expected, "mask {mask}, mirror {mirror}, at {left},{top}");
+                        let slot = grid.iter().position(|&item| item != 0).unwrap();
+                        grid[slot] = 100;
+                        assert!(game.match_cells("crafting", &grid, 3, 3, &tags).is_none(), "wrong ingredient in slot {slot}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn variable_recipes_expand_per_material() {

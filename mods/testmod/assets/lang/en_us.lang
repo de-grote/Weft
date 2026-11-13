@@ -101,3 +101,4 @@ item.testmod.wand = Layered Wand
 block.testmod.black_wool = Black Wool
 block.testmod.mossy_stone = Grassy Stone
 block.testmod.red_glass = Red Glass
+item.testmod.hammer = Hammer

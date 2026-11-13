@@ -7,7 +7,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-1.95%2B-B7410E?logo=rust&logoColor=white" alt="Rust 1.95+">
   <img src="https://img.shields.io/badge/graphics-Vulkan-A41E22?logo=vulkan&logoColor=white" alt="Vulkan">
-  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-2A6CB0" alt="Windows, Linux and macOS">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-2A6CB0" alt="Windows, Linux, macOS and Android">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MPL--2.0-3B2F7E" alt="MPL-2.0"></a>
 </p>
 
@@ -41,7 +41,7 @@ Weft is a voxel sandbox engine written in Rust. The game itself is a mod, `mods/
 
 ## Download
 
-Get the latest build for your system from [Releases](https://github.com/Weft-Rust/Weft/releases), unpack it and run `weft`. You need a GPU with Vulkan; on macOS it comes with the game (Apple Silicon, macOS 12 or newer). Windows is the main tested platform; Linux and macOS are reported to work well too. The release notes have the steps for each system.
+Get the latest build for your system from [Releases](https://github.com/Weft-Rust/Weft/releases), unpack it and run `weft`. You need a GPU with Vulkan; on macOS it comes with the game (Apple Silicon, macOS 12 or newer). Windows is the main tested platform; Linux and macOS are reported to work well too. On an Android phone install the APK: touch controls, and settings scaled for a phone's GPU. The release notes have the steps for each system.
 
 Weft ships with its own textures. If Minecraft is installed through the official launcher or Prism, Weft builds a resource pack from that copy when it starts. The pack stays on your computer, off until you turn it on in Settings > Resource Packs. If you have a custom installation path, you can set it with `MINECRAFT_DIR_LOOKUP` like that:
 
@@ -68,6 +68,7 @@ A game from a release writes nothing next to itself, so it can live in a read-on
 | Linux | `$XDG_DATA_HOME/weft` (`~/.local/share/weft`) | `$XDG_CONFIG_HOME/weft` (`~/.config/weft`) | `$XDG_CACHE_HOME/weft` (`~/.cache/weft`) |
 | Windows | `%APPDATA%\Weft` | `%APPDATA%\Weft\config` | `%LOCALAPPDATA%\Weft` |
 | macOS | `~/Library/Application Support/Weft` | `.../Weft/config` | `~/Library/Caches/Weft` |
+| Android | `Android/data/org.weft.game/files` | `.../files/config` | the app's private cache |
 
 A game that already has a `run/config` folder next to it keeps everything in `run/`, as older versions did; make that folder to keep a copy portable. `--run-dir <dir>` puts everything in one folder of your choice.
 

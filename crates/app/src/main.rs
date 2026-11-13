@@ -4,6 +4,7 @@ use weft_engine::Options;
 use weft_engine::paths::{self, Dirs};
 use weft_render::{Backend, BackendDesc, Error};
 
+mod optimize;
 mod submit;
 
 #[global_allocator]
@@ -46,6 +47,8 @@ commands:
   submit-mod <dir>     send a mod's pushed commit to the mod index (--owner <login>)
   test-all             every test, several processes at once (--jobs N)
   export-models <dir>  entity models made in code, any mod's, as Blockbench .geo.json files
+  optimize-assets      the source tree's PNGs smaller as the game reads them the same, its WAVs
+                       to Ogg Vorbis (needs ffmpeg)
 
 options:
   --run-dir <dir>      saves, settings, logs and mods go here
@@ -159,6 +162,16 @@ fn main() {
         // Sends a mod's pushed commit to the mod index, see `submit.rs`.
         ("submit-mod", 1) => submit = places.pop(),
         ("export-models", 1) => export = places.pop(),
+        ("optimize-assets", 0) => match optimize::run(&root) {
+            Ok(done) => {
+                println!("{done}");
+                return;
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        },
         _ => {
             eprint!("{HELP}");
             std::process::exit(2);

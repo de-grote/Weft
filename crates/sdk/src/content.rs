@@ -66,7 +66,9 @@ pub mod kind {
         RecipeKind = crate::abi::entry_kind::RECIPE_KIND,
         Attribute = crate::abi::entry_kind::ATTRIBUTE,
         Key = crate::abi::entry_kind::KEY,
-        Liquid = crate::abi::entry_kind::LIQUID
+        Liquid = crate::abi::entry_kind::LIQUID,
+        Feature = crate::abi::entry_kind::FEATURE,
+        Record = crate::abi::entry_kind::RECORD
     );
     /// Kinds without ids: entries of their own number, or things known only by name.
     macro_rules! named_kinds {
@@ -88,12 +90,9 @@ pub mod kind {
         Declaration = crate::abi::entry_kind::COMPONENT,
         Recipe = crate::abi::entry_kind::RECIPE,
         LootTable = crate::abi::entry_kind::LOOT,
-        Ore = crate::abi::entry_kind::ORE,
         Reaction = crate::abi::entry_kind::REACTION,
-        Scatter = crate::abi::entry_kind::SCATTER,
-        Decoration = crate::abi::entry_kind::DECORATION,
-        Structure = crate::abi::entry_kind::STRUCTURE,
         Template = crate::abi::entry_kind::TEMPLATE,
+        Palette = crate::abi::entry_kind::PALETTE,
         SpawnRule = crate::abi::entry_kind::SPAWN,
         Terrain = crate::abi::entry_kind::TERRAIN,
         BoneMotion = crate::abi::entry_kind::BONE_MOTION,
@@ -106,10 +105,7 @@ pub mod kind {
     );
     /// The components saying where things go in the world (`comps::common`).
     pub struct Placement;
-    impl On<Ore> for Placement {}
-    impl On<Scatter> for Placement {}
-    impl On<Decoration> for Placement {}
-    impl On<Structure> for Placement {}
+    impl On<Feature> for Placement {}
     impl On<SpawnRule> for Placement {}
 }
 
@@ -170,9 +166,9 @@ impl<K: kind::Kind> Handle<K> {
 }
 
 impl Block {
-    /// Its ore, for `Registry::edit`: `r.edit(base::IRON_ORE.ore()).exposed(0.5)`.
-    pub fn ore(&self) -> &'static Ore {
-        Ore::generated(self.name().to_string())
+    /// Its ore (a feature named like it), for `Registry::edit`: `r.edit(base::IRON_ORE.ore()).exposed(0.5)`.
+    pub fn ore(&self) -> &'static Feature {
+        Feature::generated(self.name().to_string())
     }
     /// Its liquid, for `Registry::edit`: `r.edit(base::WATER.liquid()).fog(0x204020, 12.0)`.
     pub fn liquid(&self) -> &'static Liquid {
@@ -197,9 +193,10 @@ impl Dimension {
 }
 
 impl Template {
-    /// The structure placing it, for `Registry::edit`: `r.edit(WELL.structure()).spacing(96)`.
-    pub fn structure(&self) -> &'static Structure {
-        Structure::generated(self.name().to_string())
+    /// The structure placing it (a feature named like it), for `Registry::edit`:
+    /// `r.edit(WELL.structure()).spacing(96)`.
+    pub fn structure(&self) -> &'static Feature {
+        Feature::generated(self.name().to_string())
     }
 }
 
@@ -347,23 +344,23 @@ pub type GizmoGroup = Handle<kind::GizmoGroup>;
 /// A shader file of a mod, by its name: `shaders/<block|entity|particle|sky|post>/<name>.wgsl`,
 /// the folder by what uses it. Nothing to register, the file is it.
 pub type Shader = Handle<kind::Shader>;
-/// The ore of a block, named like it (`r.ore(&IRON_ORE)` makes one), for `Registry::edit`.
-pub type Ore = Handle<kind::Ore>;
 /// The liquid of a block, named like it (`r.liquid(&WATER)` makes one), for `Registry::edit`;
 /// its id is what `liquid_of` gives.
 pub type Liquid = Handle<kind::Liquid>;
 /// What happens where two liquids meet (`Registry::liquid_reaction`).
 pub type Reaction = Handle<kind::Reaction>;
 pub type TintKind = Handle<kind::TintKind>;
-pub type Scatter = Handle<kind::Scatter>;
-/// What runs on every generated cube (`Registry::decoration`), named `<mod>:decoration`, `/2`..
-/// unless `named`.
-pub type Decoration = Handle<kind::Decoration>;
-/// A fixed shape of blocks (`Registry::template`), for world structures, moving bodies and
+/// Anything generation puts into the world (`Registry::feature` and its presets `ore`,
+/// `scatter`, `structure`, `decoration`); its id is `FeaturePlaced::feature`.
+pub type Feature = Handle<kind::Feature>;
+/// A fixed shape of blocks (`Registry::template`), for features, moving bodies and
 /// `World::place_template`.
 pub type Template = Handle<kind::Template>;
-/// A template placed while generating, named like it (`Registry::structure`).
-pub type Structure = Handle<kind::Structure>;
+/// Blocks for templates' slots (`Registry::palette`).
+pub type Palette = Handle<kind::Palette>;
+/// A mod's own data (`Registry::record`): what it is says its tags and components, the engine
+/// reads none of it.
+pub type Record = Handle<kind::Record>;
 /// A natural spawning rule (`Registry::natural_spawn`), named `<mod>:<entity>`, `/2`.. unless
 /// `named`.
 pub type SpawnRule = Handle<kind::SpawnRule>;
@@ -815,6 +812,10 @@ impl DamageCauseBuilder<'_> {
     pub fn bypasses_armor(self) -> Self {
         self.tag(abi::comp::damage_cause::BYPASSES_ARMOR)
     }
+    /// Held items cannot block it.
+    pub fn bypasses_blocking(self) -> Self {
+        self.tag(abi::comp::damage_cause::BYPASSES_BLOCKING)
+    }
     /// Hurts invulnerable entities and players outside survival too.
     pub fn pierces_invulnerable(self) -> Self {
         self.tag(abi::comp::damage_cause::PIERCES_INVULNERABLE)
@@ -1210,30 +1211,33 @@ impl Registry {
         CreativeTabBuilder { reg: self, e: crate::entry::Entry::of(tab) }
     }
 
-    /// An ore, in every dimension whose ground it may `replace` (`.dimension(..)` limits it):
-    /// `r.ore(&TIN_ORE).y(0, 64).veins(6).vein_size(8).replaces("#stone")`.
-    pub fn ore(&mut self, block: &Block) -> OreBuilder<'_> {
-        self.ore_entry(block.ore())
-    }
-
-    fn ore_entry(&mut self, ore: &'static Ore) -> OreBuilder<'_> {
-        OreBuilder { reg: self, e: crate::entry::Entry::of(ore) }
-    }
-
-    /// A template placed now and then on the surface, in every dimension but bare ones unless
-    /// `.dimension(..)` says (the structure is called like the template, for `World::structure_near`).
-    pub fn structure(&mut self, template: &Template) -> StructureBuilder<'_> {
-        self.structure_entry(template.structure())
-    }
-
-    fn structure_entry(&mut self, structure: &'static Structure) -> StructureBuilder<'_> {
-        StructureBuilder { reg: self, e: crate::entry::Entry::of(structure) }
-    }
-
     /// A fixed shape of blocks, drawn in layers of rows (`layer` + `key`) or filled with boxes
-    /// (`fill`), checked when the game loads.
+    /// (`fill`), checked when the game loads. A file `structures/<name>.json` of the mod is one
+    /// by itself; this adds to it.
     pub fn template(&mut self, template: &'static Template) -> TemplateBuilder<'_> {
         TemplateBuilder { reg: self, e: crate::entry::Entry::of(template), layers: Vec::new(), keys: Vec::new(), fills: Vec::new() }
+    }
+
+    /// A mod's own data, for itself or an API other mods use: tags and components say what it is,
+    /// and other mods `edit`, `replace` and `remove` it like anything registered. Read once the
+    /// game is loaded: `entries_with(entry_kind::RECORD, "structgen:structure")` lists them,
+    /// `CHANCE.on_record(id)` reads one.
+    ///
+    /// ```ignore
+    /// static HUT: Record = Record::named("hut");
+    /// r.record(&HUT).tag("structgen:structure").set(&CHANCE, 0.3).set(&SPACING, 256);
+    /// // Another mod's:
+    /// static THEIR_HUT: Record = Record::named("othermod:hut");
+    /// r.edit(&THEIR_HUT).set(&CHANCE, 0.05);
+    /// ```
+    pub fn record(&mut self, record: &'static Record) -> RecordBuilder<'_> {
+        RecordBuilder { reg: self, e: crate::entry::Entry::of(record) }
+    }
+
+    /// The blocks templates' slots take where a feature uses it (`FeatureBuilder::palette`):
+    /// `r.palette(&SPRUCE).slot("wall", "base:spruce_planks")`.
+    pub fn palette(&mut self, palette: &'static Palette) -> PaletteBuilder<'_> {
+        PaletteBuilder { reg: self, e: crate::entry::Entry::of(palette) }
     }
 
     pub fn dimension<'a>(&'a mut self, dimension: &'static Dimension) -> DimensionBuilder<'a> {
@@ -1547,10 +1551,12 @@ macro_rules! state_setters {
         }
         /// One more picture on top of the picked faces' (relative names under `block/`): the
         /// green over a grass block's sides, an ore's stones over stone. Each layer is drawn by
-        /// itself over the one under it, with its own animation and connected textures.
+        /// itself over the one under it, with its own animation and connected textures. Like
+        /// `tint` and `tint_kind` it goes on the faces with pictures of their own of the model
+        /// boxes made so far too, toward the picked sides.
         pub fn layer(self, t: &str) -> Self {
             let t = crate::asset("block", t);
-            self.change_faces(|face| {
+            self.change_layers(|face| {
                 if !face.is_empty() {
                     face.push(' ');
                 }
@@ -1561,18 +1567,37 @@ macro_rules! state_setters {
         /// (wool). A tinted copy of the picture is made as the game loads, every frame of it and
         /// its connected tiles too, so it costs nothing to draw.
         pub fn tint(self, color: u32) -> Self {
-            self.change_faces(|face| top_layer(face, Some(color & 0xFF_FFFF), None))
+            self.change_layers(|face| top_layer(face, Some(color & 0xFF_FFFF), None))
         }
         /// The picked faces' top layer colored by the biome the block stands in (`tints::GRASS`,
         /// `FOLIAGE`, `WATER` or a mod's own `TintKind`), and an item of it by the kind's
         /// default. Each layer its own, any kind and in any order.
         pub fn tint_kind(self, kind: &TintKind) -> Self {
-            self.change_faces(|face| top_layer(face, None, Some(kind.name())))
+            self.change_layers(|face| top_layer(face, None, Some(kind.name())))
         }
         fn pick(mut self, which: u8, t: &str) -> Self {
             let t = crate::asset("block", t);
             *self.picked() = which;
             self.change_faces(|face| *face = t.clone())
+        }
+        /// `change_faces`, and the faces toward the picked sides of the model boxes made so far
+        /// that have pictures of their own (a tall plant's panels).
+        fn change_layers(mut self, mut f: impl FnMut(&mut String)) -> Self {
+            let which = *self.picked();
+            for p in self
+                .pending()
+                .iter_mut()
+                .filter(|p| p.name == bc::BOXES.name() && p.op == abi::value_op::PUSH)
+            {
+                let Some(mut b) = abi::data::from_bytes::<abi::ModelBox>(&p.bytes) else { continue };
+                for (i, face) in b.textures.iter_mut().enumerate() {
+                    if which & 1 << i != 0 && !face.is_empty() {
+                        f(face);
+                    }
+                }
+                p.bytes = abi::data::bytes_of(&b);
+            }
+            self.change_faces(f)
         }
         /// Its faces as they are so far, the picked ones changed by `f`.
         fn change_faces(mut self, mut f: impl FnMut(&mut String)) -> Self {
@@ -1657,6 +1682,19 @@ macro_rules! state_setters {
                 .cutout()
                 .hardness(0.0)
                 .tag("plantable")
+        }
+        /// `plant` two blocks tall (vanilla's tall grass, a sunflower): a cross showing `lower`
+        /// in its cell and `upper` in the one above (relative names under `block/`), taking room
+        /// in both. Every face is picked after, so `.tint_kind(..)` goes on both.
+        pub fn tall_plant(self, lower: &str, upper: &str) -> Self {
+            let mut b = self
+                .plant()
+                .cells(&[[0, 1, 0]])
+                .hitbox([2.0, 0.0, 2.0], [14.0, 30.0, 14.0])
+                .texture(lower)
+                .top(upper);
+            *b.picked() = faces::ALL;
+            b
         }
         pub fn not_solid(self) -> Self {
             self.tag(abi::comp::block::NOT_SOLID)
@@ -3039,36 +3077,6 @@ where
 
 impl<B: WithComponents> Placed for B where kind::Placement: kind::On<B::Kind> {}
 
-/// A template placed now and then while generating (see `abi::comp::structure`):
-///
-/// ```ignore
-/// r.template(&WELL).layer(&["ccc", "cwc", "ccc"]).key('c', "cobblestone").key('w', "water");
-/// r.structure(&WELL).dimension(&OVERWORLD).spacing(64).chance(0.3).biome("#animals").buried(1);
-/// ```
-pub struct StructureBuilder<'a> {
-    reg: &'a mut Registry,
-    e: crate::entry::Entry,
-}
-
-impl StructureBuilder<'_> {
-    /// One chance per `blocks` x `blocks` cell (32 unless said).
-    pub fn spacing(self, blocks: u32) -> Self {
-        self.set(&crate::comps::structure::SPACING, blocks)
-    }
-    /// 0.5 unless said.
-    pub fn chance(self, c: f32) -> Self {
-        self.set(&crate::comps::structure::CHANCE, c)
-    }
-    /// How far into the ground its bottom layer goes.
-    pub fn buried(self, blocks: i32) -> Self {
-        self.set(&crate::comps::structure::BURIED, blocks)
-    }
-    /// Each one turned a random quarter about the vertical, its blocks with it.
-    pub fn turns(self) -> Self {
-        self.tag(abi::comp::structure::TURNS)
-    }
-}
-
 /// Layers from the bottom up, each a list of rows along z, each character one block along x:
 /// a key says which block it means, a space leaves what is there, `air` clears. An edit adds its
 /// blocks to the template's.
@@ -3081,9 +3089,9 @@ pub struct TemplateBuilder<'a> {
 }
 
 crate::entry::entry_builder!(
-    Ore => OreBuilder, ore_entry;
-    Structure => StructureBuilder, structure_entry;
     Template => TemplateBuilder, template, finish;
+    Palette => PaletteBuilder, palette;
+    Record => RecordBuilder, record;
     Liquid => LiquidBuilder, liquid_entry, finish;
     Reaction => ReactionBuilder, reaction_entry;
 );
@@ -3105,6 +3113,32 @@ impl TemplateBuilder<'_> {
         self.fills
             .push((qualify_block(self.reg.ns, block), from, to.into()));
         self
+    }
+    /// What slot `slot` (a key `@slot` or `@slot:stairs[facing=north]`) takes unless a palette
+    /// says otherwise.
+    pub fn slot(self, slot: &str, block: &str) -> Self {
+        let block = qualify_block(self.reg.ns, block);
+        self.push(&crate::comps::template::SLOTS, abi::PaletteSlot { name: slot.to_string(), block })
+    }
+    /// An entity of `kind` standing at `pos` (from the lowest corner) whenever it is placed.
+    pub fn entity(self, kind: &crate::EntityKind, pos: impl Into<crate::Vec3>) -> Self {
+        let p = pos.into();
+        self.push(
+            &crate::comps::template::ENTITIES,
+            abi::TemplateEntity { pos: [p.x as f32, p.y as f32, p.z as f32], kind: kind.name().to_string(), data: Vec::new() },
+        )
+    }
+    /// The block entity at `pos` (a chest) filled from loot table `table` whenever it is placed.
+    pub fn loot(self, pos: impl Into<BlockPos>, table: &crate::LootTable) -> Self {
+        let p = pos.into();
+        self.push(&crate::comps::template::LOOT, abi::TemplateLoot { pos: [p.x, p.y, p.z], table: table.name().to_string() })
+    }
+    /// A joint at `pos` facing `face` (`FACE_DIRS` index), where `Plan::grow` joins a piece from
+    /// pool `pool` by its joint called `target`.
+    pub fn joint(self, pos: impl Into<BlockPos>, face: usize, name: &str, target: &str, pool: &str) -> Self {
+        let p = pos.into();
+        let j = abi::TemplateJoint { pos: [p.x, p.y, p.z], face: face as u32, name: name.into(), target: target.into(), pool: pool.into() };
+        self.push(&crate::comps::template::JOINTS, j)
     }
 
     /// The layers and boxes as blocks: the whole list of a new template, more for an edit.
@@ -3140,108 +3174,33 @@ impl TemplateBuilder<'_> {
     }
 }
 
-fn qualify_block(ns: &str, block: &str) -> String {
-    if block == "air" { "core:air".to_string() } else { qualify(ns, block) }
-}
-
-/// Heights ore veins start at (`OreBuilder::height`).
-#[derive(Clone, Copy, Debug)]
-pub struct Height {
-    min: i32,
-    max: i32,
-    curve: u32,
-    plateau: i32,
-}
-
-impl Height {
-    pub fn uniform(min: i32, max: i32) -> Height {
-        Height { min, max, curve: abi::height_curve::UNIFORM, plateau: 0 }
-    }
-    /// Most in the middle, fewer towards the ends, none past them.
-    pub fn triangle(min: i32, max: i32) -> Height {
-        Height { min, max, curve: abi::height_curve::TRIANGLE, plateau: 0 }
-    }
-    /// At its most over `plateau` blocks in the middle, then falling off.
-    pub fn trapezoid(min: i32, max: i32, plateau: i32) -> Height {
-        Height { min, max, curve: abi::height_curve::TRAPEZOID, plateau }
+pub(crate) fn qualify_block(ns: &str, block: &str) -> String {
+    if block == "air" {
+        "core:air".to_string()
+    } else if block.starts_with('@') {
+        block.to_string()
+    } else {
+        qualify(ns, block)
     }
 }
 
-/// What an ore vein looks like (`OreBuilder::shape`). Every shape stays within 16 blocks of
-/// where it starts.
-#[derive(Clone, Debug)]
-pub struct Vein {
-    kind: u32,
-    radius: f32,
-    thickness: f32,
-    blocks: u32,
-    steps: Vec<abi::ShapeStep>,
-}
-
-impl Vein {
-    /// A random walk of `blocks` steps, the default.
-    pub fn walk(blocks: u32) -> Vein {
-        Vein { kind: abi::vein_shape::WALK, radius: 0.0, thickness: 0.0, blocks, steps: Vec::new() }
-    }
-    /// A lump of about `blocks`, like modern vanilla's.
-    pub fn blob(blocks: u32) -> Vein {
-        Vein { kind: abi::vein_shape::BLOB, radius: 0.0, thickness: 0.0, blocks, steps: Vec::new() }
-    }
-    pub fn sphere(radius: f32) -> Vein {
-        Vein { kind: abi::vein_shape::SPHERE, radius, thickness: 0.0, blocks: 0, steps: Vec::new() }
-    }
-    /// Flat and round (clay, gravel and sand under water).
-    pub fn disk(radius: f32, thickness: f32) -> Vein {
-        Vein { kind: abi::vein_shape::DISK, radius, thickness, blocks: 0, steps: Vec::new() }
-    }
-    /// Any shape about its start, as a fill takes (`Shape::ball(..).subtract(..)`: a geode's shell).
-    pub fn shape(shape: &crate::Shape) -> Vein {
-        Vein { kind: abi::vein_shape::STEPS, radius: 0.0, thickness: 0.0, blocks: 0, steps: shape.steps().to_vec() }
-    }
-}
-
-/// An ore being registered or changed (`r.edit(IRON_ORE.ore())`: what it sets replaces the ore's,
-/// what it `replaces` adds to its).
-pub struct OreBuilder<'a> {
+/// A record: nothing of its own, only the tags and components set on it.
+pub struct RecordBuilder<'a> {
     reg: &'a mut Registry,
     e: crate::entry::Entry,
 }
 
-impl OreBuilder<'_> {
-    /// How the veins spread over heights: `Height::triangle(-24, 56)` puts most in the middle,
-    /// like modern vanilla's iron.
-    pub fn height(self, h: Height) -> Self {
-        self.y(h.min, h.max)
-            .set(&crate::comps::ore::HEIGHT, abi::OreHeight { curve: h.curve, plateau: h.plateau })
-    }
-    /// What a vein looks like (a random walk of `size` blocks unless this says otherwise).
-    pub fn shape(self, v: Vein) -> Self {
-        let b = self.set(&crate::comps::ore::SHAPE, abi::VeinShape { kind: v.kind, radius: v.radius, thickness: v.thickness });
-        let b = if v.steps.is_empty() { b } else { b.set(&crate::comps::ore::STEPS, v.steps) };
-        if v.blocks > 0 { b.vein_size(v.blocks) } else { b }
-    }
-    /// Veins started per cube (4 unless said).
-    pub fn veins(self, n: u32) -> Self {
-        self.set(&crate::comps::ore::VEINS, n)
-    }
-    /// Blocks per vein (8 unless said).
-    pub fn vein_size(self, n: u32) -> Self {
-        self.set(&crate::comps::ore::SIZE, n)
-    }
-    /// What the ore may replace (a block matcher).
-    pub fn replaces(self, what: &str) -> Self {
-        self.set_text(&crate::comps::ore::REPLACES, what)
-    }
-    /// Where the vein meets what `what` takes (a block matcher), `ore` goes there instead: one
-    /// vein through stone and granite, iron ore in one and granite iron ore in the other.
-    pub fn replaces_with(self, what: &str, ore: &Block) -> Self {
-        let variant = abi::OreVariant { name: crate::qualify_matcher(self.reg.ns, what), ore: ore.name().to_string() };
-        self.push(&crate::comps::ore::REPLACES_WITH, variant)
-    }
-    /// Share of its blocks left out where they would touch air, as vanilla's in caves (0.5 for
-    /// most of them).
-    pub fn exposed(self, share: f32) -> Self {
-        self.set(&crate::comps::ore::EXPOSED, share)
+/// Blocks for templates' slots.
+pub struct PaletteBuilder<'a> {
+    reg: &'a mut Registry,
+    e: crate::entry::Entry,
+}
+
+impl PaletteBuilder<'_> {
+    /// Slot `slot` takes `block` (a state too: `base:oak_log[axis=x]`).
+    pub fn slot(self, slot: &str, block: &str) -> Self {
+        let block = qualify_block(self.reg.ns, block);
+        self.push(&crate::comps::palette::SLOTS, abi::PaletteSlot { name: slot.to_string(), block })
     }
 }
 

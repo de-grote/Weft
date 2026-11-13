@@ -19,6 +19,7 @@ mod effects;
 mod entry;
 mod extend;
 pub mod facing;
+mod feature;
 mod game;
 mod out;
 mod show;
@@ -27,7 +28,10 @@ mod ui;
 mod view;
 mod world;
 
-pub use abi::{BlockPos, EntitySize, Holder, ItemStack, OpenMenu, Rect, UV_FROM_BOX, UV_NO_FACE, Vec3, Who, hud_anchor, tool_tier};
+pub use abi::{
+    BlockPos, Blocking, EmbeddedProjectile, EntitySize, Holder, ItemStack, OpenMenu, ProjectileCatch, Rect, UV_FROM_BOX, UV_NO_FACE, Vec3,
+    Who, hitbox_part, hitbox_part_id, hud_anchor, tool_tier,
+};
 pub use camera::{Shot, cameras, easing, shot};
 pub use client::{Channel, Client, Hand, Packet, Payload, keys, launch_option, screens};
 pub use command::{ClientCommand, Command, CommandOptions, ServerCommand};
@@ -37,6 +41,7 @@ pub use content::*;
 pub use effects::*;
 pub use extend::*;
 pub use facing::{Dir, Facings, Orientation, Toward};
+pub use feature::*;
 pub use game::*;
 pub use out::{Drawing, Output};
 pub use riding::{Exit, RiderRules, Seat, Steering, steer};
@@ -112,12 +117,21 @@ macro_rules! trace { ($($t:tt)*) => { $crate::__log_macro!($crate::abi::log_leve
 /// ```ignore
 /// weft_sdk::declare_mod!(deps: ["base"], init: init);
 /// ```
+///
+/// `deps` are needed: without one the mod is off. `after` and `before` only order it among mods
+/// that are there, the later one's edits winning where two change one thing:
+///
+/// ```ignore
+/// weft_sdk::declare_mod!(deps: ["base"], after: ["othermod"], before: [], init: init);
+/// ```
 #[macro_export]
 macro_rules! declare_mod {
-    (deps: [$($dep:literal),* $(,)?], init: $init:path $(,)?) => {
+    (deps: [$($dep:literal),* $(,)?], $(after: [$($after:literal),* $(,)?],)? $(before: [$($before:literal),* $(,)?],)? init: $init:path $(,)?) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn weft_mod() -> *const $crate::abi::ModDecl {
             static DEPS: &[$crate::abi::Str] = &[$($crate::abi::Str::new($dep)),*];
+            static AFTER: &[$crate::abi::Str] = &[$($($crate::abi::Str::new($after)),*)?];
+            static BEFORE: &[$crate::abi::Str] = &[$($($crate::abi::Str::new($before)),*)?];
             unsafe extern "C" fn __weft_init(
                 host: *const $crate::abi::Host,
                 me: $crate::abi::ModId,
@@ -130,6 +144,8 @@ macro_rules! declare_mod {
                 id: $crate::abi::Str::new(env!("CARGO_CRATE_NAME")),
                 version: $crate::abi::Str::new(env!("CARGO_PKG_VERSION")),
                 deps: $crate::abi::Slice::new(DEPS),
+                after: $crate::abi::Slice::new(AFTER),
+                before: $crate::abi::Slice::new(BEFORE),
                 init: __weft_init,
             };
             &DECL

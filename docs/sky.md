@@ -91,4 +91,4 @@ r.sky_dome(&OVERWORLD, &AURORA).shader(&AURORA_SHADER);
 ## The sky's colors
 Behind everything there is a gradient from the `sky_color(sky, fog)` of the dimension, with the sky color above and the fog color at the horizon, and both of them get darker during the night like in vanilla. A dome with an opaque texture simply covers this gradient.
 
-If you are inside a liquid, the sky is replaced by the fog of that liquid, and you can read about `fog` and `overlay` in [liquids](modding.md#liquids).
+If you are inside a liquid, the sky is replaced by the fog of that liquid, and you can read about `fog` and `overlay` in [liquids](details/liquids.md).

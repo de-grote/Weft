@@ -275,15 +275,15 @@ pub fn build(dimension: &str, e: &Entry, names: &Names, errors: &mut Vec<String>
             None => field_defs.push(f),
         }
     }
-    let mut feature_defs: Vec<abi::TerrainFeature> = Vec::new();
-    for f in e.or::<Vec<abi::TerrainFeature>>(t::FEATURES, Vec::new()) {
+    let mut feature_defs: Vec<abi::Landform> = Vec::new();
+    for f in e.or::<Vec<abi::Landform>>(t::LANDFORMS, Vec::new()) {
         if !f.name.is_empty() && feature_defs.iter().any(|x| x.name == f.name) {
             errors.push(format!("the terrain of {dimension} has two features named {}", f.name));
         } else {
             feature_defs.push(f);
         }
     }
-    for m in e.or::<Vec<abi::FeatureMask>>(t::MASKS, Vec::new()) {
+    for m in e.or::<Vec<abi::LandformMask>>(t::MASKS, Vec::new()) {
         match feature_defs.iter_mut().find(|f| f.name == m.name) {
             Some(f) if f.mask.is_empty() => f.mask = m.mask,
             Some(f) => {

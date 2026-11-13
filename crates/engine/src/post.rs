@@ -1,6 +1,7 @@
 //! Screen effects mods turn on (`client_op::POST_EFFECT`): `shaders/post/<name>.wgsl` snippets in
-//! one pipeline. With none on, the world is drawn straight to the screen; with some,
-//! it goes into an image the effects read one after another, the last one onto the screen.
+//! one pipeline. With none on, the world is drawn straight to the screen; with some, or drawn
+//! smaller than the screen (`core:render_scale`), it goes into an image the effects read one
+//! after another, the last one onto the screen, stretched (with none, a pass without an effect).
 
 use weft_render::*;
 
@@ -84,6 +85,11 @@ impl Post {
         self.pipeline.is_some() && !self.active.is_empty()
     }
 
+    /// Whether a scene drawn smaller can be stretched over the screen.
+    pub fn stretches(&self) -> bool {
+        self.pipeline.is_some()
+    }
+
     /// The image the scene is drawn into, sized to the frame.
     pub fn scene_target(&mut self, gpu: &mut dyn Backend, w: u32, h: u32) -> TextureId {
         if self.targets.is_none_or(|t| t.2 != (w, h)) {
@@ -100,14 +106,17 @@ impl Post {
     /// Runs the effects over the scene; the last one draws onto the screen and leaves that pass
     /// open for the UI.
     pub fn apply(&mut self, gpu: &mut dyn Backend, list: &mut CommandList, frame: &FrameInfo) {
-        let (Some(pipe), Some((tex, idx, _))) = (self.pipeline, self.targets) else { return };
+        let (Some(pipe), Some((tex, idx, size))) = (self.pipeline, self.targets) else { return };
         while self.params.len() < gpu.frames_in_flight() {
             self.params
                 .push(gpu.create_buffer((size_of::<Pass>() * MAX_PASSES) as u64, usage::STORAGE | usage::HOST, "post passes"));
         }
         let time = crate::shaders::time();
-        let n = self.active.len().min(MAX_PASSES);
-        let passes: Vec<Pass> = self.active[..n]
+        // No effect at all is slot 0's: the scene as it is.
+        let none = [(String::new(), 0.0)];
+        let effects = if self.active.is_empty() { &none[..] } else { &self.active[..self.active.len().min(MAX_PASSES)] };
+        let n = effects.len();
+        let passes: Vec<Pass> = effects
             .iter()
             .enumerate()
             .map(|(i, (name, strength))| Pass {
@@ -115,7 +124,7 @@ impl Post {
                 slot: self.slots.slot(name),
                 strength: *strength,
                 time,
-                size: [frame.width as f32, frame.height as f32],
+                size: [size.0 as f32, size.1 as f32],
                 pad: [0.0; 2],
             })
             .collect();

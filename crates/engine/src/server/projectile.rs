@@ -8,7 +8,7 @@ use weft_abi as abi;
 use super::dim::Dim;
 use super::entity::{Stuck, StuckIn};
 use crate::content::Content;
-use crate::physics::{Aabb, Cells, Transform};
+use crate::physics::{Cells, Transform};
 
 /// At most this many hits refused in one tick before a projectile just flies on.
 const MAX_REFUSED: usize = 4;
@@ -36,6 +36,7 @@ impl Dim {
                     pos: h.origin.to_array().into(),
                     state: h.state,
                     face: h.face as u32,
+                    part: 0,
                     point: point.to_array().into(),
                     local: (on - h.origin.as_dvec3()).to_array().into(),
                     distance: h.dist,
@@ -48,7 +49,8 @@ impl Dim {
             const WIDEST: f64 = 4.0;
             let (to, world_from) = (self.place.to_world(from + dir * reach), self.place.to_world(from));
             let (lo, hi) = (world_from.min(to) - DVec3::splat(WIDEST), world_from.max(to) + DVec3::splat(WIDEST));
-            let mut near: Option<(f64, u8, u64, Aabb)> = None;
+            let mut near: Option<(f64, u8, u64, DVec3, u32)> = None;
+            let mut scratch = Vec::new();
             for e in &self.entities.list {
                 if e.pos.cmplt(lo).any() || e.pos.cmpgt(hi).any() {
                     continue;
@@ -57,15 +59,16 @@ impl Dim {
                 if e.removed || !e.is_body() || !e.alive() || skip.contains(&e.id) || self.bodies.contains_key(&e.id) {
                     continue;
                 }
-                let b = e.aabb(c);
-                let b = Aabb { min: self.place.to_local(b.min), max: self.place.to_local(b.max) };
-                if let Some((t, face)) = crate::physics::ray_aabb(from, dir, &b, reach) {
+                // The parts of its hitbox where they are this tick, else its box.
+                let body = e.hit_body(c, self.place.to_local(e.pos));
+                let parts = c.game.entities[e.kind as usize].hitboxes.as_ref();
+                if let Some((part, t, face, on)) = crate::hitbox::ray_entity(parts, &body, from, dir, reach, &mut scratch) {
                     if near.is_none_or(|n| t < n.0) {
-                        near = Some((t, face, e.id, b));
+                        near = Some((t, face, e.id, on, part));
                     }
                 }
             }
-            if let Some((t, face, id, b)) = near {
+            if let Some((t, face, id, on, part)) = near {
                 let point = from + dir * t;
                 best = Some(abi::RayHit {
                     entity: id,
@@ -73,8 +76,9 @@ impl Dim {
                     pos: abi::Vec3::from(point.to_array()).block(),
                     state: 0,
                     face: face as u32,
+                    part,
                     point: point.to_array().into(),
-                    local: (point - b.min).to_array().into(),
+                    local: on.to_array().into(),
                     distance: t,
                 });
             }
@@ -132,7 +136,15 @@ impl Dim {
             for _ in 0..MAX_REFUSED {
                 let flags = abi::ray::BLOCKS | abi::ray::SOLID | abi::ray::ENTITIES;
                 let Some(h) = self.raycast(c, pos, v, speed, flags, &skip) else { break };
-                let q = abi::Query { entity: id, other: h.entity, pos: h.pos, state: h.state, amount: speed, ..abi::Query::DEFAULT };
+                let q = abi::Query {
+                    entity: id,
+                    other: h.entity,
+                    pos: h.pos,
+                    state: h.state,
+                    amount: speed,
+                    part: h.part,
+                    ..abi::Query::DEFAULT
+                };
                 if !self.ask(c, abi::action::PROJECTILE_HIT, &q) {
                     if h.entity == 0 {
                         break;
@@ -141,7 +153,8 @@ impl Dim {
                     continue;
                 }
                 let point = DVec3::from_array(h.point.to_array());
-                let hit = abi::ProjectileHit { projectile: id, target: h.entity, owner, pos: h.pos, face: h.face, point: h.point };
+                let hit =
+                    abi::ProjectileHit { projectile: id, target: h.entity, owner, pos: h.pos, face: h.face, part: h.part, point: h.point };
                 self.emit_engine(c, abi::action::PROJECTILE_HIT, &hit);
                 if h.entity != 0 {
                     let amount = self.compute(c, abi::chain::PROJECTILE_DAMAGE, p.damage as f64, &q, false) as f32;
@@ -151,15 +164,28 @@ impl Dim {
                         source: owner,
                         direct: id,
                         knock: v.to_array().into(),
+                        part: h.part,
                         ..abi::Damage::DEFAULT
                     };
-                    if self.damage(c, h.entity, &d) {
+                    let embedded = point + v.normalize_or_zero() * 0.15;
+                    let yaw = self.entities.get(id).map_or(0.0, |e| e.yaw);
+                    // A lethal hit removes its target; keep the target's frame while it exists.
+                    let stuck = p
+                        .sticks
+                        .then(|| self.stuck_at(StuckIn::Entity(h.entity), embedded, yaw));
+                    let outcome = self.damage_outcome(c, h.entity, &d);
+                    if let super::guard::DamageOutcome::Blocked(slot) = outcome {
+                        if p.sticks {
+                            self.catch_projectile(c, h.entity, slot, id);
+                        }
+                        if let Some(e) = self.entities.get_mut(id) {
+                            e.gone(abi::removal::HIT);
+                        }
+                        after = None;
+                        to = point;
+                    } else if matches!(outcome, super::guard::DamageOutcome::Hurt) {
                         // In their box a little way, going about with them, as vanilla's arrows.
-                        to = point + v.normalize_or_zero() * 0.15;
-                        let yaw = self.entities.get(id).map_or(0.0, |e| e.yaw);
-                        let stuck = p
-                            .sticks
-                            .then(|| self.stuck_at(StuckIn::Entity(h.entity), to, yaw));
+                        to = embedded;
                         if let Some(e) = self.entities.get_mut(id) {
                             match stuck {
                                 Some(st) => e.stuck = Some(st),
@@ -211,7 +237,7 @@ impl Dim {
                 None => (to, yaw),
             },
             StuckIn::Entity(id) => match self.entities.get(id) {
-                Some(t) => (turn(world - t.pos, -t.yaw), yaw - t.yaw),
+                Some(t) => (turn(world - t.pos, -t.body_yaw), yaw - t.body_yaw),
                 None => (to, yaw),
             },
         };
@@ -244,7 +270,7 @@ impl Dim {
                 .entities
                 .get(target)
                 .filter(|t| t.alive())
-                .map(|t| (Some(t.pos + turn(st.at, t.yaw)), st.yaw + t.yaw)),
+                .map(|t| (Some(t.pos + turn(st.at, t.body_yaw)), st.yaw + t.body_yaw)),
         };
         let Some(e) = self.entities.get_mut(id) else { return };
         let Some((pos, yaw)) = now else {

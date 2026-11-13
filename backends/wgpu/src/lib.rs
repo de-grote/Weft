@@ -119,7 +119,8 @@ struct Internal {
     /// Depth into a tightly packed buffer (`Cmd::CopyDepthToBuffer`).
     depth: wgpu::ComputePipeline,
     /// Indirect draws past the count zeroed into `scratch`, where draws with a count don't work.
-    compact: Option<wgpu::ComputePipeline>,
+    /// With an empty group 0: its buffers are group 1, where every shader has them.
+    compact: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
     scratch: Option<(wgpu::Buffer, u64)>,
 }
 
@@ -338,7 +339,17 @@ impl WgpuBackend {
         let count_draws = features.contains(F::MULTI_DRAW_INDIRECT_COUNT) && info.backend != wgpu::Backend::Dx12;
         let internal = Internal {
             depth: internal_pipeline(&device, "depth copy", DEPTH_COPY)?,
-            compact: if count_draws { None } else { Some(internal_pipeline(&device, "draw compaction", COMPACT)?) },
+            compact: if count_draws {
+                None
+            } else {
+                let pipe = internal_pipeline(&device, "draw compaction", DRAW_COMPACTION)?;
+                let empty = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &pipe.get_bind_group_layout(0),
+                    entries: &[],
+                });
+                Some((pipe, empty))
+            },
             scratch: None,
         };
         let timer = features.contains(timing).then(|| {
@@ -628,24 +639,12 @@ impl WgpuBackend {
     /// Zeroes, for `Cmd::Draw*IndirectCount` where draws with a count don't work, the records of the
     /// pass starting at `cmds[0]` past their count, into `scratch`: where each one's copy starts.
     fn compact_draws(&mut self, enc: &mut wgpu::CommandEncoder, cmds: &[Cmd]) -> Vec<u64> {
-        let Some(compact) = self.internal.compact.clone() else { return Vec::new() };
-        let draws: Vec<(BufferId, u64, BufferId, u64, u32, u64)> = cmds
-            .iter()
-            .take_while(|c| !matches!(c, Cmd::EndPass))
-            .filter_map(|c| match *c {
-                Cmd::DrawIndexedIndirectCount { buffer, offset, count_buffer, count_offset, max } => {
-                    Some((buffer, offset, count_buffer, count_offset, max, size_of::<DrawIndexedArgs>() as u64))
-                }
-                Cmd::DrawIndirectCount { buffer, offset, count_buffer, count_offset, max } => {
-                    Some((buffer, offset, count_buffer, count_offset, max, size_of::<DrawArgs>() as u64))
-                }
-                _ => None,
-            })
-            .collect();
+        let Some((compact, empty)) = self.internal.compact.clone() else { return Vec::new() };
+        let (draws, total) = count_draws(cmds);
         if draws.is_empty() {
             return Vec::new();
         }
-        let total: u64 = draws.iter().map(|d| d.4 as u64 * d.5).sum::<u64>().max(16);
+        let total = total.max(16);
         if self.internal.scratch.as_ref().is_none_or(|s| s.1 < total) {
             let size = total.next_power_of_two();
             let raw = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -657,29 +656,25 @@ impl WgpuBackend {
             self.internal.scratch = Some((raw, size));
         }
         let scratch = self.internal.scratch.as_ref().unwrap().0.clone();
-        let layout = compact.get_bind_group_layout(0);
+        let layout = compact.get_bind_group_layout(1);
         let mut pass = enc.begin_compute_pass(&Default::default());
         pass.set_pipeline(&compact);
-        let mut starts = Vec::new();
-        let mut at = 0u64;
-        for (buffer, offset, count_buffer, count_offset, max, stride) in draws {
+        pass.set_bind_group(0, &empty, &[]);
+        for d in &draws {
             let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: self.buffers.get(buffer.0).raw.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: self.buffers.get(count_buffer.0).raw.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 0, resource: self.buffers.get(d.buffer.0).raw.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.buffers.get(d.count_buffer.0).raw.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: scratch.as_entire_binding() },
                 ],
             });
-            pass.set_bind_group(0, &group, &[]);
-            let args = [(offset / 4) as u32, (count_offset / 4) as u32, max, (at / 4) as u32, (stride / 4) as u32];
-            pass.set_immediates(0, bytes(&args));
-            pass.dispatch_workgroups(max.div_ceil(64), 1, 1);
-            starts.push(at);
-            at += max as u64 * stride;
+            pass.set_bind_group(1, &group, &[]);
+            pass.set_immediates(0, bytes(&d.args));
+            pass.dispatch_workgroups(d.max.div_ceil(64), 1, 1);
         }
-        starts
+        draws.iter().map(|d| d.at).collect()
     }
 }
 
@@ -713,26 +708,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(depth);
     if id.x < size.x && id.y < size.y {
         out[id.y * size.x + id.x] = textureLoad(depth, vec2<i32>(id.xy), 0);
-    }
-}
-"#;
-
-const COMPACT: &str = r#"
-struct Args { src: u32, count: u32, max: u32, dst: u32, stride: u32 }
-@group(0) @binding(0) var<storage, read> src: array<u32>;
-@group(0) @binding(1) var<storage, read> counts: array<u32>;
-@group(0) @binding(2) var<storage, read_write> dst: array<u32>;
-var<immediate> a: Args;
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    let i = id.x;
-    if i >= a.max {
-        return;
-    }
-    let live = i < counts[a.count];
-    for (var w = 0u; w < a.stride; w++) {
-        dst[a.dst + i * a.stride + w] = select(0u, src[a.src + i * a.stride + w], live);
     }
 }
 "#;

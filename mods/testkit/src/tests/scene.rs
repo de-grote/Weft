@@ -152,6 +152,17 @@ async fn sand_and_support(t: T, o: [i32; 3]) -> R {
     t.check_eq(t.block(add(o, [3, 0, 0])).await?, "base:stone".into(), "a falling body's bottom block landed");
     t.check_eq(t.block(add(o, [3, 1, 0])).await?, "base:oak_planks".into(), "the block on it landed on top");
     t.check_eq(t.block(high).await?, "core:air".into(), "nothing left up there");
+    // A slab coming down at once, its layers onto each other, all lands as blocks.
+    let (lo, hi) = (add(o, [8, 6, 0]), add(o, [17, 9, 9]));
+    t.fill(lo, hi, "sand").await?;
+    t.secs(6.0).await?;
+    let landed: u32 = t
+        .op(&format!("count {} {} sand", at(add(o, [8, 0, 0])), at(add(o, [17, 3, 9]))))
+        .await?
+        .parse()
+        .map_err(|e| format!("count: {e}"))?;
+    t.check_eq(landed, 400, "sand of a 10 by 10 by 4 slab on the ground");
+    t.check_eq(count_at(&t, "falling_block", add(o, [12, 4, 4]), 16.0).await?, 0, "no sand left falling");
     let stone = add(o, [6, 0, 0]);
     t.set(stone, "stone").await?;
     t.set(add(stone, [0, 1, 0]), "torch").await?;

@@ -8,6 +8,7 @@ mod looks;
 mod probe;
 pub mod redstone;
 mod scene;
+mod shields;
 mod sync;
 mod ui;
 mod visual;
@@ -34,6 +35,7 @@ pub fn all() -> Vec<TestDef> {
         ui::hud_editor,
         ui::debug_lines,
         ui::inventory_crafting,
+        ui::target_info,
         ui::creative_inventory,
         ui::chat_overflow,
         ui::text_on_screen,
@@ -74,6 +76,7 @@ pub fn all() -> Vec<TestDef> {
         gameplay::projectiles,
         extend::steps_in_phases,
         gameplay::bow_and_keys,
+        shields::shields,
         gameplay::permissions,
         gameplay::armor,
         gameplay::slot_accepts,

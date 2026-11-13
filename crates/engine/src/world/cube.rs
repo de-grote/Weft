@@ -91,6 +91,9 @@ pub struct Cube {
     /// The last area edit of its dimension it got (`server::area`), so a saved cube gets the
     /// ones made while it was away, once.
     pub edits: u32,
+    /// Just generated: the entities and the rest its features bring, for the server to put in
+    /// when it joins the world. Never saved nor sent.
+    pub generated: Option<Box<crate::features::Generated>>,
 }
 
 impl Cube {
@@ -100,7 +103,15 @@ impl Cube {
     }
 
     pub fn uniform(state: u32, light: u32) -> Cube {
-        Cube { blocks: Blocks::Uniform(state), extras: Default::default(), light: Light::Uniform(light), biomes: None, ticked: 0, edits: 0 }
+        Cube {
+            blocks: Blocks::Uniform(state),
+            extras: Default::default(),
+            light: Light::Uniform(light),
+            biomes: None,
+            ticked: 0,
+            edits: 0,
+            generated: None,
+        }
     }
 
     pub fn from_states(states: &[u32; VOLUME]) -> Cube {
@@ -526,7 +537,7 @@ impl Cube {
             }
         }
         *data = r.0;
-        Some(Cube { blocks, extras, light, biomes, ticked, edits })
+        Some(Cube { blocks, extras, light, biomes, ticked, edits, generated: None })
     }
 }
 

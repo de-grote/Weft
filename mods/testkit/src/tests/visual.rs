@@ -91,6 +91,14 @@ pub async fn tooltips(t: T) -> R {
             t.probe("diamond block icon in the tooltip", block, block > 0.0008);
         }
     }
+    settings::ADVANCED_TOOLTIPS.set(true);
+    t.frames(4).await?;
+    if let Some(Rect { x, y, w, h }) = t.c().ui_rect("slot:36") {
+        t.c().input_cursor(x + w / 2.0, y + h / 2.0);
+        t.frames(4).await?;
+        t.shot("advanced").await?;
+    }
+    settings::ADVANCED_TOOLTIPS.set(false);
     t.c().menu_close();
     t.no_screen().await
 }

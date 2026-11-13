@@ -255,7 +255,7 @@ impl<T: Value> Event<T> {
     pub fn name(&self) -> &str {
         self.full.get_or_init(|| crate::full_name(self.name))
     }
-    /// `u32::MAX` when nobody listens.
+    /// `u32::MAX` if the event is unknown or registries are not ready yet.
     pub fn id(&self) -> u32 {
         let id = self.id.load(Ordering::Relaxed);
         if id != UNRESOLVED {
@@ -292,7 +292,8 @@ schema_values!(
     abi::Removed,
     abi::ProjectileHit,
     abi::KeyChange,
-    abi::EffectChange
+    abi::EffectChange,
+    abi::FeaturePlaced
 );
 
 /// The engine's events with no question before them; the others are `actions`.
@@ -310,6 +311,9 @@ pub static WEATHER_TICK: Event<abi::WeatherTick> = Event::named(abi::event::WEAT
 pub static KEY: Event<abi::KeyChange> = Event::named(abi::event::KEY);
 /// An entity left the world, and why (`removal`): died, despawned, unloaded, picked up..
 pub static ENTITY_REMOVED: Event<abi::Removed> = Event::named(abi::event::ENTITY_REMOVED);
+/// A feature on a grid stands in the world now, its start's cube generated: `feature` is its id
+/// (`VILLAGE.id()`).
+pub static FEATURE_PLACED: Event<abi::FeaturePlaced> = Event::named(abi::event::FEATURE_PLACED);
 /// An effect ran out or was taken off.
 pub static EFFECT_ENDED: Event<abi::EffectChange> = Event::named(abi::event::EFFECT_ENDED);
 
@@ -1086,7 +1090,11 @@ impl Registry {
 
     /// Declares a component stacks carry a value of (`stack.with(&COMP, v)`), with its flags
     /// (`abi::stack_flags`: kept on the server, not saved), 0 for neither.
-    pub fn stack_component<T: Value>(&mut self, c: &crate::Component<T>, flags: u32) -> crate::game::DeclarationBuilder<'_> {
+    pub fn stack_component<T: crate::component::Data>(
+        &mut self,
+        c: &crate::Component<T>,
+        flags: u32,
+    ) -> crate::game::DeclarationBuilder<'_> {
         self.declare::<T>(c.name()).stack(flags)
     }
 }

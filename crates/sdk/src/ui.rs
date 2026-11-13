@@ -27,6 +27,11 @@ impl ClientView {
     pub fn player(&self) -> u64 {
         unsafe { (host().client_player)(self.raw) }
     }
+    /// The block or entity under the crosshair, as the client uses it for interactions.
+    pub fn target(&self) -> Option<abi::Target> {
+        let mut target = abi::Target::default();
+        (unsafe { (host().client_target)(self.raw, &mut target) } != 0).then_some(target)
+    }
     /// Own player's attribute, as the server says. Mods' attributes come too. Unlike
     /// `World::attribute` it takes no entity: the client only has its own player's.
     pub fn attribute(&self, a: &crate::Attribute) -> f64 {
@@ -476,7 +481,7 @@ impl Ui {
         self.leaf(n)
     }
 
-    /// What mods add to place `area` of `screen` (`Registry::screen_part`). A screen of your own
+    /// What mods add to place `area` of a screen or HUD element (`Registry::screen_part`). A screen of your own
     /// that replaces an engine one (`core:title`) keeps other mods' buttons by building its places.
     pub fn screen_parts(&mut self, screen: &str, area: &str) {
         let mut n = node(k::SCREEN_PARTS, S::default());

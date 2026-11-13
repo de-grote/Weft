@@ -3,8 +3,7 @@
 
 use weft_sdk::*;
 
-static CALM: Music = Music::named("calm");
-static DEEP: Music = Music::named("deep");
+static SHEEP: Music = Music::named("sheep");
 
 pub fn register(r: &mut Registry) {
     for g in ["stone", "wood", "gravel", "grass", "sand", "glass", "cloth"] {
@@ -32,10 +31,7 @@ pub fn register(r: &mut Registry) {
             .volume(0.6)
             .pitch(0.5, 0.55);
     }
-    r.music(&CALM)
-        .tracks(&["music/calm1"])
+    r.music(&SHEEP)
+        .tracks(&["music/418DreamingSheep"])
         .when(&conditions::SURFACE);
-    r.music(&DEEP)
-        .tracks(&["music/deep1"])
-        .when(&conditions::UNDERGROUND);
 }

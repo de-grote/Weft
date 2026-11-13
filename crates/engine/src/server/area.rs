@@ -559,6 +559,27 @@ fn run_light_jobs(
     }
 }
 
+/// The light of cubes `set` thrown away and made again from nothing, top down, on every core: what
+/// went wrong in it (a cube lit before its neighbors came) gone. Every cube whose light changed
+/// goes into `dirty`.
+pub fn relight_anew(c: &'static Content, dim: u32, cubes: &mut FxHashMap<IVec3, Arc<Cube>>, dirty: &mut FxHashSet<IVec3>, set: &[IVec3]) {
+    let mut order: Vec<IVec3> = set
+        .iter()
+        .copied()
+        .filter(|p| cubes.contains_key(p))
+        .collect();
+    order.sort_unstable_by_key(|p| (-p.y, p.x, p.z));
+    for p in &order {
+        Arc::make_mut(cubes.get_mut(p).unwrap()).fill_light(0);
+    }
+    let def = &c.dims[dim as usize];
+    let jobs = order
+        .iter()
+        .map(|&cp| LightJob::New(cp, crate::world::light::open_above(def, cp.y)))
+        .collect();
+    run_light_jobs(c, dim, cubes, dirty, jobs);
+}
+
 /// Light once per cube, the changed ones and those around them (light reaches 15 blocks:
 /// less than a cube), from the top down so sky light comes from cubes already done.
 fn relight_around(

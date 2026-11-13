@@ -371,13 +371,20 @@ pub fn engine_configs(keys: &[(String, String)]) -> Vec<RawEntry> {
     let user = std::env::var("USERNAME")
         .or_else(|_| std::env::var("USER"))
         .unwrap_or_else(|_| "Player".into());
+    // A phone's GPU spends most of its time on distant terrain's triangles and on pixels.
+    let phone = cfg!(target_os = "android");
     let mut out = vec![
         volume("core:volume_master").set(c::ORDER, -1),
         string("core:language", &crate::settings::system_language()),
         number("core:gui_scale", ck::INT, 0.0, 0.0, 16.0, 1.0),
+        // The world drawn at this part of the screen's size and stretched over it; the interface
+        // stays sharp. What a phone's GPU needs, most of its time going to pixels.
+        number("core:render_scale", ck::FLOAT, if phone { 0.6 } else { 1.0 }, 0.25, 1.0, 0.05),
         number("core:view_distance", ck::INT, 12.0, 2.0, 64.0, 1.0),
         // Distant terrain beyond the view (`client::lod`), in cubes; 0 off.
-        number("core:lod_distance", ck::INT, 256.0, 0.0, 2048.0, 16.0),
+        number("core:lod_distance", ck::INT, if phone { 32.0 } else { 256.0 }, 0.0, 2048.0, 16.0),
+        // How near distant terrain's tiles split into finer ones, in tile widths (`client::lod`).
+        number("core:lod_detail", ck::FLOAT, if phone { 2.0 } else { 4.0 }, 1.0, 4.0, 0.5),
         // Blocks clouds float above where their dimension puts them.
         number("core:cloud_height", ck::INT, 0.0, 0.0, 512.0, 16.0),
         // Vanilla's: in GUI pixels, and percent of the dark behind the text.
@@ -400,7 +407,10 @@ pub fn engine_configs(keys: &[(String, String)]) -> Vec<RawEntry> {
         number("core:sensitivity", ck::FLOAT, 1.0, 0.01, 3.0, 0.01),
         number("core:brightness", ck::FLOAT, 0.5, 0.0, 1.0, 0.0),
         number("core:debug_groups", ck::INT, u32::MAX as f64, 0.0, u32::MAX as f64, 1.0),
+        number("core:advanced_tooltips", ck::BOOL, 0.0, 0.0, 1.0, 0.0),
         number("core:invert_y", ck::BOOL, 0.0, 0.0, 1.0, 0.0),
+        // Buttons and steering for fingers (`touch`), on where the screen is the only input.
+        number("core:touch_controls", ck::BOOL, cfg!(target_os = "android") as u8 as f64, 0.0, 1.0, 0.0),
         string("core:debug_lines", ""),
         string("core:name", &user),
         string("core:relays", ""),
@@ -415,6 +425,8 @@ pub fn engine_configs(keys: &[(String, String)]) -> Vec<RawEntry> {
         number("core:first_person_model", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
         number("core:show_avatars", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
         number("core:occlusion_culling", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
+        // Off, what is behind the camera is drawn too: for shaders that bend the world around.
+        number("core:frustum_culling", ck::BOOL, 1.0, 0.0, 1.0, 0.0),
         number("core:allow_avatars", ck::BOOL, 1.0, 0.0, 1.0, 0.0).set(c::SCOPE, scope::WORLD),
         number("core:keep_inventory", ck::BOOL, 0.0, 0.0, 1.0, 0.0).set(c::SCOPE, scope::WORLD),
         // Vanilla's: more than this many pushing on one hurt it (0: never).
@@ -432,13 +444,16 @@ pub fn engine_configs(keys: &[(String, String)]) -> Vec<RawEntry> {
     let pages: [(&str, &[&str]); 6] = [
         // What anyone changes now and then; the rest is a page away.
         ("core:settings", &["fov", "view_distance"]),
-        ("core:video", &["gui_scale", "brightness", "lod_distance", "cloud_height", "vsync", "fullscreen", "renderer"]),
-        ("core:controls", &["sensitivity", "invert_y"]),
+        (
+            "core:video",
+            &["gui_scale", "render_scale", "brightness", "lod_distance", "lod_detail", "cloud_height", "vsync", "fullscreen", "renderer"],
+        ),
+        ("core:controls", &["sensitivity", "invert_y", "touch_controls"]),
         ("core:accessibility", &["fov_effects"]),
         ("core:profile", &["first_person_model", "show_avatars"]),
         ("core:chat_settings", &["chat_width", "chat_height", "chat_height_closed", "chat_opacity", "chat_visibility"]),
     ];
-    let percent = ["core:sensitivity", "core:brightness", "core:fov_effects"];
+    let percent = ["core:sensitivity", "core:brightness", "core:fov_effects", "core:render_scale"];
     // Applied on the way, the scale would move the slider under the cursor.
     let on_release = ["core:gui_scale"];
     out.into_iter()

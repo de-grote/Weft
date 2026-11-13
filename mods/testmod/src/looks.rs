@@ -95,10 +95,13 @@ pub fn register(r: &mut Registry) {
         .biome("#dry")
         .buried(1)
         .turns();
+    // An outpost here and there on Mars: a hub with a chest and a pig, halls joined to its sides
+    // and to each other by their joints, in bricks where the template says stone bricks.
+    outpost(r);
     // Glow crystals grow only in Mars' crystal caves (an underground biome).
     r.ore(&GLOW_CRYSTAL)
         .dimension(&crate::MARS)
-        .veins(3)
+        .per_cube(3)
         .vein_size(6)
         .replaces("#stone_ore_replaceables")
         .biome("#cave");
@@ -342,4 +345,58 @@ fn wisps(t: &EntityTick) {
                 .speed(0.3);
         }
     }
+}
+
+/// What an outpost may be built of, as records other mods add to and change: a weight each.
+static STONE_STYLE: Record = Record::named("stone_style");
+static STYLE: Tag = Tag::named("testmod:style");
+static STYLE_WEIGHT: Component<f32> = Component::named("testmod:weight");
+
+pub static OUTPOST: Feature = Feature::named("outpost");
+pub static OUTPOST_HUB: Template = Template::named("outpost_hub");
+/// From `assets/structures/outpost_hall.json`.
+pub static OUTPOST_HALL: Template = Template::named("outpost_hall");
+static OUTPOST_LOOT: LootTable = LootTable::named("outpost");
+static RED: Palette = Palette::named("red");
+static PIG: EntityKind = EntityKind::named("base:pig");
+
+fn outpost(r: &mut Registry) {
+    r.record(&STONE_STYLE)
+        .tag(STYLE.name())
+        .set(&STYLE_WEIGHT, 3.0);
+    // 5 x 4 x 5, open at the middle of each side, where its joints are.
+    r.template(&OUTPOST_HUB)
+        .layer(&["wwwww", "wwwww", "wwwww", "wwwww", "wwwww"])
+        .layer(&["ww.ww", "w...w", ".....", "w...w", "ww.ww"])
+        .layer(&["wwwww", "w...w", "w...w", "w...w", "wwwww"])
+        .layer(&["sssss", "sssss", "sssss", "sssss", "sssss"])
+        .key('w', "@wall")
+        .key('s', "@wall:slab")
+        .key('.', "air")
+        .fill("base:chest", [2, 1, 2], [2, 1, 2])
+        .slot("wall", "base:stone_bricks")
+        .loot([2, 1, 2], &OUTPOST_LOOT)
+        .entity(&PIG, [1.5, 1.0, 1.5])
+        .joint([2, 1, 0], 4, "side", "door", "halls")
+        .joint([4, 1, 2], 1, "side", "door", "halls")
+        .joint([2, 1, 4], 5, "side", "door", "halls")
+        .joint([0, 1, 2], 0, "side", "door", "halls");
+    // The hall is the file `structures/outpost_hall.json`: 3 x 3 x 4 along z, its door at the
+    // north end, going on at the south end.
+    r.palette(&RED).slot("wall", "base:bricks");
+    r.loot(&OUTPOST_LOOT)
+        .pool(Pool::new().rolls(3, 3).entry(Entry::item("base:diamond")));
+    r.feature(&OUTPOST)
+        .dimension(&crate::MARS)
+        .spacing(320)
+        .chance(1.0)
+        .priority(2)
+        .reach(40)
+        .reach_y(12, 4)
+        .palette(&RED)
+        .plan(|p| {
+            let at = p.pos();
+            let halls = Pools::new().pool("halls", &[(&OUTPOST_HALL, 1)]);
+            p.grow(&OUTPOST_HUB, at, Transform::NONE, &halls, 2);
+        });
 }

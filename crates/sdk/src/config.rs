@@ -102,6 +102,7 @@ pub mod settings {
     pub static BRIGHTNESS: Config<f32> = Config::named("core:brightness");
     /// Bit per F3 overlay group shown.
     pub static DEBUG_GROUPS: Config<u32> = Config::named("core:debug_groups");
+    pub static ADVANCED_TOOLTIPS: Config<bool> = Config::named("core:advanced_tooltips");
     pub static NAME: TextConfig = TextConfig::named("core:name");
     /// Enabled resource packs, highest priority first, comma separated.
     /// When each F3 line shows: `fps=always,cube=never`.

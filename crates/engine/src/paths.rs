@@ -74,6 +74,46 @@ fn per_user(os: &str, env: &dyn Fn(&str) -> Option<PathBuf>) -> Option<Dirs> {
     }
 }
 
+static SHIPPED: OnceLock<PathBuf> = OnceLock::new();
+
+/// Where a shipped game keeps its own files (`assets/core`): next to the executable, or on Android
+/// where the package's were unpacked (`set_shipped`).
+pub fn shipped() -> Option<PathBuf> {
+    SHIPPED.get().cloned().or_else(|| {
+        std::env::current_exe()
+            .ok()?
+            .parent()
+            .map(Path::to_path_buf)
+    })
+}
+
+/// Once, at start, where an Android package's files were unpacked.
+pub fn set_shipped(dir: PathBuf) {
+    let _ = SHIPPED.set(dir);
+}
+
+/// Where the engine's own code is, which a shipped game's mod libraries sit beside: the
+/// executable's folder, or on Android the package's native libraries, the only place a library
+/// may load from there.
+pub fn libraries() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+        if unsafe { libc::dladdr(libraries as *const libc::c_void, &mut info) } == 0 || info.dli_fname.is_null() {
+            return None;
+        }
+        let path = unsafe { std::ffi::CStr::from_ptr(info.dli_fname) };
+        Path::new(&*path.to_string_lossy())
+            .parent()
+            .map(Path::to_path_buf)
+    }
+    #[cfg(not(target_os = "android"))]
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(Path::to_path_buf)
+}
+
 static CONFIG: OnceLock<PathBuf> = OnceLock::new();
 
 /// Once, at start, with what `config` should answer.

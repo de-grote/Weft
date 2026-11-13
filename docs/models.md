@@ -106,6 +106,8 @@ One file holds any number of animations, and an animation's name is whatever fol
 ```
 Each bone can carry `rotation` (degrees), `position` (model pixels) and `scale`, as keyframes at times in seconds. A keyframe is a plain `[x, y, z]` or an object with `pre`, `post` and `"lerp_mode": "catmullrom"` when you want a jump or a smooth curve. Between keys the value is linear. `loop` is `true` to repeat, `false` to play once and go back to normal, or `"hold_on_last_frame"` to stay in the last pose.
 
+Clips go by the server's ticks, not by when a client happened to see something start: every player sees a mob in the same pose at the same moment, which is how an arrow stays on the arm it went into for all of them.
+
 Keyframes are added on top of what is below them, and of a bone's resting angle, so even a walking leg can be animated. Set `"override_previous_animation": true` (Blockbench's Override box) and they go over what is below on the bones they name instead, scale included (an arrow a `hold` clip hides at scale 0 shows again in `use`): `blend_weight` then says how much of that it hides, and its own angles stay what the file has. So 1 replaces it, and 0.9 on a greatsword's `hold` leaves a tenth of the walk on the arms, so they stir without dangling. A clip only ever touches the bones it names: arms only and the walk goes on, the whole body for a heavy swing and it doesn't. The angles follow Blockbench's convention: a Bedrock arm turned -90 degrees on x points forward.
 
 Without override `blend_weight` scales the clip: a number, or `query.modified_move_speed` for how fast it walks. `anim_time_update` says what moves the clip's time: `query.modified_distance_moved` for steps, or anything with `progress` in it to stretch the clip over however long the action takes. Other Molang isn't evaluated.
@@ -132,8 +134,8 @@ Anything else is yours to name. Started from code, everyone who sees the entity 
 ```rust
 world.action_play(entity_id, "bow", false);    // false plays once, true repeats
 world.action_play(entity_id, "", false);       // back to normal
-world.action_override(creeper, "walk", "flee_cat"); // plays flee_cat wherever it would walk
-world.action_override_clear(creeper, "walk");
+world.action_override(mob, "walk", "flee_cat"); // plays flee_cat wherever it would walk
+world.action_override_clear(mob, "walk");
 ```
 `action_override` is the one for a mob's goal, and `ai::with_action_override("walk", "flee_cat", goal)` does it for as long as the goal runs. Without a `flee_cat` clip it just goes on walking.
 
@@ -217,7 +219,7 @@ The bones are looked for in the entity's model and in what it holds and has on. 
 ## A player's own model
 Players can bring a model with no mod at all: `skins/avatar/` holds `avatar.geo.json` and `avatar.png`, and if they like `avatar.animation.json`, `avatar.bones` and `avatar_e.png` (a glow mask). Everyone sees it from the next time they join; `examples/avatar` is one to start from.
 
-It is the same as any model: the bone names above make walking, holding and swinging work with no clips, its own clips go over them by name, items go on `mainItem` and `offItem`. No code comes with it, so it can't do any harm: all of it together stays under 512 KB, with limits on bones, boxes, clips and how far it reaches, and what goes past them shows as the usual player. Armor's textures are painted for the usual player, so it doesn't show on an avatar. A player can turn others' models off with Players' Own Models in the settings, and a world with `core:allow_avatars` off doesn't pass them on.
+It is the same as any model: the bone names above make walking, holding and swinging work with no clips, its own clips go over them by name, items go on `mainItem` and `offItem`. No code comes with it, so it can't do any harm: all of it together stays under 512 KB, with limits on bones, boxes, clips and how far it reaches, and what goes past them shows as the usual player. Armor goes on it as on any model (see below). A player can turn others' models off with Players' Own Models in the settings, and a world with `core:allow_avatars` off doesn't pass them on.
 
 ## Armor and other worn items
 An item shows up on the wearer when it sits in an equipment slot. The slots are declared once, with the bones what is worn there covers and the silhouette of the empty slot, and an item only names its slot:
@@ -227,6 +229,11 @@ r.equipment_slot(&BACK, &["body", "leftWing", "rightWing"], "slot_back"); // a s
 r.item(&RUBY_HELMET).wearable(&HEAD, 1.0, "armor/ruby_1")
 ```
 A slot covers bones by name. A name with a [role](#roles) (`head`, `leftArm`, `leg0` ...) covers every bone of that role, so armor fits any model; any other name covers that bone only. The base game's slots use `worn::HEAD`, `worn::CHEST`, `worn::LEGS` and `worn::FEET`. `wearable` takes how far the piece sticks out from the body in pixels (vanilla armor uses 1.0, and 0.5 for the leggings layer) and its texture.
-The slot then takes the item in the inventory, shift-clicks put it there, and a new slot of any mod shows up in the inventory screen by itself (`.equipment()` on the menu, `ui.equipment()` on its screen). That texture is drawn on the same boxes as the wearer's, so it follows the wearer's skin layout, and the 64x32 files in `mods/base/assets/textures/entity/armor/` show how (the name is under `entity/`). It works on any model with the right roles, mobs made with `humanoid` included.
+The slot then takes the item in the inventory, shift-clicks put it there, and a new slot of any mod shows up in the inventory screen by itself (`.equipment()` on the menu, `ui.equipment()` on its screen).
+
+The texture is laid out like vanilla armor's, the 64x32 files in `mods/base/assets/textures/entity/armor/` (the name is under `entity/`), and every model wears it the same way, players' own models too. Per covered bone:
+- **The model's own armor**: a bone called `armor_<bone>` (`armor_head`, `armor_leftArm`), a child of the bone it is for, with its boxes painted on the armor texture. It and everything under it is drawn only for what is worn there, never with the skin. A model whose head is a pumpkin or whose arms are wings says this way exactly where a helmet or a sleeve sits.
+- **Otherwise vanilla's piece, fitted**: the head, `body`, the arms and the legs get vanilla's piece stretched over their biggest box, so a 10 pixel head wears a 10 pixel helmet and ears or a muzzle on the same bone stay outside. On `humanoid` this is exactly its own boxes.
+- **Any other bone** a slot covers is worn on its own boxes, with a texture laid out like the wearer's skin.
 
 Items in the world and in the hand are flat sprites with some thickness, the boxes of a block, or [a model of their own](#blocks-and-items). `F3+T` reloads models and animations along with textures while the game runs.

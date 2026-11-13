@@ -104,6 +104,7 @@ pub static HOST: Host = Host {
     client_weather: crate::client::modui::client_weather,
     client_component: crate::client::modui::client_component,
     client_entity: crate::client::modui::client_entity,
+    client_target: crate::client::modui::client_target,
     energy_move,
     component_get,
     component_set,
@@ -199,7 +200,11 @@ pub static HOST: Host = Host {
     navigate,
     navigating,
     block_list,
-    place_template,
+    place,
+    unplace,
+    plan_op,
+    template_size,
+    template_joints,
     world_seed,
     structure_near,
     fall_block,
@@ -234,24 +239,74 @@ unsafe extern "C" fn block_list(index: u32) -> abi::Slice<[u32; 2]> {
         .map_or(abi::Slice::EMPTY, |l| abi::Slice::new(l))
 }
 
-unsafe extern "C" fn place_template(w: *mut abi::WorldCtx, name: Str, pos: *const abi::BlockPos) -> u32 {
+unsafe extern "C" fn place(w: *mut abi::WorldCtx, name: Str, pos: *const abi::BlockPos, transform: u32, palette: Str) -> u64 {
     unsafe {
         let c = content();
-        let Some(&t) = c.template_names.get(name.as_str()) else {
-            misuse("place", || format!("no template {}", name.as_str()));
-            return 0;
-        };
+        let (name, palette) = (name.as_str(), palette.as_str());
         let d = dim(w);
         let at = ip(pos);
-        let blocks = &c.templates[t as usize].blocks;
-        if blocks.iter().any(|(p, _)| d.get(at + *p).is_none()) {
+        let pal = match palette {
+            "" => None,
+            p => match c.palette_names.get(p) {
+                Some(&p) => Some(p),
+                None => {
+                    misuse("place", || format!("no palette {p}"));
+                    return 0;
+                }
+            },
+        };
+        let placed = if let Some(&t) = c.template_names.get(name) {
+            d.place_template(c, &c.templates[t as usize], at, crate::template::Transform::new(transform), pal)
+        } else if let Some(fi) = c.dims[d.id as usize]
+            .features
+            .iter()
+            .position(|f| f.name == name)
+        {
+            d.place_feature(c, fi, at)
+        } else {
+            misuse("place", || format!("no template or feature {name} (here)"));
             return 0;
-        }
-        for &(p, state) in blocks {
-            d.set(c, at + p, state);
-        }
-        1
+        };
+        placed.unwrap_or(0)
     }
+}
+
+unsafe extern "C" fn unplace(w: *mut abi::WorldCtx, placing: u64) -> u32 {
+    unsafe { dim(w).unplace(content(), placing) as u32 }
+}
+
+unsafe extern "C" fn plan_op(ctx: *mut abi::PlanCtx, op: *const abi::PlanOp) -> u32 {
+    if ctx.is_null() || op.is_null() {
+        return 0;
+    }
+    unsafe { (*(ctx as *mut crate::features::PlanCtx)).op(&*op) as u32 }
+}
+
+unsafe extern "C" fn template_size(name: Str, transform: u32, out: *mut abi::BlockPos) -> u32 {
+    let Some(c) = try_content() else { return 0 };
+    let Some(&t) = c.template_names.get(unsafe { name.as_str() }) else { return 0 };
+    let size = crate::template::Transform::new(transform).size(c.templates[t as usize].size);
+    unsafe { *out = size.to_array().into() };
+    1
+}
+
+unsafe extern "C" fn template_joints(name: Str, transform: u32, out: *mut abi::Joint, cap: u32) -> u32 {
+    let Some(c) = try_content() else { return 0 };
+    let Some(&t) = c.template_names.get(unsafe { name.as_str() }) else { return 0 };
+    let def = &c.templates[t as usize];
+    let tr = crate::template::Transform::new(transform);
+    for (i, j) in def.joints.iter().enumerate().take(cap as usize) {
+        let pos = tr.cell(def.size, IVec3::from_array(j.pos));
+        let joint = abi::Joint {
+            pos: pos.to_array().into(),
+            face: tr.face(j.face as usize) as u32,
+            name: Str::new(&j.name),
+            target: Str::new(&j.target),
+            pool: Str::new(&j.pool),
+        };
+        unsafe { *out.add(i) = joint };
+    }
+    def.joints.len() as u32
 }
 
 unsafe extern "C" fn world_seed(w: *mut abi::WorldCtx) -> u64 {
@@ -267,7 +322,7 @@ unsafe extern "C" fn structure_near(
 ) -> u32 {
     unsafe {
         let d = dim(w);
-        match crate::server::structure_near(content(), d.id, d.seed, name.as_str(), ip(pos), radius) {
+        match crate::features::nearest(content(), d.id, d.seed, name.as_str(), ip(pos), radius) {
             Some(p) => {
                 *out = p.to_array().into();
                 1
@@ -606,6 +661,7 @@ unsafe extern "C" fn entity_spawn(w: *mut abi::WorldCtx, desc: *const abi::Spawn
     }
     let dim = unsafe { dim(w) };
     let pos = crate::world::dvec(d.pos);
+    let inherited = if d.set & abi::spawn_set::INHERIT_VELOCITY != 0 { dim.world_velocity(d.owner) } else { DVec3::ZERO };
     // Items are their stack: nothing to spawn for an empty one.
     // How it starts, set before anyone is asked about it.
     let init = |e: &mut crate::server::entity::Entity| {
@@ -613,6 +669,7 @@ unsafe extern "C" fn entity_spawn(w: *mut abi::WorldCtx, desc: *const abi::Spawn
         if d.set & s::VELOCITY != 0 && crate::world::dvec(d.velocity).is_finite() {
             e.vel = crate::world::dvec(d.velocity);
         }
+        e.vel += inherited;
         if d.set & s::YAW != 0 && d.yaw.is_finite() {
             e.yaw = d.yaw;
         }
@@ -1548,19 +1605,32 @@ unsafe extern "C" fn recipe_consume(kind: Str, recipe: u32, stacks: *mut ItemSta
     let Some(r) = recipe_at(kind, recipe) else { return 0 };
     let stacks = unsafe { std::slice::from_raw_parts_mut(stacks, count as usize) };
     let Some(found) = c.game.find_inputs(r, stacks, &c.components) else { return 0 };
-    let counts = r
-        .inputs
-        .iter()
-        .zip(&r.input_counts)
-        .filter(|(i, _)| !matches!(i, registry::Ingredient::Empty))
-        .map(|(_, &n)| n);
-    for (i, n) in found.into_iter().zip(counts) {
-        stacks[i].count -= n;
-        if stacks[i].count == 0 {
-            stacks[i] = ItemStack::EMPTY;
-        }
+    let used = (0..r.inputs.len()).filter(|&k| !matches!(r.inputs[k], registry::Ingredient::Empty));
+    for (i, k) in found.into_iter().zip(used) {
+        let (s, n) = (stacks[i], r.input_counts[k]);
+        stacks[i] = match r.uses.get(k).copied().unwrap_or(registry::Use::Consume) {
+            registry::Use::Keep => s,
+            registry::Use::Wear(w) => match crate::stack::worn(c, s, w) {
+                broken if broken.is_empty() => remainder_of(c, s.item).map_or(ItemStack::EMPTY, |x| ItemStack::new(x, 1)),
+                after => after,
+            },
+            // What is left of the last of a stack takes its place; a machine has nowhere else
+            // to put it.
+            u if s.count == n => match u {
+                registry::Use::Leaves(x) => ItemStack::new(x, n),
+                _ => remainder_of(c, s.item).map_or(ItemStack::EMPTY, |x| ItemStack::new(x, n)),
+            },
+            _ => ItemStack { count: s.count - n, ..s },
+        };
     }
     1
+}
+
+fn remainder_of(c: &crate::content::Content, item: u32) -> Option<u32> {
+    let id = c.components.id(abi::comp::REMAINDER)?;
+    c.components
+        .get::<u32>(crate::components::ITEM, item, id)
+        .filter(|&r| r != 0)
 }
 
 unsafe extern "C" fn recipe_process(kind: Str, input: u32, time_out: *mut u32) -> ItemStack {
@@ -1630,6 +1700,8 @@ unsafe extern "C" fn find(kind: u32, name: Str, count: *mut u32) -> u32 {
         abi::entry_kind::ATTRIBUTE => c.game.attr_names.get(name).copied(),
         abi::entry_kind::KEY => at(c.game.keys.iter().map(|k| k.name.as_str()), name),
         abi::entry_kind::LIQUID => at(c.liquids.iter().map(|l| l.name.as_str()), name),
+        abi::entry_kind::FEATURE => c.feature_names.get(name).copied(),
+        abi::entry_kind::RECORD => c.record_names.get(name).copied(),
         _ => None,
     };
     if !count.is_null() {
@@ -1658,6 +1730,8 @@ unsafe extern "C" fn name_of(kind: u32, id: u32) -> Str {
         abi::entry_kind::PARTICLE => c.game.particles.get(id as usize).map(|p| p.name.as_str()),
         abi::entry_kind::CONFIG => c.game.configs.get(id as usize).map(|d| d.name.as_str()),
         abi::entry_kind::SOUND => c.game.sounds.get(id as usize).map(|d| d.name.as_str()),
+        abi::entry_kind::FEATURE => c.features.get(id as usize).map(|d| d.as_str()),
+        abi::entry_kind::RECORD => c.records.get(id as usize).map(|d| d.as_str()),
         _ => None,
     };
     name.map_or(Str::EMPTY, Str::new)
@@ -1910,7 +1984,7 @@ unsafe extern "C" fn find_event(name: Str, schema: Str) -> u32 {
         log::error!("event {name} is '{}' but a mod emits '{schema}'", def.schema);
         return u32::MAX;
     }
-    if def.handlers.is_empty() { u32::MAX } else { id }
+    id
 }
 
 unsafe extern "C" fn emit(w: *mut abi::WorldCtx, event: u32, value: abi::Slice<u8>) {

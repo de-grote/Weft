@@ -4,10 +4,10 @@ Everything a mod registers, kind by kind: what it is for, how to make one, what 
 The short version of the model is in the cheat sheet, [How registering works](modding.md#how-registering-works). This is the long one, for when you need the name of a component or want to know what an edit of some kind can reach.
 
 ## Quick links
-[the model](#the-model) | [blocks](#block) | [block states](#block-states) | [items](#item) | [entities](#entity) | [biomes](#biome) | [dimensions](#dimension) | [terrain](#terrain) | [menus and screens](#menu-and-screen) | [ores](#ore) | [liquids](#liquid) | [reactions](#reaction) | [scatters](#scatter) | [decorations](#decoration) | [structures](#structure) | [templates](#template) | [spawn rules](#spawn-rule) | [recipes](#recipe) | [recipe kinds](#recipe-kind) | [loot tables](#loot-table) | [particles](#particle) | [sky objects](#sky-object) | [sounds](#sound) | [music](#music) | [weather](#weather) | [precipitation](#precipitation) | [poses](#pose) | [game modes](#game-mode) | [damage causes](#damage-cause) | [entity effects](#entity-effect) | [text places](#text-place) | [conditions](#condition) | [cameras](#camera) | [keys](#key) | [settings](#config) | [attributes](#attribute) | [equipment slots](#equipment-slot) | [creative tabs](#creative-tab) | [categories](#sound-and-entity-category) | [tint kinds](#tint-kind) | [HUD elements](#hud-element) | [screen parts](#screen-part) | [word sets](#word-set) | [component declarations](#component-and-storage-declaration) | [bone motion](#bone-motion)
+[the model](#the-model) | [blocks](#block) | [block states](#block-states) | [items](#item) | [entities](#entity) | [biomes](#biome) | [dimensions](#dimension) | [terrain](#terrain) | [menus and screens](#menu-and-screen) | [features](#feature) | [liquids](#liquid) | [reactions](#reaction) | [templates](#template) | [palettes](#palette) | [spawn rules](#spawn-rule) | [recipes](#recipe) | [recipe kinds](#recipe-kind) | [loot tables](#loot-table) | [particles](#particle) | [sky objects](#sky-object) | [sounds](#sound) | [music](#music) | [weather](#weather) | [precipitation](#precipitation) | [poses](#pose) | [game modes](#game-mode) | [damage causes](#damage-cause) | [entity effects](#entity-effect) | [text places](#text-place) | [conditions](#condition) | [cameras](#camera) | [keys](#key) | [settings](#config) | [attributes](#attribute) | [equipment slots](#equipment-slot) | [creative tabs](#creative-tab) | [categories](#sound-and-entity-category) | [tint kinds](#tint-kind) | [HUD elements](#hud-element) | [screen parts](#screen-part) | [word sets](#word-set) | [component declarations](#component-and-storage-declaration) | [bone motion](#bone-motion) | [records](#record)
 
 ## The model
-Every registration is an entry: a kind, a name, and operations on its components. A builder method is a shortcut, `.veins(6)` on an ore is `.set(&comps::ore::VEINS, 6)`, so anything a shortcut doesn't cover is still reachable with the raw calls every builder has:
+Every registration is an entry: a kind, a name, and operations on its components. A builder method is a shortcut, `.per_cube(6)` on an ore is `.set(&comps::feature::COUNT, 6)` (and the spread it implies), so anything a shortcut doesn't cover is still reachable with the raw calls every builder has:
 
 | call | what it does |
 |---|---|
@@ -204,14 +204,14 @@ A dimension's terrain from parts, named like the dimension. `r.terrain(&DIM)`, a
 | `BASE_HEIGHT` | `f64` | 64 | `.base_height` |
 | `SEA`, `CAVES` | `TerrainSea`, `TerrainCaves` | none | `.sea`, `.caves` |
 | `FIELDS` | `[TerrainField]` | temperature, humidity, continent | `.field`; one named again replaces the earlier |
-| `FEATURES` | `[TerrainFeature]` | none | `.feature`, `.feature_remove` |
-| `MASKS` | `[FeatureMask]` | none | `.feature_mask` |
+| `LANDFORMS` | `[Landform]` | none | `.landform`, `.landform_remove` |
+| `MASKS` | `[LandformMask]` | none | `.landform_mask` |
 | `RULES` | `[BiomeRule]` | none | `.rule`, `.rule_before`, `.rule_after`, `.rule_replace`, `.rule_remove` |
 | `RULE_EDITS` | `[BiomeRule]` | none | `.rule_edit`: what it sets replaces that of the rule of its name |
 | `CAVE_BIOMES` | `[CaveBiome]` | none | `.cave_biome`, `.cave_biome_remove` |
 
 ```rust
-r.edit(OVERWORLD.terrain()).rule_before("base:desert", terrain::BiomeRule::new("scorched")).feature_remove("base:mountains");
+r.edit(OVERWORLD.terrain()).rule_before("base:desert", terrain::BiomeRule::new("scorched")).landform_remove("base:mountains");
 ```
 
 ## Menu and screen
@@ -232,22 +232,32 @@ static CHEST: Menu = Menu::named("base:chest");
 r.edit(&CHEST).group("trash", Slots::single()).tag("menu.pauses");
 ```
 
-## Ore
-Veins of a block, named like it. `r.ore(&BLOCK)`, another mod's `r.edit(BLOCK.ore())`. Placement (`comps::common`, `Placed`): `DIMENSIONS` (`[str]`, `.dimension`, pushes), `BIOME` (`str` tag, `.biome`), `Y` (`[i32;2]`, `.y`).
+## Feature
+Anything generation puts into the world after the terrain. `r.feature(&F)`, or the presets `r.ore(&BLOCK)` (named like the block, `BLOCK.ore()`), `r.structure(&TEMPLATE)` (named like the template, `TEMPLATE.structure()`), `r.scatter(&F)` and `r.decoration(f)` (`<mod>:decoration`, `/2`.. unless `.named`). Placement (`comps::common`, `Placed`): `DIMENSIONS` (`[str]`, `.dimension`, pushes), `BIOME` (`str` tag, `.biome`), `Y` (`[i32;2]`, `.y`). Details in the [worldgen guide](worldgen.md#features).
 
-| component (`comps::ore`) | schema | default | what |
+| component (`comps::feature`) | schema | default | what |
 |---|---|---|---|
-| `VEINS` | `u32` | 4 | per cube (`.veins`) |
-| `SIZE` | `u32` | 8 | blocks per vein (`.vein_size`) |
-| `SHAPE` | `VeinShape` | a walk | `.shape(Vein::..)` |
-| `HEIGHT` | `OreHeight` | even | `.height(Height::..)` |
-| `REPLACES` | `match` | | which blocks it replaces (`.replaces`) |
-| `REPLACES_WITH` | `[OreVariant]` | | `.replaces_with` |
-| `EXPOSED` | `f32` | 0 | share left out touching air (`.exposed`) |
+| `STAGE` | `u32` | by spread | `abi::stage`, `.stage` |
+| `AFTER`, `BEFORE` | `[str]` | | `.after`, `.before` |
+| `SPREAD` | `u32` | per cube | `abi::spread`: `.per_cube`, `.spacing`, `.generate` |
+| `COUNT`, `HEIGHT` | `u32`, `HeightCurve` | 4, even | per cube (`.per_cube`, `.height(Height::..)`) |
+| `SPACING`, `CHANCE`, `DENSITY` | `i32`, `f32`, `str` | 32, 1, none | on a grid (`.spacing`, `.chance`, `.density`) |
+| `GROUND`, `MAX_SLOPE`, `BURIED` | `match`, `i32`, `i32` | any, any, 0 | `.ground`, `.max_slope`, `.buried` |
+| `OVER_WATER`, `OVER_CAVES` | tags | | `.over_water`, `.over_caves` |
+| `PRIORITY`, `SEPARATION` | `i32` | 0, 0 | `.priority`, `.separation` |
+| `GENERATE` | callback | | on every cube (`.generate`) |
+| `SHAPE` | `u32` | from what is set | `abi::shape` |
+| `VEIN`, `SIZE`, `STEPS` | `VeinShape`, `u32`, `[ShapeStep]` | a walk, 8 | `.vein(Vein::..)`, `.vein_size` |
+| `TEMPLATE`, `TRANSFORMS`, `PALETTES` | `str`, `u32`, `[str]` | , as drawn, none | `.template`, `.turns`, `.turns_and_mirrors`, `.palette` |
+| `PLAN`, `REACH` | callback, `[i32;3]` | , 0 32 16 | `.plan`, `.reach`, `.reach_y` |
+| `BLOCK`, `REPLACES`, `REPLACES_WITH`, `EXPOSED` | `str`, `match`, `[Variant]`, `f32` | its name, any, , 0 | `.block`, `.replaces`, `.replaces_with`, `.exposed` |
+| `FOUNDATION`, `CLEAR_ABOVE` | `str`, tag | none | `.foundation`, `.foundation_of_ground`, `.clear_above` |
 
 ```rust
 static IRON_ORE: Block = Block::named("base:iron_ore");
-r.edit(IRON_ORE.ore()).veins(12).exposed(0.3);
+r.edit(IRON_ORE.ore()).per_cube(12).exposed(0.3);
+r.edit(WELL.structure()).spacing(96).turns_and_mirrors();
+r.remove(&Feature::named("base:decoration"));
 ```
 
 ## Liquid
@@ -281,48 +291,24 @@ static HOT_WATER: Reaction = Reaction::named("base:hot>water");
 r.edit(&HOT_WATER).source_turns_into("base:stone");
 ```
 
-## Scatter
-Things on the ground bigger than a cube, trees. `r.scatter(&SCATTER)`, placement as for ores.
-
-| component (`comps::scatter`) | schema | default | what |
-|---|---|---|---|
-| `CELL` | `i32` | 8 | `.cell` |
-| `REACH`, `REACH_UP`, `REACH_DOWN` | `i32` | 0, 32, 16 | `.reach`, `.reach_y` |
-| `DENSITY` | `str` | no sites | the biome component that is the chance (`.density`) |
-| `GROUND` | `match` | any | which blocks it stands on (`.ground`) |
-| `SHAPE` | callback | | `.shape` |
-
-```rust
-static TREES: Scatter = Scatter::named("base:trees");
-r.edit(&TREES).cell(6);
-```
-
-## Decoration
-Code run on every generated cube after the terrain and scatters. `r.decoration(f)`, named `<mod>:decoration`, `/2`.. unless `.named`. `GENERATE` (callback, `comps::decoration`), placement by `.dimension` only.
-
-```rust
-r.remove(&Decoration::named("base:decoration"));
-```
-
-## Structure
-A template placed now and then, named like the template: a scatter whose blocks are the template. `r.structure(&TEMPLATE)`, another mod's `r.edit(TEMPLATE.structure())`, placement as for ores; tag `structure.turns` (`.turns()`) turns each a random quarter.
-
-| component (`comps::structure`) | schema | default |
-|---|---|---|
-| `SPACING` | `u32` | 32 (`.spacing`) |
-| `CHANCE` | `f32` | 0.5 (`.chance`) |
-| `BURIED` | `i32` | 0 (`.buried`) |
-
-```rust
-r.edit(WELL.structure()).spacing(96);
-```
-
 ## Template
-A fixed shape of blocks for structures, moving bodies and `w.place_template`. `r.template(&T)` with `.layer`, `.key`, `.fill`. `BLOCKS` (`[TemplateBlock]`, `comps::template`); an edit adds its blocks.
+A fixed shape of blocks for features, plans, moving bodies and `w.place_template`. `r.template(&T)` with `.layer`, `.key`, `.fill`, or a mod's file `structures/<path>.json` (or `.wst`), which is template `<mod>:<path>` by itself; an entry of that name adds to it. Its blocks are checked when the game loads.
+
+| component (`comps::template`) | schema | what |
+|---|---|---|
+| `BLOCKS` | `[TemplateBlock]` | from its lowest corner; a block, a state, `core:air`, or a slot `@wall`, `@wall:stairs[..]`, `@ground` |
+| `SLOTS` | `[PaletteSlot]` | what each slot takes unless a palette says (`.slot`) |
+| `ENTITIES` | `[TemplateEntity]` | `.entity(&KIND, pos)`, or saved |
+| `LOOT` | `[TemplateLoot]` | a block entity filled when placed (`.loot(pos, &TABLE)`) |
+| `DATA` | `[TemplateData]` | a block entity as it was saved |
+| `JOINTS` | `[TemplateJoint]` | where `Plan::grow` joins pieces (`.joint`) |
 
 ```rust
 r.edit(&WELL).fill("base:lantern", [1, 3, 1], [1, 3, 1]);
 ```
+
+## Palette
+The blocks templates' slots take where a feature uses it. `r.palette(&P).slot("wall", "base:bricks")`; `SLOTS` (`[PaletteSlot]`, `comps::palette`). A slot `@wall:stairs` takes the stairs `shapes_of` made of the palette's block.
 
 ## Spawn rule
 Where a mob shows up by itself, named `<mod>:<entity>`, `/2`.. unless `.named`. `r.natural_spawn(&KIND)`, placement as for ores.
@@ -616,3 +602,19 @@ A bone of a model file moving by itself, named `<model>/<bone>`. `r.bone_motion(
 ```rust
 r.bone_motion("tailmod:tail", "tail2", BoneMotion::SPRINGY);
 ```
+
+## Record
+A mod's own data that other mods add to and change, the way they do the engine's: an API's structures, a machine's processing table, a quest. `r.record(&R)`, named like its handle; it has nothing of its own, only the tags and components set on it, and those say what it is. Another mod's `r.edit(&R)`, `r.replace` and `r.remove` work as on anything else, in load order, and an edit of a record nobody registered stops the load.
+
+They are read once the game is loaded, never in `init`, since only then are everyone's edits in: `entries_with(entry_kind::RECORD, "structgen:structure")` lists the records with that tag or component, `CHANCE.on_record(id)` and `STRUCTURE.on_record(id)` read one, `Record::lookup(name)` finds one by name.
+
+```rust
+pub static STRUCTURE: Tag = Tag::named("structgen:structure");
+pub static CHANCE: Component<f32> = Component::named("structgen:chance");
+static HUT: Record = Record::named("hut");
+r.record(&HUT).tag(STRUCTURE.name()).set(&CHANCE, 0.3);
+// Another mod:
+static THEIR_HUT: Record = Record::named("othermod:hut");
+r.edit(&THEIR_HUT).set(&CHANCE, 0.05);
+```
+An API crate wraps this in builders of its own (`structgen_api::place(r, ..)` making the record and `.chance(..)` one `.set`), the way the SDK's builders are shortcuts for components.

@@ -78,7 +78,7 @@ r.entity(&WISP).texture("wisp").model(model.uv_size(32, 16)).shader(&GHOST);
 ```
 `EntityPixel` has `uv`, `albedo` (the skin's texel, linear, `a` is its alpha), `light` (a vec3 with shading and the glow mask already included) and `time`. A returned alpha under 0.5 cuts the pixel out, which is how the wisp gets its holes. The `_e` glow masks of the [textures guide](textures.md#emission) are a separate and simpler way to make parts of a skin shine.
 
-An entity effect goes on top of whatever shaded a mob, for a while: it gets the color `c` and a `strength` (1 while it is on), and returns the new color. The engine's are effects too, `core:hurt` is the red a hit leaves, `core:flash` a creeper's white and `core:glow` lights a mob up whatever the light around (`entity_effects::GLOW`). `w.entity_effect(id, &MY_EFFECT, 1, 40)` puts one on for everyone who sees it, players arriving later included, and one of a kind at a time: a new one replaces it, `0` ticks takes it off. `w.flash(id)` is the white one for two ticks.
+An entity effect goes on top of whatever shaded a mob, for a while: it gets the color `c` and a `strength` (1 while it is on), and returns the new color. The engine's are effects too, `core:hurt` is the red a hit leaves, `core:flash` a white flash and `core:glow` lights a mob up whatever the light around (`entity_effects::GLOW`). `w.entity_effect(id, &MY_EFFECT, 1, 40)` puts one on for everyone who sees it, players arriving later included, and one of a kind at a time: a new one replaces it, `0` ticks takes it off. `w.flash(id)` is the white one for two ticks.
 
 ## Blocks
 A block shader colors the pixels of a block's faces and takes over from the normal lighting the same way:

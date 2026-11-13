@@ -314,6 +314,11 @@ pub struct Prop {
 }
 
 impl BlockDef {
+    /// Using it does something of its own (opens, switches), before any item in hand.
+    pub fn usable(&self) -> bool {
+        self.cb.on_use.is_some() || self.opens.is_some()
+    }
+
     /// The value index of every property in state `i` of this block (0-based within the block).
     pub fn prop_values(&self, i: u32) -> impl Iterator<Item = (&Prop, u32)> {
         self.props
@@ -724,64 +729,24 @@ pub struct DimensionDef {
     pub builtin: Option<fn(&Content, glam::IVec3, &mut [u32])>,
     /// Where players appear without a `spawn` callback.
     pub spawn_at: [i32; 3],
-    /// Placed by the engine after `generator`, in name order.
-    pub ores: Vec<OreDef>,
     /// Its `entry_kind::TERRAIN`: fills cubes before `generator` runs.
     pub terrain: Option<Box<crate::server::terrain::Terrain>>,
-    /// `comp::dimension::BARE`: only ores, scatters and decorations that name it.
+    /// `comp::dimension::BARE`: only the features that name it.
     pub bare: bool,
     /// The weathers that come here after clear (`comp::dimension::WEATHERS`), resolved at freeze.
     pub weathers: Vec<u32>,
     weather_names: Vec<String>,
     /// (turn, level) points sorted by turn, empty for vanilla's curve.
     pub daylight: Vec<[f32; 2]>,
-    /// In name order, placed after `generator`: scatters, then structures.
-    pub scatters: Vec<ScatterDef>,
-    /// (mod, callback) run after the generator and scatters, in load order.
-    pub decorations: Vec<(ModId, Callback)>,
+    /// Placed after `generator`, in order (`comp::feature::STAGE`, `AFTER`, `BEFORE`, load order).
+    pub features: Vec<crate::features::FeatureDef>,
+    /// Per feature on a grid, its starts by grid cell, worked out once.
+    pub starts: Vec<weft_noise::cache::ColumnCache<Option<std::sync::Arc<crate::features::Start>>>>,
     /// Columns from `column`, for a dimension without a terrain.
     pub column_cache: weft_noise::cache::ColumnCache<[abi::TerrainColumn; 256]>,
-    /// Per cube column, the scattered things that may reach into it (`dim::scatter_sites`):
+    /// Per cube column, the starts on a grid that reach into it (`features::column_starts`):
     /// worked out once for the whole column instead of once per cube.
-    pub scatter_cache: weft_noise::cache::ColumnCache<Vec<crate::server::dim::Site>>,
-}
-
-/// What a scatter puts at a site: what a mod's callback says, or a template (a structure).
-#[derive(Clone)]
-pub enum SiteShape {
-    Callback(ModId, Callback),
-    /// Blocks from its lowest corner (the site), the box they fill, how far it sinks, whether it
-    /// turns a random quarter.
-    Template {
-        blocks: std::sync::Arc<[(IVec3, u32)]>,
-        extent: IVec3,
-        sink: i32,
-        turns: bool,
-    },
-}
-
-/// What has a site in a grid cell: the share of cells a biome's component says, or a fixed one.
-#[derive(Clone, Copy)]
-pub enum Chance {
-    Density(Option<u32>),
-    Fixed(f32),
-}
-
-#[derive(Clone)]
-pub struct ScatterDef {
-    pub name: String,
-    pub cell: i32,
-    pub reach: i32,
-    /// How far below and above its site it may put blocks.
-    pub reach_y: [i32; 2],
-    pub chance: Chance,
-    /// Biomes and heights of the site (`abi::comp::common`).
-    pub biome: Option<Box<[u64]>>,
-    pub y: [i32; 2],
-    /// Matcher of the surface block under the site (`None`: any).
-    pub ground: Option<u32>,
-    pub salt: u64,
-    pub shape: SiteShape,
+    pub sites: weft_noise::cache::ColumnCache<Vec<std::sync::Arc<crate::features::Start>>>,
 }
 
 impl DimensionDef {
@@ -881,103 +846,26 @@ pub struct Spread {
     pub max: IVec3,
 }
 
-#[derive(Clone)]
-pub struct OreDef {
-    pub state: u32,
-    /// Matcher of what it may replace besides its variants'.
-    pub replace: Option<u32>,
-    pub min_y: i32,
-    pub max_y: i32,
-    pub veins: u32,
-    pub size: u32,
-    /// Derived from the block name, so adding an ore does not move the others.
-    pub salt: u64,
-    /// Biomes the block's column must be.
-    pub biome: Option<Box<[u64]>>,
-    /// `abi::vein_shape`, and its sizes.
-    pub shape: u32,
-    pub shape_size: [f32; 2],
-    /// `vein_shape::STEPS`: the shape about its start.
-    pub steps: Option<crate::shape::Shape>,
-    /// `abi::height_curve`.
-    pub height: u32,
-    pub plateau: i32,
-    /// (matcher of what it meets, ore state put there instead of `state`), the first that takes it.
-    pub variants: Vec<(u32, u32)>,
-    /// Share of blocks left out next to air.
-    pub exposed: f32,
-}
-
-impl OreDef {
-    /// The state it puts where `state` was, if it replaces that.
-    pub fn state_in(&self, m: &crate::refs::Matchers, state: u32) -> Option<u32> {
-        self.variants
-            .iter()
-            .find(|v| m.has(v.0, state))
-            .map(|v| v.1)
-            .or_else(|| {
-                self.replace
-                    .filter(|&r| m.has(r, state))
-                    .map(|_| self.state)
-            })
-    }
-
-    /// How far from its start a vein may put blocks: a cube at most, so the cubes around one
-    /// are all there is to look at.
-    pub fn reach(&self) -> i32 {
-        let r = match self.shape {
-            abi::vein_shape::SPHERE | abi::vein_shape::DISK => self.shape_size[0].ceil() as i32,
-            abi::vein_shape::BLOB => (self.size as f32).cbrt().ceil() as i32 + 2,
-            abi::vein_shape::STEPS => self
-                .steps
-                .as_ref()
-                .map(|s| s.bounds())
-                .map_or(0, |(lo, hi)| lo.abs().max(hi.abs()).max_element().ceil() as i32),
-            _ => self.size as i32,
-        };
-        r.clamp(0, 16)
-    }
-
-    /// How likely a vein starting at `y` is to be kept (0..1), and how many starts to try per
-    /// vein wanted so that the average comes out as `veins`.
-    pub fn weight(&self, y: i32) -> f64 {
-        let (lo, hi) = (self.min_y as f64, self.max_y as f64);
-        let half = (hi - lo) / 2.0;
-        if half <= 0.0 || self.height == abi::height_curve::UNIFORM {
-            return 1.0;
-        }
-        let off = (y as f64 - (lo + half)).abs();
-        let flat = if self.height == abi::height_curve::TRAPEZOID { (self.plateau as f64 / 2.0).min(half) } else { 0.0 };
-        if half - flat <= 0.0 { 1.0 } else { ((half - off) / (half - flat)).clamp(0.0, 1.0) }
-    }
-
-    pub fn tries(&self) -> u32 {
-        let (lo, hi) = (self.min_y as f64, self.max_y as f64);
-        let span = hi - lo;
-        let avg = match self.height {
-            abi::height_curve::TRIANGLE => 0.5,
-            abi::height_curve::TRAPEZOID if span > 0.0 => (1.0 + (self.plateau as f64 / span).min(1.0)) / 2.0,
-            _ => 1.0,
-        };
-        (self.veins as f64 / avg).round() as u32
-    }
-}
-
-/// A template's blocks, checked at freeze: (offset from the lowest corner, state).
-pub struct TemplateDef {
+/// Blocks for templates' slots (`comp::palette`), checked at freeze.
+pub struct PaletteDef {
     pub name: String,
-    pub blocks: Vec<(glam::IVec3, u32)>,
+    pub slots: FxHashMap<String, String>,
 }
 
 pub struct ModMeta {
     pub id: String,
     pub version: String,
     pub deps: Vec<String>,
-    /// Position when every mod comes after its dependencies (ties by id): the order in which
-    /// overrides apply and the later one wins.
+    /// Mods it loads after, or before, if they are there (`abi::ModDecl::after`, `before`).
+    pub after: Vec<String>,
+    pub before: Vec<String>,
+    /// Position when every mod comes after its dependencies and what it says it loads after
+    /// (ties by id): the order in which overrides apply and the later one wins.
     pub order: u32,
     /// Its `assets` folder (block and item model files are read at freeze).
     pub assets: std::path::PathBuf,
+    /// The original folder or archive; an unpacked cache does not mean it is still installed.
+    pub source: std::path::PathBuf,
 }
 
 /// Ids of components the engine reads, resolved once.
@@ -1106,8 +994,16 @@ pub struct Content {
     pub spread_targets: Vec<u64>,
     /// From a target, the box holding everything that may spread onto it.
     pub spread_search: (IVec3, IVec3),
-    pub templates: Vec<TemplateDef>,
+    pub templates: Vec<crate::template::TemplateDef>,
     pub template_names: FxHashMap<String, u32>,
+    pub palettes: Vec<PaletteDef>,
+    pub palette_names: FxHashMap<String, u32>,
+    /// Every feature's name by id (`FeatureDef::id`); each dimension has its own list of them.
+    pub features: Vec<String>,
+    pub feature_names: FxHashMap<String, u32>,
+    /// Mods' records by id (`entry_kind::RECORD`).
+    pub records: Vec<String>,
+    pub record_names: FxHashMap<String, u32>,
     /// Weighted lists of block states from `blocks` component values, by the index the value holds.
     pub ref_lists: Vec<Vec<[u32; 2]>>,
     pub components: Components,
@@ -1294,6 +1190,35 @@ impl Content {
             def.prop_values(c - def.first_state)
                 .zip(def.prop_values(state - def.first_state))
                 .filter(|(a, b)| a.1 != b.1)
+                .count()
+        };
+        (def.first_state..def.first_state + def.states)
+            .filter(|&c| self.states[c as usize].turn == want && self.states[c as usize].sides == sides)
+            .min_by_key(|&c| differ(c))
+            .unwrap_or(state)
+    }
+
+    /// `state` mirrored across x with the world around it: its turn and sides mirrored, and a
+    /// property value saying left says right (a door's hinge, a stair's corner) and back.
+    pub fn mirrored_state(&self, state: u32) -> u32 {
+        let s = &self.states[state as usize];
+        let flip = |f: u8| if f < 2 { f ^ 1 } else { f };
+        let want = weft_abi::Turn { east: flip(s.turn.east) ^ 1, up: flip(s.turn.up) };
+        let sides = (0..6u8)
+            .filter(|f| s.sides & 1 << f != 0)
+            .fold(0u8, |m, f| m | 1 << flip(f));
+        let def = self.block_of(state);
+        let swapped = |v: &str| {
+            if v.contains("left") { v.replace("left", "right") } else { v.replace("right", "left") }
+        };
+        let wanted: Vec<String> = def
+            .prop_values(state - def.first_state)
+            .map(|(p, v)| swapped(&p.values[v as usize]))
+            .collect();
+        let differ = |c: u32| {
+            def.prop_values(c - def.first_state)
+                .zip(&wanted)
+                .filter(|((p, v), w)| p.values[*v as usize] != **w)
                 .count()
         };
         (def.first_state..def.first_state + def.states)
@@ -1713,16 +1638,15 @@ fn bake_dimension(e: &Entry) -> DimensionDef {
         block_updates: !e.has(d::NO_BLOCK_UPDATES),
         builtin: None,
         spawn_at: [0, 64, 0],
-        ores: Vec::new(),
         terrain: None,
         bare: e.has(d::BARE),
         weathers: Vec::new(),
         weather_names: e.or(d::WEATHERS, Vec::new()),
         daylight,
-        scatters: Vec::new(),
-        decorations: Vec::new(),
+        features: Vec::new(),
+        starts: Vec::new(),
         column_cache: weft_noise::cache::ColumnCache::new(4096),
-        scatter_cache: weft_noise::cache::ColumnCache::new(32768),
+        sites: weft_noise::cache::ColumnCache::new(32768),
     }
 }
 
@@ -1753,16 +1677,15 @@ fn void_dimension() -> DimensionDef {
         block_updates: false,
         builtin: None,
         spawn_at: [0, 64, 0],
-        ores: Vec::new(),
         terrain: None,
         bare: true,
         weathers: Vec::new(),
         weather_names: Vec::new(),
         daylight: Vec::new(),
-        scatters: Vec::new(),
-        decorations: Vec::new(),
+        features: Vec::new(),
+        starts: Vec::new(),
         column_cache: weft_noise::cache::ColumnCache::new(1),
-        scatter_cache: weft_noise::cache::ColumnCache::new(1),
+        sites: weft_noise::cache::ColumnCache::new(1),
     }
 }
 
@@ -1809,21 +1732,23 @@ fn debug_blocks(c: &Content, cube: glam::IVec3, blocks: &mut [u32]) {
     }
 }
 
-/// Every mod after the mods it depends on, ties by id.
+/// Every mod after the mods it depends on or says it loads after, and before those saying they
+/// load after it (`before` the same turned around), ties by id.
 pub fn load_order(mods: &[ModMeta]) -> Vec<u32> {
-    let mut placed: Vec<Option<u32>> = vec![None; mods.len()];
+    dependency_order(mods.len(), |i: usize, j: usize| {
+        let (a, b) = (&mods[i], &mods[j]);
+        b.deps.contains(&a.id) || b.after.contains(&a.id) || a.before.contains(&b.id)
+    })
+}
+
+/// Inputs are sorted by id, also used to break a dependency cycle deterministically.
+pub(crate) fn dependency_order(count: usize, before: impl Fn(usize, usize) -> bool) -> Vec<u32> {
+    let mut placed: Vec<Option<u32>> = vec![None; count];
     let mut next = 0;
-    while next < mods.len() as u32 {
-        let ready = (0..mods.len()).find(|&i| {
-            placed[i].is_none()
-                && mods[i].deps.iter().all(|d| {
-                    mods.iter()
-                        .position(|m| &m.id == d)
-                        .is_none_or(|j| placed[j].is_some())
-                })
-        });
+    while next < count as u32 {
+        let ready = (0..count).find(|&i| placed[i].is_none() && (0..count).all(|j| j == i || placed[j].is_some() || !before(j, i)));
         // A dependency cycle: place the rest by id rather than loop forever.
-        let i = ready.unwrap_or_else(|| (0..mods.len()).find(|&i| placed[i].is_none()).unwrap());
+        let i = ready.unwrap_or_else(|| (0..count).find(|&i| placed[i].is_none()).unwrap());
         placed[i] = Some(next);
         next += 1;
     }
@@ -2105,9 +2030,14 @@ pub fn freeze(mut mods: Vec<ModMeta>, regs: Vec<RawRegistrar>, step_order: &str)
         biome_names: &biome_names,
         components: &components,
     };
-    place_features(&mut games, &mut dim_defs, look, &mut matchers, &mut tables, &mod_name, &mut errors);
-    let (templates, template_names) = freeze_templates(&mut games, look, &mut tables, &mod_name, &mut errors);
-    place_structures(&mut games, &mut dim_defs, &templates, &template_names, look, &mut tables, &mod_name, &mut errors);
+    let (templates, template_names) = freeze_templates(&mut games, &mods, look, &mut tables, &mod_name, &mut errors);
+    let (palettes, palette_names) = freeze_palettes(&mut games, look, &mut tables, &mod_name, &mut errors);
+    let made = Made { templates: &templates, template_names: &template_names, palette_names: &palette_names };
+    let (features, feature_names) =
+        freeze_features(&mut games, &mut dim_defs, look, made, &mut matchers, &mut tables, &mod_name, &mut errors);
+    // Mods' own data: only its table, which mods read.
+    let rk = abi::entry_kind::RECORD;
+    let (records, record_names) = tables.bake(entries_of(&mut games, rk), rk, &mod_name, &mut errors, |e, _| e.name.clone());
     build_terrains(&mut games, &mut dim_defs, &biome_names, &biome_rules, look, &mut tables, &mod_name, &mut errors);
     let commands = freeze_commands(&mods, &mut games, &mut errors);
     let mut word_sets = collect_word_sets(&mut games, &mod_name, &mut errors);
@@ -2278,6 +2208,12 @@ pub fn freeze(mut mods: Vec<ModMeta>, regs: Vec<RawRegistrar>, step_order: &str)
         biomes: biome_defs,
         templates,
         template_names,
+        palettes,
+        palette_names,
+        features,
+        feature_names,
+        records,
+        record_names,
         ref_lists,
         word_sets,
         tint_kinds,
@@ -2936,209 +2872,420 @@ fn heights(e: &Entry) -> [i32; 2] {
     e.or(abi::comp::common::Y, [i32::MIN, i32::MAX])
 }
 
-/// Each def in every dimension its entry goes in.
-fn place<D: Clone>(dim_defs: &mut [DimensionDef], placed: Vec<Option<(Vec<usize>, D)>>, list: fn(&mut DimensionDef) -> &mut Vec<D>) {
-    for (dims, def) in placed.into_iter().flatten() {
-        for d in dims {
-            list(&mut dim_defs[d]).push(def.clone());
-        }
-    }
+/// Templates and palettes, for features.
+#[derive(Clone, Copy)]
+struct Made<'a> {
+    templates: &'a [crate::template::TemplateDef],
+    template_names: &'a FxHashMap<String, u32>,
+    palette_names: &'a FxHashMap<String, u32>,
 }
 
-/// Ores, scatters and decorations go into the dimensions they name, or every one but bare ones;
-/// ores and scatters in name order, decorations in load order.
-fn place_features(
+/// Features go into the dimensions they name, or every one but bare ones; in each in order of
+/// stage, then `after` and `before`, then load order. Gives every feature's name by id.
+#[allow(clippy::too_many_arguments)]
+fn freeze_features(
     games: &mut [crate::registry::RawGame],
     dim_defs: &mut [DimensionDef],
     look: Lookups,
+    made: Made,
     matchers: &mut crate::refs::Matchers,
     tables: &mut crate::entries::Tables,
     mod_name: &dyn Fn(ModId) -> String,
     errors: &mut Vec<String>,
-) {
-    use abi::comp::{ore as o, scatter as s};
+) -> (Vec<String>, FxHashMap<String, u32>) {
+    use crate::features::{Chance, FeatureDef, Fit, Shape, Spread, Write};
+    use abi::comp::feature as f;
     use abi::entry_kind as ek;
     let Lookups { block_defs, block_names, components, .. } = look;
-    let by_name = |e: &Entry| e.name.clone();
-    let (ores, _) = tables.bake_by(entries_of(games, ek::ORE), ek::ORE, mod_name, errors, by_name, |e, errors| {
-        let what = format!("ore {}", e.name);
-        let Some(&b) = block_names.get(&e.name) else {
-            errors.push(format!("{what}: unknown block"));
-            return None;
+    // (dimensions, def, stage, after, before)
+    type Baked = (Vec<usize>, FeatureDef, u32, Vec<String>, Vec<String>);
+    let (baked, names) = tables.bake(entries_of(games, ek::FEATURE), ek::FEATURE, mod_name, errors, |e, errors| -> Option<Baked> {
+        let what = format!("feature {}", e.name);
+        let id = 0;
+        let generate = e.callback(f::GENERATE);
+        let spread_kind = e.or(f::SPREAD, if generate.is_some() { abi::spread::EVERY_CUBE } else { abi::spread::PER_CUBE });
+        let shape_kind = e.or(
+            f::SHAPE,
+            if e.has(f::TEMPLATE) {
+                abi::shape::TEMPLATE
+            } else if e.has(f::PLAN) {
+                abi::shape::PLAN
+            } else if e.has(f::STEPS) {
+                abi::shape::STEPS
+            } else {
+                abi::shape::VEIN
+            },
+        );
+        let state_of = |text: &str, errors: &mut Vec<String>, about: &str| -> Option<u32> {
+            match split_state(text).and_then(|(block, props)| {
+                block_defs[*block_names
+                    .get(block)
+                    .ok_or_else(|| format!("unknown block {block}"))? as usize]
+                    .state_of(&props)
+            }) {
+                Ok(s) => Some(s),
+                Err(err) => {
+                    errors.push(format!("{what}: {about}: {err}"));
+                    None
+                }
+            }
         };
-        let replace = match e.text(o::REPLACES).unwrap_or_default() {
+        let spread = match spread_kind {
+            abi::spread::EVERY_CUBE => {
+                if e.has(abi::comp::common::BIOME) || e.has(abi::comp::common::Y) {
+                    errors.push(format!("{what}: it generates whole cubes, deciding biome and height itself"));
+                }
+                let Some((owner, cb)) = generate else {
+                    errors.push(format!("{what}: on every cube with no `generate`"));
+                    return None;
+                };
+                Spread::EveryCube(owner, cb)
+            }
+            abi::spread::GRID => {
+                let spacing = e.or(f::SPACING, 32i32);
+                if spacing < 1 {
+                    errors.push(format!("{what}: spacing {spacing} (at least 1)"));
+                    return None;
+                }
+                let chance = match e.text(f::DENSITY).unwrap_or_default() {
+                    "" => Chance::Fixed(e.or(f::CHANCE, 1.0)),
+                    name => {
+                        let d = components.id(name);
+                        if d.is_none() {
+                            errors.push(format!("{what}: density component {name:?} is not set on any biome"));
+                        }
+                        Chance::Density(d)
+                    }
+                };
+                Spread::Grid { spacing, chance }
+            }
+            _ => {
+                let h: abi::HeightCurve = e.or(f::HEIGHT, abi::HeightCurve::default());
+                Spread::PerCube { count: e.or(f::COUNT, 4), curve: h.curve, plateau: h.plateau.max(0) }
+            }
+        };
+        let size = e.or(f::SIZE, 8u32);
+        let mut reach = e.or(f::REACH, [0, 32, 16]);
+        let buried = e.or(f::BURIED, 0i32);
+        let shape = match (&spread, shape_kind) {
+            (Spread::EveryCube(..), _) => Shape::Cube,
+            (_, abi::shape::TEMPLATE) => {
+                let name = e.text(f::TEMPLATE).unwrap_or_default();
+                let Some(&t) = made.template_names.get(name) else {
+                    errors.push(format!("{what}: no template {name}"));
+                    return None;
+                };
+                let s = made.templates[t as usize].size;
+                reach = [s.x.max(s.z), s.y, buried.max(0)];
+                Shape::Template(t)
+            }
+            (_, abi::shape::PLAN) => {
+                let Some((owner, cb)) = e.callback(f::PLAN) else {
+                    errors.push(format!("{what}: no plan"));
+                    return None;
+                };
+                Shape::Plan(owner, cb)
+            }
+            (_, abi::shape::STEPS) => {
+                let steps: Vec<abi::ShapeStep> = e.or(f::STEPS, Vec::new());
+                let Some(shape) = crate::shape::Shape::from_abi(&steps) else {
+                    errors.push(format!("{what}: its steps don't make one shape"));
+                    return None;
+                };
+                let cells = crate::features::steps_cells(&shape);
+                let r = cells.iter().fold(0, |m, c| m.max(c.abs().max_element()));
+                reach = [r, r, r];
+                Shape::Steps(cells.into())
+            }
+            _ => {
+                let v: abi::VeinShape = e.or(f::VEIN, abi::VeinShape::default());
+                let clamp = |v: f32| if v.is_finite() { v.clamp(0.0, 15.0) } else { 0.0 };
+                Shape::Vein { kind: v.kind, size, radius: clamp(v.radius), thickness: clamp(v.thickness) }
+            }
+        };
+        let needs_block = matches!(shape, Shape::Vein { .. } | Shape::Steps(_));
+        let block = match e.text(f::BLOCK).filter(|t| !t.is_empty()) {
+            Some(t) => state_of(t, errors, "block")?,
+            None if needs_block => match block_names.get(&e.name) {
+                Some(&b) => block_defs[b as usize].first_state,
+                None => {
+                    errors.push(format!("{what}: what block does it put? (`block`, or a feature named like its block)"));
+                    return None;
+                }
+            },
+            None => 0,
+        };
+        let replaces = match e.text(f::REPLACES).unwrap_or_default() {
             "" => None,
             t => Some(look.matcher(matchers, t, &format!("{what}: replaces"), errors)?),
         };
         let mut variants: Vec<(u32, u32)> = Vec::new();
-        for v in e.or::<Vec<abi::OreVariant>>(o::REPLACES_WITH, Vec::new()) {
-            let Some(ore) = look.first_state(&v.ore) else {
-                errors.push(format!("{what}: replaces_with: unknown block {}", v.ore));
+        for v in e.or::<Vec<abi::Variant>>(f::REPLACES_WITH, Vec::new()) {
+            let Some(b) = look.first_state(&v.block) else {
+                errors.push(format!("{what}: replaces_with: unknown block {}", v.block));
                 continue;
             };
             if let Some(m) = look.matcher(matchers, &v.name, &format!("{what}: replaces_with"), errors) {
-                variants.push((m, ore));
+                variants.push((m, b));
             }
         }
-        let dims = look.targets(dim_defs, &what, e, errors);
-        let biome = look.biomes(&what, e, errors).ok()?;
-        // A walk, its starts spread evenly.
-        let shape: abi::VeinShape = e.or(o::SHAPE, abi::VeinShape::default());
-        let height: abi::OreHeight = e.or(o::HEIGHT, abi::OreHeight::default());
-        let size = |v: f32| if v.is_finite() { v.clamp(0.0, 15.0) } else { 0.0 };
-        let exposed: f32 = e.or(o::EXPOSED, 0.0);
-        let [min_y, max_y] = heights(e);
-        let def = OreDef {
-            state: block_defs[b as usize].first_state,
-            replace,
-            min_y,
-            max_y,
-            veins: e.or(o::VEINS, 4),
-            size: e.or(o::SIZE, 8),
-            salt: crate::registry::name_hash(&e.name),
-            biome,
-            shape: shape.kind,
-            steps: e
-                .get::<Vec<abi::ShapeStep>>(o::STEPS)
-                .and_then(|v| crate::shape::Shape::from_abi(&v)),
-            shape_size: [size(shape.radius), size(shape.thickness)],
-            height: height.curve,
-            plateau: height.plateau.max(0),
-            variants,
-            exposed: if exposed.is_finite() { exposed.clamp(0.0, 1.0) } else { 0.0 },
-        };
-        Some((dims, def))
-    });
-    place(dim_defs, ores, |d| &mut d.ores);
-    let (scatters, _) = tables.bake_by(entries_of(games, ek::SCATTER), ek::SCATTER, mod_name, errors, by_name, |e, errors| {
-        let what = format!("scatter {}", e.name);
-        let density_name = e.text(s::DENSITY).unwrap_or_default();
-        let density = (!density_name.is_empty())
-            .then(|| components.id(density_name))
-            .flatten();
-        if density.is_none() {
-            errors.push(format!("{what}: density component {density_name:?} is not set on any biome"));
-        }
-        let ground = match e.text(s::GROUND).unwrap_or_default() {
+        let ground = match e.text(f::GROUND).unwrap_or_default() {
             "" => None,
             t => Some(look.matcher(matchers, t, &format!("{what}: ground"), errors)?),
         };
-        let (cell, reach) = (e.or(s::CELL, 8), e.or(s::REACH, 0));
-        if cell < 1 || reach < 0 {
-            errors.push(format!("{what}: cell {cell} and reach {reach} (cell at least 1)"));
-            return None;
-        }
-        let biome = look.biomes(&what, e, errors).ok()?;
-        let (owner, shape) = e.callback(s::SHAPE).unwrap_or((e.owner, Callback::NONE));
-        let def = ScatterDef {
-            name: e.name.clone(),
-            cell,
-            reach,
-            reach_y: [e.or(s::REACH_DOWN, 16).clamp(0, 256), e.or(s::REACH_UP, 32).clamp(0, 256)],
-            chance: Chance::Density(density),
-            biome,
-            y: heights(e),
-            ground,
-            salt: crate::registry::name_hash(&e.name),
-            shape: SiteShape::Callback(owner, shape),
+        let foundation = match e.text(f::FOUNDATION).unwrap_or_default() {
+            "" => 0,
+            "ground" => crate::template::GROUND,
+            t => state_of(t, errors, "foundation")?,
         };
-        Some((look.targets(dim_defs, &what, e, errors), def))
-    });
-    place(dim_defs, scatters, |d| &mut d.scatters);
-    let (decorations, _) = tables.bake(entries_of(games, ek::DECORATION), ek::DECORATION, mod_name, errors, |e, errors| {
-        let what = format!("decoration {}", e.name);
-        if e.has(abi::comp::common::BIOME) || e.has(abi::comp::common::Y) {
-            errors.push(format!("{what}: only its dimensions limit it, it decides the rest"));
+        let palettes = e
+            .or::<Vec<String>>(f::PALETTES, Vec::new())
+            .iter()
+            .filter_map(|p| {
+                let id = made.palette_names.get(p).copied();
+                if id.is_none() {
+                    errors.push(format!("{what}: no palette {p}"));
+                }
+                id
+            })
+            .collect();
+        let exposed: f32 = e.or(f::EXPOSED, 0.0);
+        let stage = e.or(
+            f::STAGE,
+            match spread {
+                Spread::PerCube { .. } => abi::stage::UNDERGROUND,
+                Spread::Grid { .. } => abi::stage::STRUCTURES,
+                Spread::EveryCube(..) => abi::stage::DECORATION,
+            },
+        );
+        let mut def = FeatureDef {
+            name: e.name.clone(),
+            id,
+            owner: e.owner,
+            salt: crate::registry::name_hash(&e.name),
+            biome: look.biomes(&what, e, errors).ok()?,
+            y: heights(e),
+            fit: Fit {
+                ground,
+                over_water: e.has(f::OVER_WATER),
+                over_caves: e.has(f::OVER_CAVES),
+                max_slope: e.get::<i32>(f::MAX_SLOPE),
+                buried,
+            },
+            spread,
+            shape,
+            write: Write {
+                block,
+                replaces,
+                variants,
+                exposed: if exposed.is_finite() { exposed.clamp(0.0, 1.0) } else { 0.0 },
+                foundation,
+                clear_above: e.has(f::CLEAR_ABOVE),
+            },
+            reach,
+            priority: e.or(f::PRIORITY, 0),
+            separation: e.or(f::SEPARATION, 0i32).max(0),
+            transforms: crate::template::Transform::allowed(e.or(f::TRANSFORMS, 1u32)),
+            palettes,
+        };
+        if matches!(def.shape, Shape::Vein { .. }) {
+            let r = def.vein_reach();
+            def.reach = [r, r, r];
         }
-        let cb = e.callback(abi::comp::decoration::GENERATE)?;
-        Some((look.targets(dim_defs, &what, e, errors), cb))
+        Some((look.targets(dim_defs, &what, e, errors), def, stage, e.or(f::AFTER, Vec::new()), e.or(f::BEFORE, Vec::new())))
     });
-    place(dim_defs, decorations, |d| &mut d.decorations);
+    let mut by_id = vec![String::new(); baked.len()];
+    for (name, &id) in &names {
+        by_id[id as usize] = name.clone();
+    }
+    // Each dimension's in order: stage and load order, moved for `after` and `before`.
+    let mut lists: Vec<Vec<(u32, u32, FeatureDef, Vec<String>, Vec<String>)>> = (0..dim_defs.len()).map(|_| Vec::new()).collect();
+    for (id, b) in baked.into_iter().enumerate() {
+        let Some((dims, mut def, stage, after, before)) = b else { continue };
+        def.id = id as u32;
+        for d in dims {
+            lists[d].push((stage, id as u32, def.clone(), after.clone(), before.clone()));
+        }
+    }
+    for (d, list) in lists.into_iter().enumerate() {
+        let order = feature_order(&list, &dim_defs[d].name, errors);
+        let def = &mut dim_defs[d];
+        def.features = order.into_iter().map(|i| list[i].2.clone()).collect();
+        def.starts = def
+            .features
+            .iter()
+            .map(|_| weft_noise::cache::ColumnCache::new(4096))
+            .collect();
+    }
+    (by_id, names)
 }
 
-/// Block names resolved once, so a typo is a load error, not a missing block later.
+/// The order a dimension's features are placed in: stage, then load order, then each `after` and
+/// `before` met (an error where they can't all be).
+fn feature_order(
+    list: &[(u32, u32, crate::features::FeatureDef, Vec<String>, Vec<String>)],
+    dim: &str,
+    errors: &mut Vec<String>,
+) -> Vec<usize> {
+    let at = |name: &str| list.iter().position(|e| e.2.name == name);
+    // Edges: must come before.
+    let mut before: Vec<Vec<usize>> = vec![Vec::new(); list.len()];
+    let mut needs = vec![0usize; list.len()];
+    for (i, e) in list.iter().enumerate() {
+        for (names, after) in [(&e.3, true), (&e.4, false)] {
+            for n in names {
+                let Some(j) = at(n) else { continue };
+                let (a, b) = if after { (j, i) } else { (i, j) };
+                before[a].push(b);
+                needs[b] += 1;
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(list.len());
+    let mut ready: Vec<usize> = (0..list.len()).filter(|&i| needs[i] == 0).collect();
+    while !ready.is_empty() {
+        ready.sort_by_key(|&i| std::cmp::Reverse((list[i].0, list[i].1)));
+        let i = ready.pop().unwrap();
+        out.push(i);
+        for &b in &before[i] {
+            needs[b] -= 1;
+            if needs[b] == 0 {
+                ready.push(b);
+            }
+        }
+    }
+    if out.len() < list.len() {
+        let stuck: Vec<&str> = (0..list.len())
+            .filter(|i| !out.contains(i))
+            .map(|i| list[i].2.name.as_str())
+            .collect();
+        errors.push(format!("{dim}: features {} must each come after another of them", stuck.join(", ")));
+        let rest: Vec<usize> = (0..list.len()).filter(|i| !out.contains(i)).collect();
+        out.extend(rest);
+    }
+    out
+}
+
+/// Palettes: each slot's block checked.
+fn freeze_palettes(
+    games: &mut [crate::registry::RawGame],
+    look: Lookups,
+    tables: &mut crate::entries::Tables,
+    mod_name: &dyn Fn(ModId) -> String,
+    errors: &mut Vec<String>,
+) -> (Vec<PaletteDef>, FxHashMap<String, u32>) {
+    let kind = abi::entry_kind::PALETTE;
+    tables.bake(entries_of(games, kind), kind, mod_name, errors, |e, errors| {
+        let mut slots = FxHashMap::default();
+        for s in e.or::<Vec<abi::PaletteSlot>>(abi::comp::palette::SLOTS, Vec::new()) {
+            if let Err(err) = check_block(look, &s.block) {
+                errors.push(format!("palette {}: slot {}: {err}", e.name, s.name));
+            }
+            slots.insert(s.name, s.block);
+        }
+        PaletteDef { name: e.name.clone(), slots }
+    })
+}
+
+/// Whether `text` names a block or one of its states.
+fn check_block(look: Lookups, text: &str) -> Result<u32, String> {
+    let (block, props) = split_state(text)?;
+    look.block_defs[*look
+        .block_names
+        .get(block)
+        .ok_or_else(|| format!("unknown block {block}"))? as usize]
+        .state_of(&props)
+}
+
+/// Templates: every mod's `structures/` files, then entries (one of a file's name adds to it);
+/// block names resolved once, so a typo is a load error, not a missing block later.
 fn freeze_templates(
     games: &mut [crate::registry::RawGame],
+    mods: &[ModMeta],
     look: Lookups,
     tables: &mut crate::entries::Tables,
     mod_name: &dyn Fn(ModId) -> String,
     errors: &mut Vec<String>,
-) -> (Vec<TemplateDef>, FxHashMap<String, u32>) {
-    let Lookups { block_defs, block_names, .. } = look;
-    let kind = abi::entry_kind::TEMPLATE;
-    tables.bake_by(
-        entries_of(games, kind),
-        kind,
-        mod_name,
-        errors,
-        |e| e.name.clone(),
-        |e, errors| {
-            let list: Vec<abi::TemplateBlock> = e.or(abi::comp::template::BLOCKS, Vec::new());
-            let mut blocks = Vec::with_capacity(list.len());
-            for b in &list {
-                // `base:furnace[facing=east]`: that state, other properties at their defaults.
-                let state = split_state(&b.block).and_then(|(block, props)| {
-                    block_defs[*block_names
-                        .get(block)
-                        .ok_or_else(|| format!("unknown block {block}"))? as usize]
-                        .state_of(&props)
-                });
-                match state {
-                    Ok(st) => blocks.push((IVec3::from_array(b.pos), st)),
-                    Err(err) => errors.push(format!("template {}: {err}", e.name)),
+) -> (Vec<crate::template::TemplateDef>, FxHashMap<String, u32>) {
+    use abi::comp::template as t;
+    let mut files: FxHashMap<String, crate::template::Parts> = FxHashMap::default();
+    for m in mods {
+        let dir = m.assets.join("structures");
+        for path in template_files(&dir) {
+            let rel = path.strip_prefix(&dir).unwrap_or(&path).with_extension("");
+            let name = format!("{}:{}", m.id, rel.to_string_lossy().replace('\\', "/"));
+            match crate::template::read_file(&path) {
+                Ok(parts) => {
+                    files.insert(name, parts);
                 }
+                Err(e) => errors.push(format!("template {name}: {e}")),
             }
-            TemplateDef { name: e.name.clone(), blocks }
-        },
-    )
-}
-
-fn place_structures(
-    games: &mut [crate::registry::RawGame],
-    dim_defs: &mut [DimensionDef],
-    templates: &[TemplateDef],
-    template_names: &FxHashMap<String, u32>,
-    look: Lookups,
-    tables: &mut crate::entries::Tables,
-    mod_name: &dyn Fn(ModId) -> String,
-    errors: &mut Vec<String>,
-) {
-    use abi::comp::structure as s;
-    let kind = abi::entry_kind::STRUCTURE;
-    let (structures, _) = tables.bake_by(
+        }
+    }
+    let kind = abi::entry_kind::TEMPLATE;
+    let make = |name: &str, own: crate::template::Parts, e: Option<&Entry>, errors: &mut Vec<String>| {
+        let mut parts = own;
+        if let Some(e) = e {
+            parts
+                .blocks
+                .extend(e.or::<Vec<abi::TemplateBlock>>(t::BLOCKS, Vec::new()));
+            parts
+                .slots
+                .extend(e.or::<Vec<abi::PaletteSlot>>(t::SLOTS, Vec::new()));
+            parts
+                .entities
+                .extend(e.or::<Vec<abi::TemplateEntity>>(t::ENTITIES, Vec::new()));
+            parts
+                .loot
+                .extend(e.or::<Vec<abi::TemplateLoot>>(t::LOOT, Vec::new()));
+            parts
+                .data
+                .extend(e.or::<Vec<abi::TemplateData>>(t::DATA, Vec::new()));
+            parts
+                .joints
+                .extend(e.or::<Vec<abi::TemplateJoint>>(t::JOINTS, Vec::new()));
+        }
+        template_of(look, name, parts, errors)
+    };
+    let (mut defs, mut names) = tables.bake_by(
         entries_of(games, kind),
         kind,
         mod_name,
         errors,
         |e| e.name.clone(),
         |e, errors| {
-            let what = format!("structure {}", e.name);
-            let Some(&t) = template_names.get(&e.name) else {
-                errors.push(format!("{what}: no such template"));
-                return None;
-            };
-            let blocks = templates[t as usize].blocks.clone();
-            let biome = look.biomes(&what, e, errors).ok()?;
-            let extent = blocks
-                .iter()
-                .fold(IVec3::ZERO, |m, (p, _)| m.max(*p + IVec3::ONE));
-            let sink = e.or(s::BURIED, 0);
-            let def = ScatterDef {
-                name: e.name.clone(),
-                cell: e.or(s::SPACING, 32u32).max(1) as i32,
-                reach: extent.x.max(extent.z),
-                reach_y: [sink.max(0), extent.y],
-                chance: Chance::Fixed(e.or(s::CHANCE, 0.5)),
-                biome,
-                y: heights(e),
-                ground: None,
-                salt: crate::registry::name_hash(&e.name),
-                shape: SiteShape::Template { blocks: blocks.into(), extent, sink, turns: e.has(s::TURNS) },
-            };
-            Some((look.targets(dim_defs, &what, e, errors), def))
+            let own = files.remove(&e.name).unwrap_or_default();
+            make(&e.name, own, Some(e), errors)
         },
     );
-    place(dim_defs, structures, |d| &mut d.scatters);
+    let mut rest: Vec<(String, crate::template::Parts)> = files.into_iter().collect();
+    rest.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, parts) in rest {
+        names.insert(name.clone(), defs.len() as u32);
+        defs.push(make(&name, parts, None, errors));
+    }
+    (defs, names)
+}
+
+/// The `.json` and `.wst` files under `dir`, in name order.
+fn template_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(read) = std::fs::read_dir(dir) else { return out };
+    let mut entries: Vec<_> = read.flatten().map(|e| e.path()).collect();
+    entries.sort();
+    for p in entries {
+        if p.is_dir() {
+            out.extend(template_files(&p));
+        } else if matches!(p.extension().and_then(|e| e.to_str()), Some("json" | "wst")) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// A template from its parts, every block checked.
+fn template_of(look: Lookups, name: &str, parts: crate::template::Parts, errors: &mut Vec<String>) -> crate::template::TemplateDef {
+    crate::template::TemplateDef::from_parts(name, parts, |b| check_block(look, b), errors)
 }
 
 /// Each dimension's terrain: its own mod's entries first, then other mods' in load order.
@@ -3578,7 +3725,7 @@ fn check_ambient_particles(game: &crate::registry::Game, components: &Components
 /// A structure's box is what its blocks fill; a set size would only disagree with them.
 fn link_entity_templates(
     game: &mut crate::registry::Game,
-    templates: &[TemplateDef],
+    templates: &[crate::template::TemplateDef],
     template_names: &FxHashMap<String, u32>,
     errors: &mut Vec<String>,
 ) {
@@ -3857,8 +4004,11 @@ mod tests {
             id: id.into(),
             version: "1".into(),
             deps: deps.iter().map(|d| d.to_string()).collect(),
+            after: Vec::new(),
+            before: Vec::new(),
             order: 0,
             assets: Default::default(),
+            source: Default::default(),
         }
     }
 
@@ -3866,6 +4016,18 @@ mod tests {
     fn dependencies_load_first() {
         // Sorted by id, as the loader lists them: "aaa" depends on "zzz".
         let mods = [meta("aaa", &["zzz"]), meta("base", &[]), meta("zzz", &["base"])];
+        assert_eq!(load_order(&mods), vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn after_and_before_only_order() {
+        let with = |id: &str, after: &[&str], before: &[&str]| ModMeta {
+            after: after.iter().map(|d| d.to_string()).collect(),
+            before: before.iter().map(|d| d.to_string()).collect(),
+            ..meta(id, &[])
+        };
+        // "aaa" after "zzz", "mmm" before "aaa", "ghost" not there at all.
+        let mods = [with("aaa", &["zzz", "ghost"], &[]), with("mmm", &[], &["aaa"]), with("zzz", &[], &["ghost"])];
         assert_eq!(load_order(&mods), vec![2, 0, 1]);
     }
 }

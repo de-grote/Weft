@@ -1,0 +1,25 @@
+name: Validate metadata
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils appstream
+
+      - name: Validate .desktop files
+        run: |
+          desktop-file-validate metafiles/download.weft.weft.desktop
+
+      - name: Validate AppStream metainfo files
+        run: |
+          appstreamcli validate metafiles/download.weft.weft.metainfo.xml

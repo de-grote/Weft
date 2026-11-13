@@ -616,13 +616,14 @@ fn lod(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t:
             ice = desc[r + 12u];
         }
         var y = c.height;
+        // The sea over the ground.
+        var over = 0u;
         if (desc[D_HAS_SEA] != 0 && c.height < desc[D_SEA]) {
-            y = desc[D_SEA];
-            top = desc[D_WATER];
+            var surface = desc[D_WATER];
             if (ice >= 0) {
-                top = ice;
+                surface = ice;
             }
-            under = top;
+            over = (u32(desc[D_SEA]) & 65535u) | (u32(surface) << 16u);
         }
         // Where caves open the ground, the floor they leave, as far down as distance shows.
         if (desc[D_HAS_CAVES] != 0 && (desc[D_HAS_SEA] == 0 || c.height > desc[D_SEA])) {
@@ -645,9 +646,10 @@ fn lod(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t:
                 under = stone;
             }
         }
-        let o = (tile * LOD_SAMPLES + k) * 2u;
+        let o = (tile * LOD_SAMPLES + k) * LOD_WORDS;
         outp[o] = (u32(y) & 65535u) | (u32(top) << 16u);
         outp[o + 1u] = (u32(c.biome) & 65535u) | (u32(under) << 16u);
+        outp[o + 2u] = over;
         lod_ground[k] = (u32(c.height) & 65535u) | (u32(c.biome) << 16u);
         atomicStore(&canopy[k], 0u);
         atomicStore(&cover[k], 0u);
@@ -696,7 +698,7 @@ fn lod(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t:
             // Only on its ground, as `dim::scatter_site`: the sample's top, which is stone where
             // caves opened it.
             if (ng > 0u) {
-                let top = i32(outp[(tile * LOD_SAMPLES + u32(sj) * LOD_SIDE + u32(si)) * 2u] >> 16u);
+                let top = i32(outp[(tile * LOD_SAMPLES + u32(sj) * LOD_SIDE + u32(si)) * LOD_WORDS] >> 16u);
                 var on = false;
                 for (var q = 0u; q < ng; q++) {
                     let first = desc[ground + q * 2u];
@@ -740,7 +742,7 @@ fn lod(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) t:
     for (var k = t; k < LOD_SAMPLES; k += 256u) {
         let p = atomicLoad(&canopy[k]);
         if (p != 0u && atomicLoad(&cover[k]) * 3u >= u32(s * s)) {
-            let o = (tile * LOD_SAMPLES + k) * 2u;
+            let o = (tile * LOD_SAMPLES + k) * LOD_WORDS;
             let leaves = p & 65535u;
             outp[o] = ((u32(i32(p >> 16u) - 32768)) & 65535u) | (leaves << 16u);
             outp[o + 1u] = (outp[o + 1u] & 65535u) | (leaves << 16u);

@@ -48,6 +48,9 @@ static EDITED: Item = Item::named("testmod:edited");
 static EDITED_BIOME: Biome = Biome::named("edited");
 static EDITED_LOOT: LootTable = LootTable::named("edited");
 static EDITED_KIND: EntityKind = EntityKind::named("edited");
+/// Testmod's records' tag and weight, by name: the vocabulary is shared.
+static STYLE: Tag = Tag::named("testmod:style");
+static STYLE_WEIGHT: Component<f32> = Component::named("testmod:weight");
 static WARMTH: Component<f32> = Component::named("testkit:warmth");
 static STORM: Weather = Weather::named("storm");
 static GRIT: Attribute = Attribute::named("grit");
@@ -72,6 +75,8 @@ pub static NO_USE: Config<bool> = Config::named("no_use");
 pub static CHAT_HOOKS: Config<bool> = Config::named("chat_hooks");
 /// What the last `actions::CHAT` said.
 static LAST_SAID: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// Features placed in generated cubes: (feature, start).
+static PLACED: std::sync::Mutex<Vec<(u32, BlockPos)>> = std::sync::Mutex::new(Vec::new());
 /// Fired by `after` timers; counted.
 static RANG: Event<u64> = Event::named("rang");
 static RINGS: AtomicU32 = AtomicU32::new(0);
@@ -168,7 +173,14 @@ pub fn register(r: &mut Registry) {
         .size(0.9, 2.5)
         .set(&WARMTH, 3.0)
         .attach(&MARK);
-    r.edit(TIN_ORE.ore()).veins(7);
+    r.edit(TIN_ORE.ore()).per_cube(7);
+    // Testmod's records: one of its changed, one more of the same kind.
+    static STONE_STYLE: Record = Record::named("testmod:stone_style");
+    static BRICK_STYLE: Record = Record::named("brick_style");
+    r.edit(&STONE_STYLE).set(&STYLE_WEIGHT, 5.0);
+    r.record(&BRICK_STYLE)
+        .tag(STYLE.name())
+        .set(&STYLE_WEIGHT, 1.0);
     r.block(&LAMP)
         .prop("lit", ["false", "true"])
         .states(|p, s| if p.is("lit", "true") { s.light(13) } else { s })
@@ -262,6 +274,12 @@ pub fn register(r: &mut Registry) {
     r.before_event(&actions::USE_ITEM, |_| if NO_USE.get() { Verdict::Deny } else { Verdict::Abstain });
     r.on_event(&RANG, |b| {
         RINGS.fetch_add(b.len() as u32, Ordering::Relaxed);
+    });
+    r.on_event(&FEATURE_PLACED, |b| {
+        PLACED
+            .lock()
+            .unwrap()
+            .extend(b.iter().map(|v| (v.feature, v.pos)));
     });
     r.config(&HALF_DAMAGE).bool(false).world();
     r.before_event(&actions::BREAK_BLOCK, |q| if GOLD.is(q.state()) && PROTECT_GOLD.get() { Verdict::Deny } else { Verdict::Abstain });
@@ -557,6 +575,19 @@ const OPS: &[(&str, &str, Run)] = &[
         if missed > 0 { Err(format!("{missed} blocks not loaded")) } else { Ok(volume.to_string()) }
     }),
     ("get", "<pos:pos>", |w, cmd, _, _| Ok(block_name(w.block(pos(cmd, "pos")?)).to_string())),
+    ("count", "<from:pos> <to:pos> <block:block>", |w, cmd, _, _| {
+        // How many of a block lie in a box.
+        let (a, b, want) = (pos(cmd, "from")?, pos(cmd, "to")?, block_of(id(cmd, "block")?));
+        let mut n = 0;
+        for y in a[1].min(b[1])..=a[1].max(b[1]) {
+            for z in a[2].min(b[2])..=a[2].max(b[2]) {
+                for x in a[0].min(b[0])..=a[0].max(b[0]) {
+                    n += (block_of(w.block([x, y, z])) == want) as u32;
+                }
+            }
+        }
+        Ok(n.to_string())
+    }),
     ("prop", "<pos:pos> <name:word>", |w, cmd, _, _| {
         Ok(w.prop(pos(cmd, "pos")?, word(cmd, "name")?)
             .unwrap_or("none")
@@ -941,8 +972,30 @@ const OPS: &[(&str, &str, Run)] = &[
         Ok(w.looked_at(player, 5.0, Ray::blocks())
             .map_or("none".into(), |l| format!("{} {} {} {} {}", l.body, l.pos.x, l.pos.y, l.pos.z, block_name(l.state))))
     }),
+    // Records with testmod's style tag: `name=weight` each, by name.
+    ("records", "", |_, _, _, _| {
+        let mut out: Vec<String> = entries_with(ek::RECORD, STYLE.name())
+            .into_iter()
+            .map(|id| format!("{}={}", name_of(ek::RECORD, id), STYLE_WEIGHT.on_record(id).unwrap_or(-1.0)))
+            .collect();
+        out.sort();
+        Ok(out.join(" "))
+    }),
+    // Features placed in generated cubes so far: `name x y z` each.
+    ("placed", "", |_, _, _, _| {
+        let placed = PLACED.lock().unwrap();
+        let parts: Vec<String> = placed
+            .iter()
+            .map(|(f, p)| format!("{} {} {} {}", name_of(ek::FEATURE, *f), p.x, p.y, p.z))
+            .collect();
+        Ok(parts.join(", "))
+    }),
     ("place", "<template:word> <pos:pos>", |w, cmd, _, _| {
-        Ok((w.place_template(&Template::generated(word(cmd, "template")?.to_string()), pos(cmd, "pos")?) as u32).to_string())
+        let t = Template::generated(word(cmd, "template")?.to_string());
+        Ok((w
+            .place_template(&t, pos(cmd, "pos")?, Transform::NONE, None)
+            .is_some() as u32)
+            .to_string())
     }),
     ("heal", "", |w, _, player, _| {
         w.heal(player, f32::MAX);
@@ -1221,6 +1274,21 @@ const OPS: &[(&str, &str, Run)] = &[
         Ok((w.damage(int(cmd, "id")?, Damage::new(amount, abi::damage_cause::ATTACK).by(player)) as u32).to_string())
     }),
     ("pose", "", |w, _, player, _| Ok(w.entity(player).map_or(0, |e| e.pose).to_string())),
+    ("hit_from", "<source:int> <amount:float> <weapon:item> [cause:int] [hand:word(main,off)] [knock:pos]", |w, cmd, player, _| {
+        let amount = cmd.float("amount").ok_or("missing amount")? as f32;
+        let cause = int(cmd, "cause").unwrap_or(abi::damage_cause::ATTACK);
+        let weapon = ItemStack::new(id(cmd, "weapon")?, 1);
+        if let Some(hand) = cmd.text("hand") {
+            w.use_item(player, hand == "off");
+        }
+        let mut damage = Damage::new(amount, cause)
+            .by(int(cmd, "source")?)
+            .with(weapon);
+        if let Some(knock) = cmd.pos("knock") {
+            damage = damage.knock(knock);
+        }
+        Ok((w.damage(player, damage) as u32).to_string())
+    }),
     ("hurt_me", "<amount:float>", |w, cmd, player, _| {
         let amount = cmd.float("amount").ok_or("missing amount")? as f32;
         Ok((w.damage(player, Damage::new(amount, abi::damage_cause::ATTACK)) as u32).to_string())

@@ -332,6 +332,7 @@ schema_data!(
     Pickup,
     Spawned,
     Removed,
+    FeaturePlaced,
     ProjectileHit,
     KeyChange,
     EffectChange,

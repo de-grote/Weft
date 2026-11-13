@@ -16,8 +16,11 @@ pub mod config;
 pub mod content;
 pub mod dedicated;
 pub mod diag;
+pub mod editor;
 pub mod entries;
+pub mod features;
 pub mod game_screens;
+pub mod hitbox;
 pub mod host;
 pub mod hud;
 pub mod hud_editor;
@@ -25,8 +28,10 @@ pub mod input;
 pub mod log;
 pub mod loot;
 pub mod minecraft;
+pub mod mod_index;
 pub mod model;
 pub mod modloader;
+pub mod mods_screen;
 pub mod net;
 pub mod packs;
 pub mod paths;
@@ -43,12 +48,18 @@ pub mod shape;
 pub mod stack;
 pub mod steps;
 pub mod tag_bits;
+pub mod template;
+pub mod touch;
 pub mod ui;
 pub mod wire;
 pub mod world;
 
 pub use app::api::{exit_code, set_launch_options};
+#[cfg(target_os = "android")]
+pub use app::run_android;
 pub use app::{BackendFactory, Options, Renderers, run};
+#[cfg(target_os = "android")]
+pub use winit::platform::android::activity::AndroidApp;
 
 /// Background workers (generation, meshing, region ticks) leave two cores to the render and
 /// server threads: a full pool starved the render thread during loading and frames missed vsync.
@@ -83,11 +94,15 @@ pub fn init_workers() {
     set_priority(PRIORITY_ABOVE_NORMAL);
 }
 
+/// Cached worker count, since asking the system may take too much time on a hot path
 fn workers() -> usize {
-    std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .saturating_sub(2)
-        .max(1)
+    static WORKERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WORKERS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .saturating_sub(2)
+            .max(1)
+    })
 }
 
 /// The pool for bulk work queued by the thousand (generating and saving cubes). Work that

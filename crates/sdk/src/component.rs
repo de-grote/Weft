@@ -445,6 +445,11 @@ impl<T: Data, K> Component<T, K> {
     pub fn on_item(&self, item: u32) -> Option<T> {
         self.on(ek::ITEM, item)
     }
+    /// Its value on a record (`Registry::record`).
+    #[inline]
+    pub fn on_record(&self, record: u32) -> Option<T> {
+        self.on(ek::RECORD, record)
+    }
     #[inline]
     pub fn on_entity(&self, kind: u32) -> Option<T> {
         self.on(ek::ENTITY, kind)
@@ -588,6 +593,11 @@ impl<K> Tag<K> {
     pub fn on_item(&self, item: u32) -> bool {
         self.on(ek::ITEM, item)
     }
+    /// A record (`Registry::record`) has it.
+    #[inline]
+    pub fn on_record(&self, record: u32) -> bool {
+        self.on(ek::RECORD, record)
+    }
     #[inline]
     pub fn on_entity(&self, kind: u32) -> bool {
         self.on(ek::ENTITY, kind)
@@ -644,8 +654,8 @@ static LAYERS: Tag = Tag::named(abi::comp::LAYERS);
 
 pub trait StackData: Sized {
     /// This stack with its own value of `c` set.
-    fn with<T: Value>(self, c: &Component<T>, v: T) -> Self;
-    fn without<T: Value>(self, c: &Component<T>) -> Self;
+    fn with<T: Data>(self, c: &Component<T>, v: T) -> Self;
+    fn without<T: Data>(self, c: &Component<T>) -> Self;
     /// `count` less, empty when nothing is left.
     fn shrink(self, n: u32) -> Self;
     fn grow(self, n: u32) -> Self;
@@ -726,11 +736,11 @@ impl Layers {
 const STACK_BYTES: usize = 12;
 
 impl StackData for ItemStack {
-    fn with<T: Value>(self, c: &Component<T>, v: T) -> Self {
-        let b = value_bytes(&v);
+    fn with<T: Data>(self, c: &Component<T>, v: T) -> Self {
+        let b = abi::data::bytes_of(&v);
         ItemStack { data: unsafe { (host().stack_with)(self.data, c.id(), abi::Slice::new(&b), 0) }, ..self }
     }
-    fn without<T: Value>(self, c: &Component<T>) -> Self {
+    fn without<T: Data>(self, c: &Component<T>) -> Self {
         ItemStack { data: unsafe { (host().stack_with)(self.data, c.id(), abi::Slice::EMPTY, 1) }, ..self }
     }
     fn shrink(self, n: u32) -> Self {

@@ -14,7 +14,7 @@ struct VOut {
     @location(7) @interpolate(flat) strength: f32,
 }
 
-// A layer draws the parts of its roles, and the bones it names.
+// A layer draws the parts of its roles, and those covering the bones it names.
 fn drawn(inst: Instance, role: u32, bone: u32) -> bool {
     return ((inst.roles >> role) & 1u) != 0u || (bone < 32u && ((inst.bone_mask >> bone) & 1u) != 0u);
 }
@@ -44,7 +44,7 @@ fn vertex(vi: u32, ii: u32) -> VOut {
     let boxes = inst.cuboid_count * 36u;
     if vi < boxes {
         let cub = cuboids[inst.cuboids + vi / 36u];
-        if !drawn(inst, cub.role, cub.bone) {
+        if !drawn(inst, cub.role, cub.cover) {
             out.clip = vec4(0.0, 0.0, 0.0, 1.0);
             return out;
         }
@@ -69,7 +69,7 @@ fn vertex(vi: u32, ii: u32) -> VOut {
     } else {
         let k = vi - boxes;
         let v = corners[inst.vertices + k];
-        if !drawn(inst, v.role, v.bone) {
+        if !drawn(inst, v.role, v.cover) {
             out.clip = vec4(0.0, 0.0, 0.0, 1.0);
             return out;
         }

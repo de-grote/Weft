@@ -218,6 +218,7 @@ impl DimSet {
         if self.has(pos) {
             return;
         }
+        let generated = cube.generated.take();
         // Edits made while it was being made.
         let edited = self.catch_up_edits(pos, &mut cube);
         if edited {
@@ -266,6 +267,9 @@ impl DimSet {
             d.add_missing_on_body(c, id);
         }
         d.add_missing_block_entities(c, pos);
+        if let Some(g) = generated {
+            d.joined(c, *g);
+        }
     }
 
     /// Gives a cube coming from storage or generation the area edits made while it was away
@@ -591,7 +595,7 @@ fn search_spawn(c: &Content, def: &crate::content::DimensionDef, seed: u64) -> O
             && col.height > sea + 1
             && biome_ok
             && !def.carved(seed, x, z)
-            && !super::dim::scattered_near(def, c, seed, x, z))
+            && !crate::features::stands_near(c, def, seed, x, z))
         .then_some([x, col.height, z])
     };
     for prefer in [true, false] {

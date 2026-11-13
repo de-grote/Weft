@@ -1,5 +1,6 @@
-//! Single-line text editing with the usual desktop keys: Shift extends a selection, Ctrl moves and
-//! deletes by words, Ctrl+A/C/X/V, held keys repeat. Positions are char indices.
+//! Text editing with the usual desktop keys: Shift extends a selection, Ctrl moves and deletes by
+//! words, Ctrl+A/C/X/V, held keys repeat. Positions are char indices. A field of several lines
+//! (`lines`) also takes Enter and Tab, and goes up and down a line.
 
 use winit::keyboard::KeyCode;
 
@@ -11,6 +12,7 @@ pub struct Field<'a> {
     /// Other end of the selection, if any.
     pub anchor: &'a mut Option<usize>,
     pub max: usize,
+    pub lines: bool,
 }
 
 /// What a key did: the text changed, or only the caret or selection moved.
@@ -94,7 +96,11 @@ impl Field<'_> {
     pub fn insert(&mut self, text: &str) -> bool {
         let mut changed = self.delete_selection();
         let mut chars = self.chars();
-        for ch in text.chars().filter(|c| !c.is_control()) {
+        let text = if self.lines { text.replace("\r\n", "\n").replace('\t', "    ") } else { text.to_string() };
+        for ch in text
+            .chars()
+            .filter(|&c| !c.is_control() || (self.lines && c == '\n'))
+        {
             if chars.len() >= self.max {
                 break;
             }
@@ -142,10 +148,18 @@ impl Field<'_> {
             }
         } else if ctrl && key(KeyCode::KeyV) {
             if let Some(clip) = crate::clipboard::get() {
-                out.changed |= self.insert(clip.lines().next().unwrap_or(""));
+                let clip = if self.lines { clip.as_str() } else { clip.lines().next().unwrap_or("") };
+                out.changed |= self.insert(clip);
             }
         } else if !input.typed.is_empty() && !ctrl {
-            out.changed |= self.insert(&input.typed);
+            // Tab comes as a key too, which puts the indent in below; typed, it would twice.
+            out.changed |= self.insert(&input.typed.replace('\t', ""));
+        }
+        if self.lines && key(KeyCode::Enter) {
+            out.changed |= self.insert("\n");
+        }
+        if self.lines && key(KeyCode::Tab) {
+            out.changed |= self.insert("    ");
         }
 
         if key(KeyCode::Backspace) {
@@ -186,6 +200,19 @@ impl Field<'_> {
                 (false, Some((_, b))) if !shift => b,
                 _ => (caret + 1).min(len),
             })
+        } else if self.lines && !ctrl && (key(KeyCode::Home) || key(KeyCode::End)) {
+            // The start or end of the line the caret is on.
+            let start = chars[..caret]
+                .iter()
+                .rposition(|&c| c == '\n')
+                .map_or(0, |i| i + 1);
+            let end = chars[caret..]
+                .iter()
+                .position(|&c| c == '\n')
+                .map_or(len, |i| caret + i);
+            Some(if key(KeyCode::Home) { start } else { end })
+        } else if self.lines && (key(KeyCode::ArrowUp) || key(KeyCode::ArrowDown)) {
+            Some(line_step(&chars, caret, key(KeyCode::ArrowDown)))
         } else if key(KeyCode::Home) {
             Some(0)
         } else if key(KeyCode::End) {
@@ -199,6 +226,42 @@ impl Field<'_> {
         }
         out
     }
+}
+
+/// The caret a line up or down, in the same column or at that line's end if it is shorter.
+fn line_step(chars: &[char], caret: usize, down: bool) -> usize {
+    let start = chars[..caret]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map_or(0, |i| i + 1);
+    let col = caret - start;
+    let (from, to) = if down {
+        let Some(end) = chars[caret..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map(|i| caret + i)
+        else {
+            return chars.len();
+        };
+        let next = end + 1;
+        (
+            next,
+            chars[next..]
+                .iter()
+                .position(|&c| c == '\n')
+                .map_or(chars.len(), |i| next + i),
+        )
+    } else {
+        if start == 0 {
+            return 0;
+        }
+        let prev = chars[..start - 1]
+            .iter()
+            .rposition(|&c| c == '\n')
+            .map_or(0, |i| i + 1);
+        (prev, start - 1)
+    };
+    (from + col).min(to)
 }
 
 #[cfg(test)]
@@ -217,9 +280,19 @@ mod tests {
     #[test]
     fn typing_replaces_the_selection() {
         let (mut v, mut caret, mut anchor) = ("hello world".to_string(), 11, Some(6));
-        let mut f = Field { value: &mut v, caret: &mut caret, anchor: &mut anchor, max: 32 };
+        let mut f = Field { value: &mut v, caret: &mut caret, anchor: &mut anchor, max: 32, lines: false };
         assert!(f.insert("there"));
         assert_eq!(v, "hello there");
         assert_eq!((caret, anchor), (11, None));
+    }
+
+    #[test]
+    fn lines_up_and_down() {
+        let c: Vec<char> = "abcd\nx\nlonger".chars().collect();
+        assert_eq!(line_step(&c, 3, true), 6);
+        assert_eq!(line_step(&c, 6, true), 8);
+        assert_eq!(line_step(&c, 9, false), 6);
+        assert_eq!(line_step(&c, 6, false), 1);
+        assert_eq!(line_step(&c, 2, false), 0);
     }
 }

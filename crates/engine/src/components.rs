@@ -49,6 +49,10 @@ pub const BUILTIN: &[(&str, &str)] = &[
     (abi::comp::WORN, <abi::Worn as abi::Schema>::SCHEMA),
     (abi::comp::WORN_TEXTURE, "str"),
     (abi::comp::WEAR_PER_HIT, "u32"),
+    (abi::comp::BLOCKS_ATTACKS, "<delay_ticks:u32,arc:f32,wear_threshold:f32,wear_base:u32,wear_factor:f32>"),
+    (abi::comp::DISABLE_BLOCKING, "f32"),
+    (abi::comp::CATCH_PROJECTILES, "<bone:str,min:[f32;3],max:[f32;3],direction:[f32;3]>"),
+    (abi::comp::EMBEDDED_PROJECTILES, "[<kind:str,bone:str,position:[f32;3],direction:[f32;3]>]"),
     (abi::attribute::MAX_HEALTH, "f64"),
 ];
 

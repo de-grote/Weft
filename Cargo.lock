@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "base"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "base_api",
  "weft_sdk",
@@ -303,7 +303,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "base_api"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "weft_sdk",
 ]
@@ -951,6 +951,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
 dependencies = [
  "block-buffer",
+ "const-oid",
  "crypto-common 0.2.2",
 ]
 
@@ -3777,6 +3778,7 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -4522,7 +4524,7 @@ dependencies = [
 
 [[package]]
 name = "testkit"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "base_api",
  "png",
@@ -4531,7 +4533,7 @@ dependencies = [
 
 [[package]]
 name = "testmod"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "base_api",
  "weft_sdk",
@@ -4619,7 +4621,7 @@ dependencies = [
 
 [[package]]
 name = "tinkers"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "base_api",
  "weft_sdk",
@@ -5278,9 +5280,11 @@ dependencies = [
 
 [[package]]
 name = "weft"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "log",
+ "png",
+ "rustc-hash 2.1.3",
  "weft_engine",
  "weft_render",
  "weft_vulkan",
@@ -5290,11 +5294,23 @@ dependencies = [
 
 [[package]]
 name = "weft_abi"
-version = "26.11.3"
+version = "26.11.4"
+
+[[package]]
+name = "weft_android"
+version = "26.11.4"
+dependencies = [
+ "log",
+ "weft_engine",
+ "weft_noise",
+ "weft_render",
+ "weft_vulkan",
+ "zip",
+]
 
 [[package]]
 name = "weft_engine"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "arboard",
  "bytemuck",
@@ -5310,10 +5326,17 @@ dependencies = [
  "naga",
  "parking_lot 0.13.0",
  "png",
+ "proc-macro2",
+ "quote",
  "rayon",
+ "reqwest",
  "rustc-hash 2.1.3",
+ "rustls",
  "serde_json",
+ "sha2",
+ "syn 2.0.119",
  "tokio",
+ "webpki-roots",
  "weft_abi",
  "weft_noise",
  "weft_render",
@@ -5323,11 +5346,11 @@ dependencies = [
 
 [[package]]
 name = "weft_noise"
-version = "26.11.3"
+version = "26.11.4"
 
 [[package]]
 name = "weft_render"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "bytemuck",
  "naga",
@@ -5337,7 +5360,7 @@ dependencies = [
 
 [[package]]
 name = "weft_sdk"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "weft_abi",
  "weft_noise",
@@ -5345,7 +5368,7 @@ dependencies = [
 
 [[package]]
 name = "weft_vulkan"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "ash",
  "ash-window",
@@ -5358,7 +5381,7 @@ dependencies = [
 
 [[package]]
 name = "weft_wgpu"
-version = "26.11.3"
+version = "26.11.4"
 dependencies = [
  "log",
  "naga",

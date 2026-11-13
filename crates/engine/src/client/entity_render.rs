@@ -79,9 +79,19 @@ const ICON_CELLS: u32 = 16;
 #[derive(Clone, Copy)]
 enum Carrying {
     /// In a hand: a model, or a sprite or block when it is none.
-    Held { stack: ItemStack, model: Option<u32>, off: bool },
+    Held {
+        stack: ItemStack,
+        model: Option<u32>,
+        off: bool,
+    },
     /// A model on one of its bones.
-    On { model: u32, bone: usize },
+    On {
+        model: u32,
+        bone: usize,
+    },
+    Embedded {
+        stack: ItemStack,
+    },
 }
 
 /// Something on an entity this frame: its place in `posed`, what, its light, its age and who.
@@ -566,6 +576,11 @@ impl EntityRenderer {
         for s in held {
             self.load_sprite(assets, &s);
             self.models.model_for(assets, s);
+            for embedded in crate::stack::embedded(&s) {
+                if let Some(&k) = c.game.entity_names.get(&embedded.kind) {
+                    self.load(gpu, assets, &c.game.entities[k as usize].texture);
+                }
+            }
         }
         self.own_stacks = held;
         let wanted = std::mem::take(&mut super::models::ICONS.lock().unwrap().wanted);
@@ -601,6 +616,11 @@ impl EntityRenderer {
             }
             if !e.item.is_empty() {
                 self.load_sprite(assets, &e.item);
+                for embedded in crate::stack::embedded(&e.item) {
+                    if let Some(&k) = c.game.entity_names.get(&embedded.kind) {
+                        self.load(gpu, assets, &c.game.entities[k as usize].texture);
+                    }
+                }
             }
             if !e.item.is_empty() && !c.game.item_model_for_stack.is_empty() {
                 self.models.model_for(assets, e.item);
@@ -613,10 +633,16 @@ impl EntityRenderer {
                     self.load(gpu, assets, t);
                 }
             }
-            for i in [e.held, e.off_held] {
-                if i != 0 && seen_items.get(i as usize).is_some_and(|s| !s) {
-                    seen_items[i as usize] = true;
-                    self.load_sprite(assets, &ItemStack { item: i, count: 1, data: 0 });
+            for stack in e.held_stacks {
+                let i = stack.item;
+                if i != 0 {
+                    self.load_sprite(assets, &stack);
+                    self.models.model_for(assets, stack);
+                }
+                for embedded in crate::stack::embedded(&stack) {
+                    if let Some(&k) = c.game.entity_names.get(&embedded.kind) {
+                        self.load(gpu, assets, &c.game.entities[k as usize].texture);
+                    }
                 }
             }
         }
@@ -875,25 +901,27 @@ impl EntityRenderer {
             glow: glow(&k.texture),
             ..Default::default()
         };
-        // An avatar is painted its own way, which armor's textures know nothing of.
-        if let Some(a) = self.avatar_of(entity, kind) {
-            let size = self
-                .models
-                .kinds
-                .get(a.kind as usize)
-                .and_then(|m| m.texture)
-                .unwrap_or(a.size);
-            out.0[0] = Instance { tex: a.index, tex_size: size.map(|v| v as f32), glow: a.glow.map_or(u32::MAX, |g| g.1), ..base };
-            out.1 = 1;
-            return out;
-        }
-        out.0[0] = base;
+        // An avatar is painted its own way; what it wears goes on its own worn geometry.
+        let avatar = self.avatar_of(entity, kind);
+        out.0[0] = match avatar {
+            Some(a) => {
+                let size = self
+                    .models
+                    .kinds
+                    .get(a.kind as usize)
+                    .and_then(|m| m.texture)
+                    .unwrap_or(a.size);
+                Instance { tex: a.index, tex_size: size.map(|v| v as f32), glow: a.glow.map_or(u32::MAX, |g| g.1), ..base }
+            }
+            None => base,
+        };
         out.1 = 1;
+        let model = avatar.map_or(kind, |a| a.kind);
         for &i in worn {
             if let Some((w, t)) = c.worn(i) {
                 if let Some(Some((_, idx, size))) = self.skins.get(t).filter(|_| out.1 < MAX_LAYERS) {
                     let names = c.worn_bones(i);
-                    let bone_mask = self.models.kinds.get(kind as usize).map_or(0, |m| {
+                    let bone_mask = self.models.kinds.get(model as usize).map_or(0, |m| {
                         m.parts
                             .iter()
                             .take(32)
@@ -908,6 +936,7 @@ impl EntityRenderer {
                         bone_mask,
                         inflate: w.inflate,
                         glow: glow(t),
+                        worn: 1,
                         ..base
                     };
                     out.1 += 1;
@@ -1226,7 +1255,11 @@ impl EntityRenderer {
                 None => (0, 0.0),
             };
             if !e.item.is_empty() {
+                let holder = posed.len();
                 self.pose_ground_item(id, e, base, lit, here, effect, hurt, textures, &mut posed, &mut instances);
+                if posed.len() > holder && e.item.data != 0 {
+                    carried.push(Carry { holder, what: Carrying::Embedded { stack: e.item }, lit, biome: here, age: e.age, id });
+                }
                 continue;
             }
             let look = e.look();
@@ -1305,7 +1338,7 @@ impl EntityRenderer {
             let (clips, standing) = if lod == PoseLod::Kept {
                 (Clips::default(), 0)
             } else {
-                self.clips_of(id, e, kind, look, lying, in_view, hand.as_ref().filter(|_| in_view).map(|h| h.lowered), dt)
+                self.clips_of(id, e, kind, look, lying, in_view, hand.as_ref().filter(|_| in_view).map(|h| h.lowered))
             };
             if own_view {
                 // Its model goes where the camera is: the camera doesn't sit in the torso, whatever pose it's in.
@@ -1344,8 +1377,7 @@ impl EntityRenderer {
             if !sleeping {
                 for (item, off) in [(e.held, false), (e.off_held, true)] {
                     if item != 0 {
-                        // Its stack is known of the local player only.
-                        let shown = if id == self.local { self.own_stacks[off as usize] } else { ItemStack { item, count: 1, data: 0 } };
+                        let shown = if id == self.local { self.own_stacks[off as usize] } else { e.held_stacks[off as usize] };
                         let model = self.models.model_seen(shown);
                         carried.push(carry(Carrying::Held { stack: shown, model, off }));
                     }
@@ -1569,7 +1601,6 @@ impl EntityRenderer {
         lying: Option<f32>,
         in_view: bool,
         lowered: Option<f32>,
-        dt: f32,
     ) -> (Clips, usize) {
         let c = content();
         let pose = e.pose.def();
@@ -1663,7 +1694,7 @@ impl EntityRenderer {
         // Coming and going smoothly. Nearly all of a crowd has nothing here to look at.
         if clips.n > standing || (!self.fades.is_empty() && self.fades.contains_key(&(id, kind))) {
             let fades = self.fades.entry((id, kind)).or_default();
-            super::models::fade_clips(fades, m, &mut clips, standing, dt);
+            super::models::fade_clips(fades, m, &mut clips, standing, e.age);
             if fades.is_empty() {
                 self.fades.remove(&(id, kind));
             }
@@ -1810,6 +1841,12 @@ impl EntityRenderer {
                 .unwrap_or_default();
             let own = own_holder == Some(holder);
             let (model, root, off, slot) = match what {
+                Carrying::Embedded { stack } => {
+                    for (model, first, layer) in self.embedded_models(stack, posed[holder].kind, at, lit) {
+                        self.models.queue(model, first, [layer]);
+                    }
+                    continue;
+                }
                 Carrying::On { model, bone } => (Some(model), self.models.bone(at + bone), false, model + 2),
                 Carrying::Held { stack, model, off } => {
                     let item = stack.item;
@@ -1860,9 +1897,42 @@ impl EntityRenderer {
                     self.models.queue(kind, bones, [l]);
                 }
             }
+            if let Carrying::Held { stack, .. } = what {
+                for (model, first, layer) in self.embedded_models(stack, kind, bones as usize, lit) {
+                    if own {
+                        own_items.push((model, first, layer));
+                    } else {
+                        self.models.queue(model, first, [layer]);
+                    }
+                }
+            }
         }
         (hand_items, own_items)
     }
+
+    fn embedded_models(&mut self, stack: ItemStack, kind: u32, bones: usize, lit: u32) -> Vec<(u32, u32, Instance)> {
+        let mut out = Vec::new();
+        for projectile in crate::stack::embedded(&stack) {
+            let Some(&model) = content().game.entity_names.get(&projectile.kind) else { continue };
+            let bone = self.models.kinds[kind as usize]
+                .parts
+                .iter()
+                .position(|p| p.name == projectile.bone)
+                .unwrap_or(0);
+            let Some(root) = embedded_root(&projectile, self.models.bone(bones + bone)) else { continue };
+            let first = self.models.pose_clips(model, root, &[]);
+            let (layers, count) = self.layers(model, 0, &[], lit, (0, 0.0));
+            if count > 0 {
+                out.push((model, first, layers[0]));
+            }
+        }
+        out
+    }
+}
+
+fn embedded_root(projectile: &weft_abi::EmbeddedProjectile, attached: Mat4) -> Option<Mat4> {
+    let direction = Vec3::from_array(projectile.direction).try_normalize()?;
+    Some(attached * Mat4::from_rotation_translation(Quat::from_rotation_arc(-Vec3::Z, direction), Vec3::from_array(projectile.position)))
 }
 
 /// The selection outline at `o`: twelve thin dark boxes along the edges of each selection box.

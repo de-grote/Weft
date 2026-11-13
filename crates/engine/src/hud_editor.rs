@@ -27,6 +27,8 @@ pub struct HudEditor {
     debug: bool,
     /// The element being dragged and where the cursor holds it, from its corner.
     drag: Option<(String, Vec2)>,
+    /// The touch control being sized by its corner: where the cursor took it and its side then.
+    sizing: Option<(String, Vec2, f32)>,
     /// Where the tool box stands (its top middle) once moved, and the cursor's hold on it.
     tools: Option<Vec2>,
     tools_drag: Option<Vec2>,
@@ -84,6 +86,26 @@ impl Screen for HudEditor {
         }
         let (left, right) = (ctx.input.pressed_button(0), ctx.input.pressed_button(1));
         let held = ctx.input.held_button(0);
+        if let Some((name, from, side)) = self.sizing.clone() {
+            if held {
+                let moved = cursor - from;
+                crate::touch::set_size(&name, side + moved.x.max(-moved.y));
+            } else {
+                self.sizing = None;
+                crate::touch::save();
+            }
+            return true;
+        }
+        // A touch control's top right corner sizes it (`hud::HANDLE` shows where).
+        let corner = |n: &String| hud.element_rect(n).map(|r| Vec2::new(r.x + r.w, r.y));
+        if left
+            && let Some((name, side)) = crate::touch::sizes()
+                .into_iter()
+                .find(|(n, _)| corner(n).is_some_and(|c| c.distance(cursor) <= hud::HANDLE))
+        {
+            self.sizing = Some((name, cursor, side));
+            return true;
+        }
         if let Some((name, grab)) = self.drag.clone() {
             if held {
                 if let Some(r) = hud.element_rect(&name) {

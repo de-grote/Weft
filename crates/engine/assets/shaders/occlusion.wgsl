@@ -5,7 +5,7 @@
 // The prelude (`gpu_layout::occlusion_prelude`) declares the bindings and `args`.
 
 // The depth buffer has 1 at the near plane and 0 at infinity: farther is less.
-@compute @workgroup_size(32, 32)
+@compute @workgroup_size(16, 16)
 fn down(@builtin(global_invocation_id) id: vec3<u32>) {
     let s = args.size;
     let d = (s + vec2<u32>(1u)) / 2u;

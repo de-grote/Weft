@@ -10,6 +10,8 @@ weft_vulkan.workspace = true
 weft_wgpu.workspace = true
 weft_render.workspace = true
 log.workspace = true
+png.workspace = true
+rustc-hash.workspace = true
 
 [build-dependencies]
 winresource = "0.1"

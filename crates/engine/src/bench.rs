@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 /// CPU parts of a frame, in the order `Running::prof` records them.
 pub const CPU_PARTS: [&str; 5] = ["update", "ui", "acquire", "record", "submit"];
 /// GPU parts, split by the marks the renderer places.
-pub const GPU_PARTS: [&str; 5] = ["upload", "world", "entities", "ui", "rest"];
+pub const GPU_PARTS: [&str; 5] = ["upload", "world", "after", "ui", "rest"];
 
 pub struct Bench {
     label: String,

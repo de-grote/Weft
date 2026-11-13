@@ -10,6 +10,7 @@ pub static WHEAT: Item = Item::named("wheat");
 pub static BUCKET: Item = Item::named("bucket");
 pub static FLINT: Item = Item::named("flint");
 pub static CLAY_BALL: Item = Item::named("clay_ball");
+pub static SHIELD: Item = Item::named("shield");
 
 pub use base_api::{ARMOR, ARMOR_PIECE, ARMOR_TOUGHNESS, FLAMMABLE, FOOD, FUEL, Food};
 /// Tags of armor pieces, head to feet; `<tag>/<material>` picks the recipe (see recipes.rs).
@@ -32,6 +33,17 @@ const MATERIALS: [Material; 5] = [
 ];
 
 pub fn register(r: &mut Registry) {
+    r.item(&SHIELD)
+        .max_stack(1)
+        .durability(336)
+        .use_until_released()
+        .set(&comps::BLOCKS_ATTACKS, Blocking { delay_ticks: 0, arc: 180.0, wear_threshold: 3.0, wear_base: 1, wear_factor: 1.0 })
+        .set(
+            &comps::CATCH_PROJECTILES,
+            ProjectileCatch { bone: "guard".into(), min: [-4.0, -6.0, -4.0], max: [4.0, 6.0, -4.0], direction: [0.0, 0.0, 1.0] },
+        )
+        .tab(&crate::tabs::COMBAT);
+    r.shaped(&crate::recipes::CRAFTING, "shield", 1, &["pip", "ppp", " p "], &[('p', "#planks"), ('i', "#ingots/iron")]);
     r.item(&STICK)
         .tag("stick")
         .handheld()
@@ -125,6 +137,8 @@ pub fn register(r: &mut Registry) {
                 .tab(if kind == "sword" { &crate::tabs::COMBAT } else { &crate::tabs::TOOLS });
             if kind == "sword" {
                 b.sweeps().no_creative_break();
+            } else if kind == "axe" {
+                b.set(&comps::DISABLE_BLOCKING, 5.0);
             }
         };
         tool(r, "pickaxe", 2.0 + m.damage, 1.2);

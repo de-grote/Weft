@@ -198,6 +198,7 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
             },
             self_align: (n.self_align != u32::MAX).then(|| align(n.self_align)),
             scroll: flag(abi::ui_flags::SCROLL),
+            bar_outside: false,
             fill: None,
             max_h: f32::INFINITY,
             at: None,
@@ -251,7 +252,7 @@ pub unsafe extern "C" fn ui_open(u: *mut abi::UiCtx, node: *const abi::UiNode) {
                 let max = if n.count == 0 { usize::MAX } else { n.count as usize };
                 let on_change: Rc<dyn Fn(&mut Ctx, &str)> = Rc::new(move |ctx: &mut Ctx, t: &str| on_change(ctx, t.to_string(), 0.0));
                 let id =
-                    b.ui.open(Kind::Input { caret: value.chars().count(), value, max, on_change: Some(on_change) }, style);
+                    b.ui.open(Kind::Input { caret: value.chars().count(), value, max, on_change: Some(on_change), area: None }, style);
                 // Its class names it, for the chat line of a screen that shows the chat.
                 if !class.is_empty() {
                     b.ui.nodes[id].id = Some(class);
@@ -599,6 +600,19 @@ pub unsafe extern "C" fn client_menu_owner(c: *mut abi::ClientCtx) -> u64 {
     }
 }
 
+pub unsafe extern "C" fn client_target(c: *mut abi::ClientCtx, out: *mut abi::Target) -> u32 {
+    let Some(cl) = (unsafe { view(c) }) else { return 0 };
+    let target = if let Some(entity) = cl.target_entity {
+        abi::Target { entity, ..Default::default() }
+    } else if let Some(h) = cl.target {
+        abi::Target { pos: h.block.to_array().into(), state: h.state, body: h.frame, ..Default::default() }
+    } else {
+        return 0;
+    };
+    unsafe { *out = target };
+    1
+}
+
 pub unsafe extern "C" fn client_entity(c: *mut abi::ClientCtx, id: u64, out: *mut abi::EntityState) -> u32 {
     unsafe {
         let Some(cl) = view(c) else { return 0 };
@@ -618,6 +632,7 @@ pub unsafe extern "C" fn client_entity(c: *mut abi::ClientCtx, id: u64, out: *mu
                 health: cl.health(),
                 max_health: cl.max_health,
                 size: cl.player.dims().size(),
+                selected: cl.selected as u32,
                 ..Default::default()
             };
             *out = state;
@@ -632,16 +647,21 @@ pub unsafe extern "C" fn client_entity(c: *mut abi::ClientCtx, id: u64, out: *mu
                     pitch: e.pitch,
                     moved: e.swing,
                     health: e.health,
-                    // The kind's own value: clients do not see attribute modifiers of others.
                     max_health: {
-                        let attr = &content.game.attributes[crate::registry::attr::MAX_HEALTH as usize];
-                        attr.comp
-                            .and_then(|id| {
-                                content
-                                    .components
-                                    .get::<f64>(crate::components::ENTITY, e.kind, id)
+                        cl.entity_components
+                            .get(&(id, content.game.fields.health))
+                            .and_then(|b| b.get(4..8))
+                            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                            .unwrap_or_else(|| {
+                                let attr = &content.game.attributes[crate::registry::attr::MAX_HEALTH as usize];
+                                attr.comp
+                                    .and_then(|id| {
+                                        content
+                                            .components
+                                            .get::<f64>(crate::components::ENTITY, e.kind, id)
+                                    })
+                                    .unwrap_or(attr.default) as f32
                             })
-                            .unwrap_or(attr.default) as f32
                     },
                     size: e.dims().size(),
                     ..Default::default()

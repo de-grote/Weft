@@ -87,6 +87,8 @@ pub struct Style {
     pub self_align: Option<Align>,
     /// Children scroll inside this node (mouse wheel) and are clipped to it.
     pub scroll: bool,
+    /// Its scroll bar goes just past its right edge, taking nothing from what it holds.
+    pub bar_outside: bool,
     /// A plain color behind the node, RGBA.
     pub fill: Option<u32>,
     /// Placed at a point instead of in the flow: (x, y) in GUI pixels from the parent's inner
@@ -113,6 +115,7 @@ impl Default for Style {
             justify: Justify::Start,
             self_align: None,
             scroll: false,
+            bar_outside: false,
             fill: None,
             at: None,
             at_from: [0.0; 2],
@@ -184,6 +187,12 @@ impl Style {
     }
     pub fn scroll(mut self) -> Self {
         self.scroll = true;
+        self
+    }
+    /// `scroll` with the bar just past the right edge (in the gap beside it).
+    pub fn scroll_outside(mut self) -> Self {
+        self.scroll = true;
+        self.bar_outside = true;
         self
     }
     pub fn stretch(mut self) -> Self {
@@ -277,12 +286,13 @@ pub enum Kind {
         /// The last change: the value before it, when (`shaders::clock`), whether up.
         change: Option<(f32, f32, bool)>,
     },
-    /// Single-line text field; `caret` is a char index.
+    /// Text field; `caret` is a char index. With an `area` it holds several lines.
     Input {
         value: String,
         caret: usize,
         max: usize,
         on_change: Option<Rc<dyn Fn(&mut Ctx, &str)>>,
+        area: Option<Area>,
     },
     /// Focused by a click, the arrow keys move it a step of `steps` across.
     Slider {
@@ -334,6 +344,8 @@ impl Scrollbar {
     /// Width the bar takes from the content, its gap included.
     pub const ROOM: f32 = 14.0;
     pub const HANDLE: [f32; 2] = [12.0, 15.0];
+    /// From a node's edge to its bar outside it (`Style::scroll_outside`).
+    pub const OUTSIDE_GAP: f32 = 3.0;
 
     /// The handle's rect.
     pub fn handle(&self) -> Rect {
@@ -378,8 +390,137 @@ impl Default for Ui {
 
 impl Kind {
     pub fn input(value: &str, max: usize) -> Kind {
-        Kind::Input { value: value.to_string(), caret: value.chars().count(), max, on_change: None }
+        Kind::Input { value: value.to_string(), caret: value.chars().count(), max, on_change: None, area: None }
     }
+
+    /// A field of several lines (Enter breaks the line), its text shown through `format` if given
+    /// (colors, `mono`; the glyphs' widths must not depend on what comes before them).
+    pub fn text_area(value: &str, max: usize, format: Option<Format>) -> Kind {
+        let area = Area { format, scroll: Rc::default(), wrap: true, inset: 0.0 };
+        Kind::Input { value: value.to_string(), caret: 0, max, on_change: None, area: Some(area) }
+    }
+}
+
+pub type Format = Rc<dyn Fn(&str) -> Vec<Span>>;
+
+/// What a field of several lines has beyond a line's.
+pub struct Area {
+    pub format: Option<Format>,
+    /// How far its text is moved left and up to keep the caret in sight, GUI units; shared with
+    /// whoever builds it again, so a rebuild doesn't move the text.
+    pub scroll: Rc<std::cell::Cell<[f32; 2]>>,
+    /// Long lines go on in rows below, only as shown: the text keeps them whole.
+    pub wrap: bool,
+    /// Room kept free on the right (a button over the field's corner), GUI units.
+    pub inset: f32,
+}
+
+/// One row of a field's text as drawn: chars `start..end` of line `line`, `at` the first one's
+/// index in the whole text, with their spans, each one's width and where the row starts (a line
+/// going on in another row is moved in), in font units.
+pub struct Row {
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+    pub at: usize,
+    pub spans: Vec<Span>,
+    pub widths: Vec<f32>,
+    pub indent: f32,
+}
+
+impl Row {
+    /// From the field's left to before the row's char `col` (counted from the row's start).
+    pub fn x(&self, col: usize) -> f32 {
+        self.indent
+            + self.widths[..col.min(self.widths.len())]
+                .iter()
+                .sum::<f32>()
+    }
+}
+
+impl Area {
+    pub fn spans(&self, s: &str) -> Vec<Span> {
+        self.format
+            .as_ref()
+            .map_or_else(|| text::plain(s), |f| f(s))
+    }
+
+    /// The text in rows: a row per line, or more where a line is wider than `room` (font units)
+    /// and the field wraps. A line breaks after its last space or punctuation that fits, else
+    /// where it stops fitting.
+    pub fn rows(&self, value: &str, font: &font::Font, room: Option<f32>) -> Vec<Row> {
+        let room = room.filter(|_| self.wrap);
+        let mut rows = Vec::new();
+        let mut at = 0;
+        for (line, l) in value.split('\n').enumerate() {
+            let spans = self.spans(l);
+            let chars: Vec<char> = l.chars().collect();
+            let widths: Vec<f32> = (0..chars.len())
+                .map(|i| text::layout(&text::slice(&spans, i, i + 1), font, None).width)
+                .collect();
+            // Rows after a line's first go in past its own indent by two more chars, as editors
+            // show them, while there is room for it.
+            let lead = chars
+                .iter()
+                .take_while(|c| matches!(c, ' ' | '\u{a0}' | '\t'))
+                .count();
+            let mut more: f32 = widths[..lead].iter().sum::<f32>() + widths.first().copied().unwrap_or(0.0) * 2.0;
+            if room.is_some_and(|room| more > room / 2.0) {
+                more = 0.0;
+            }
+            let mut start = 0;
+            loop {
+                let indent = if start == 0 { 0.0 } else { more };
+                let room = room.map(|r| r - indent);
+                let mut end = start;
+                let mut w = 0.0;
+                while end < chars.len() && (end == start || room.is_none_or(|room| w + widths[end] <= room)) {
+                    w += widths[end];
+                    end += 1;
+                }
+                if end < chars.len() {
+                    let soft = (start + 1..end)
+                        .rev()
+                        .find(|&i| matches!(chars[i - 1], ' ' | '\u{a0}' | ',' | '(' | '.'));
+                    end = soft.unwrap_or(end);
+                }
+                rows.push(Row {
+                    line,
+                    start,
+                    end,
+                    at: at + start,
+                    spans: text::slice(&spans, start, end),
+                    widths: widths[start..end].to_vec(),
+                    indent,
+                });
+                if end >= chars.len() {
+                    break;
+                }
+                start = end;
+            }
+            at += chars.len() + 1;
+        }
+        rows
+    }
+}
+
+/// The row char index `at` is drawn in: at a break, the start of the row after it.
+pub fn row_of(rows: &[Row], at: usize) -> usize {
+    (0..rows.len())
+        .find(|&i| {
+            let r = &rows[i];
+            let last_of_line = rows.get(i + 1).is_none_or(|n| n.line != r.line);
+            at < r.at + (r.end - r.start) || (at == r.at + (r.end - r.start) && last_of_line)
+        })
+        .unwrap_or(rows.len().saturating_sub(1))
+}
+
+/// Line and column (chars) of char index `at` in `s`.
+pub fn line_col(s: &str, at: usize) -> (usize, usize) {
+    let before: Vec<char> = s.chars().take(at).collect();
+    let line = before.iter().filter(|&&c| c == '\n').count();
+    let col = before.iter().rev().take_while(|&&c| c != '\n').count();
+    (line, col)
 }
 
 impl Ui {
@@ -696,7 +837,7 @@ impl Ui {
                         cross = cross.max(cc);
                     }
                     // A column that will scroll is wider by its bar, so the bar covers nothing.
-                    if style.scroll && !style.row && main + pad_h > fixed_h.unwrap_or(avail[1]) {
+                    if style.scroll && !style.bar_outside && !style.row && main + pad_h > fixed_h.unwrap_or(avail[1]) {
                         cross += Scrollbar::ROOM;
                     }
                     if style.row { [main, cross] } else { [cross, main] }
@@ -811,8 +952,13 @@ impl Ui {
             past_end = max - scrolled;
             free = free.max(0.0);
             if max > 0.0 && !style.row && cross_size > Scrollbar::ROOM * 2.0 {
-                cross_size -= Scrollbar::ROOM;
-                let track = Rect { x: inner.x + inner.w - Scrollbar::HANDLE[0], y: inner.y, w: Scrollbar::HANDLE[0], h: inner.h };
+                let r = self.nodes[id].rect;
+                let track = if style.bar_outside {
+                    Rect { x: r.x + r.w + Scrollbar::OUTSIDE_GAP, y: r.y, w: Scrollbar::HANDLE[0], h: r.h }
+                } else {
+                    cross_size -= Scrollbar::ROOM;
+                    Rect { x: inner.x + inner.w - Scrollbar::HANDLE[0], y: inner.y, w: Scrollbar::HANDLE[0], h: inner.h }
+                };
                 let offset = if style.justify == Justify::End { max - scrolled } else { scrolled };
                 self.nodes[id].scrollbar = Some(Scrollbar { track, offset, max });
             }

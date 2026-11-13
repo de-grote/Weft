@@ -196,7 +196,7 @@ pub fn register(r: &mut Registry) {
 
     // The equipment slots take what is worn there and show its silhouette while empty.
     r.menu(&INVENTORY)
-        .group("grid", Slots::grid(2, 2))
+        .group("grid", Slots::grid(2, 2).crafting())
         .group("result", Slots::single().output().large())
         .equipment()
         .player_inventory()
@@ -209,8 +209,6 @@ pub fn register(r: &mut Registry) {
                 .tooltip("storage.base.trash"),
         )
         .recipes(&crate::recipes::CRAFTING)
-        .on_change(craft_result)
-        .on_take(consume_grid)
         .screen(|ui| {
             ui.panel("panel", S::column().pad(7.0).gap(5.0), |ui| {
                 ui.row(S::row().gap(1.0), |ui| {
@@ -236,12 +234,10 @@ pub fn register(r: &mut Registry) {
         });
 
     r.menu(&CRAFTING)
-        .group("grid", Slots::grid(3, 3))
+        .group("grid", Slots::grid(3, 3).crafting())
         .group("result", Slots::single().output().large())
         .player_inventory()
         .recipes(&crate::recipes::CRAFTING)
-        .on_change(craft_result)
-        .on_take(consume_grid)
         .screen(|ui| {
             ui.panel("panel", S::column().pad(7.0).gap(4.0).stretch(), |ui| {
                 ui.title();
@@ -260,25 +256,6 @@ pub fn register(r: &mut Registry) {
 
 fn armor_applies(cause: u32) -> bool {
     !comps::damage_cause::BYPASSES_ARMOR.on_id(cause)
-}
-
-/// The `result` slot shows what the `grid` makes.
-fn craft_result(m: &MenuCtx) {
-    let grid = m.group("grid");
-    let cells: Vec<ItemStack> = (0..grid.len()).map(|i| grid.get(i)).collect();
-    m.group("result")
-        .set(0, recipe_grid_output(&crate::recipes::CRAFTING, &cells, grid.cols(), grid.rows()));
-}
-
-/// Takes one of each ingredient; the last of a stack leaves its `remainder` (a bucket).
-fn consume_grid(m: &MenuCtx) {
-    let grid = m.group("grid");
-    for i in 0..grid.len() {
-        let s = grid.get(i);
-        if !s.is_empty() {
-            grid.set(i, consume_one(s));
-        }
-    }
 }
 
 fn tire(w: &World, player: u64, amount: f32) {

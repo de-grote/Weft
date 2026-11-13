@@ -146,20 +146,27 @@ fn steps(w: &mut Vec<i32>, e: &Expr, seed: u64) -> (i32, i32) {
 /// the ground it stands on (`ScatterDef::ground`) as state ranges (count, then first and count
 /// each), none for any.
 pub fn describe_lod(c: &Content, dim: u32, seed: u64) -> Option<Vec<i32>> {
+    use crate::features::{Chance, Shape, Spread};
     let mut w = describe(c, dim, seed)?;
     let def = &c.dims[dim as usize];
     w[d::SCATTER_OFF as usize] = w.len() as i32;
-    w.push(def.scatters.len() as i32);
+    let grid: Vec<(usize, &crate::features::FeatureDef)> = def
+        .features
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.grid().is_some())
+        .collect();
+    w.push(grid.len() as i32);
     let biomes = c.biomes.len().max(1);
-    let mut buf = vec![weft_abi::ScatterBlock { offset: [0; 3].into(), state: 0, force: 0 }; 4096];
-    for sc in &def.scatters {
-        // Far away only what a mod's callback grows by a biome's density shows (trees).
-        let (density, grown) = match (&sc.chance, &sc.shape) {
-            (crate::content::Chance::Density(d), crate::content::SiteShape::Callback(owner, shape)) => (*d, Some((*owner, *shape))),
-            _ => (None, None),
+    for (fi, sc) in grid {
+        // Far away only what a mod's plan grows by a biome's density shows (trees).
+        let (spacing, density) = match (&sc.spread, &sc.shape) {
+            (Spread::Grid { spacing, chance: Chance::Density(d) }, Shape::Plan(..)) => (*spacing, *d),
+            (Spread::Grid { spacing, .. }, _) => (*spacing, None),
+            _ => continue,
         };
         let key = seed ^ sc.salt;
-        w.extend_from_slice(&[sc.cell, sc.reach, key as u32 as i32, (key >> 32) as u32 as i32, biomes as i32]);
+        w.extend_from_slice(&[spacing, sc.reach[0], key as u32 as i32, (key >> 32) as u32 as i32, biomes as i32]);
         for b in 0..biomes as u32 {
             let density = density
                 .and_then(|d| c.components.get::<f32>(crate::components::BIOME, b, d))
@@ -167,32 +174,22 @@ pub fn describe_lod(c: &Content, dim: u32, seed: u64) -> Option<Vec<i32>> {
             let threshold = (density as f64 * (1u64 << 53) as f64).ceil() as u64;
             let (mut tops, mut radii, mut states) = (Vec::new(), Vec::new(), rustc_hash::FxHashMap::<u32, u32>::default());
             for k in 0..8u64 {
-                let mut args = weft_abi::ScatterArgs {
-                    seed,
-                    dim,
-                    pos: [0, 64, 0].into(),
-                    biome: b,
-                    random: weft_noise::mix(k),
-                    out: buf.as_mut_ptr(),
-                    cap: buf.len() as u32,
-                    len: 0,
-                };
-                if threshold == 0 || !grown.is_some_and(|(owner, shape)| crate::host::invoke(owner, shape, &mut args)) {
+                if threshold == 0 {
                     continue;
                 }
-                let blocks = &buf[..(args.len as usize).min(buf.len())];
-                let Some(top) = blocks.iter().map(|b| b.offset.y).max() else { continue };
+                let blocks = crate::features::sample(c, dim, seed, fi, glam::IVec3::new(0, 64, 0), b, weft_noise::mix(k));
+                let Some(top) = blocks.iter().map(|b| b.0.y).max() else { continue };
                 tops.push(top);
                 radii.push(
                     blocks
                         .iter()
-                        .filter(|b| b.offset.y >= 1)
-                        .map(|b| b.offset.x.abs().max(b.offset.z.abs()))
+                        .filter(|b| b.0.y >= 1)
+                        .map(|b| b.0.x.abs().max(b.0.z.abs()))
                         .max()
                         .unwrap_or(0),
                 );
-                for b in blocks.iter().filter(|b| b.force == 0) {
-                    *states.entry(b.state).or_default() += 1;
+                for b in blocks.iter().filter(|b| !b.2) {
+                    *states.entry(b.1).or_default() += 1;
                 }
             }
             if tops.is_empty() {
@@ -208,6 +205,7 @@ pub fn describe_lod(c: &Content, dim: u32, seed: u64) -> Option<Vec<i32>> {
         }
         // The states its ground takes, as runs (first, count); none: any.
         let runs = sc
+            .fit
             .ground
             .map_or(Vec::new(), |m| crate::refs::runs(c.matchers.set(m), c.states.len() as u32));
         w.push(runs.len() as i32);
@@ -271,20 +269,39 @@ pub struct GpuTerrain {
     pub on: Arc<AtomicBool>,
 }
 
+/// The terrain's pipelines: label and entry point.
+const PIPELINES: [(&str, &str); 2] = [("terrain", "generate"), ("terrain lod", "lod")];
+
 impl GpuTerrain {
+    /// Its pipelines compiled ahead on another thread (`Backend::precompile`), from the title
+    /// screen on: a phone's driver needs most of a minute for them the first time.
+    pub fn precompile(gpu: &mut dyn Backend, assets: &crate::assets::Assets) {
+        if !enabled() {
+            return;
+        }
+        match Self::shader(assets) {
+            Ok(s) => {
+                for (label, entry) in PIPELINES {
+                    gpu.precompile(&ComputeDesc { label, shader: &s, entry });
+                }
+            }
+            Err(e) => log::error!("terrain shader: {e}"),
+        }
+    }
+
+    // Not a shader packs may replace: it has to make the CPU's blocks exactly.
+    fn shader(assets: &crate::assets::Assets) -> Result<weft_render::Shader, String> {
+        crate::packs::engine_shader(assets, "terrain.wgsl", &layout::prelude()).map_err(|e| e.0)
+    }
+
     pub fn new(gpu: &mut dyn Backend, assets: &crate::assets::Assets, rx: Receiver<Job>, on: Arc<AtomicBool>) -> GpuTerrain {
-        // Not a shader packs may replace: it has to make the CPU's blocks exactly.
-        let pipelines = crate::packs::engine_shader(assets, "terrain.wgsl", &layout::prelude())
-            .map_err(|e| e.0)
-            .and_then(|s| {
-                let terrain = gpu
-                    .create_compute(&ComputeDesc { label: "terrain", shader: &s, entry: "generate" })
-                    .map_err(|e| e.0)?;
-                let lod = gpu
-                    .create_compute(&ComputeDesc { label: "terrain lod", shader: &s, entry: "lod" })
-                    .map_err(|e| e.0)?;
-                Ok((terrain, lod))
+        let pipelines = Self::shader(assets).and_then(|s| {
+            let [terrain, lod] = PIPELINES.map(|(label, entry)| {
+                gpu.create_compute(&ComputeDesc { label, shader: &s, entry })
+                    .map_err(|e| e.0)
             });
+            Ok((terrain?, lod?))
+        });
         let (pipeline, lod_pipeline) = match pipelines {
             Ok((p, l)) => (Some(p), Some(l)),
             Err(e) => {
@@ -421,7 +438,7 @@ impl GpuTerrain {
                         .map(|(i, job)| (job, back.cube(i).to_vec()))
                         .collect();
                     drop(back);
-                    crate::server::dim::warm_scatters(content(), made[0].0.dim, made[0].0.seed, x, z);
+                    crate::features::warm(content(), made[0].0.dim, made[0].0.seed, x, z);
                     for (job, words) in made {
                         crate::background().spawn(move || finish(job, unpack(&words)));
                     }

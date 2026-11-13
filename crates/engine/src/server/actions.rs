@@ -418,6 +418,12 @@ impl Server {
                     self.players[pi]
                         .conn
                         .send(ToClient::Swing { used_item: false, off_hand: false });
+                } else {
+                    for slot in self.hands(c, pi) {
+                        if self.use_in_hand(c, pi, slot, None) {
+                            break;
+                        }
+                    }
                 }
             }
             ToServer::OpenInventory => {
@@ -707,6 +713,10 @@ impl Dim {
         let off_hand = c.game.entities[e.kind as usize].off == Some(slot);
         let held = self.entities.inventory_slot(entity, slot);
         let Some(def) = c.items.get(held.item as usize) else { return false };
+        if e.blocking_disabled_until > self.time && self.blocking_item(c, &held).is_some() {
+            self.events.push(DimEvent::Using { entity, using: None });
+            return false;
+        }
         let (pos, face) = target.unwrap_or((IVec3::ZERO, 0));
         let state = target.and_then(|_| self.get(pos)).unwrap_or(0);
         let mut q = abi::Query { entity, item: held.item, pos: pos.to_array().into(), state, ..abi::Query::DEFAULT };
