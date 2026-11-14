@@ -27,6 +27,8 @@ static HALF_STEP: Phase = Phase::named("half_step");
 pub static MARK: Component<u32> = Component::named("testkit:mark");
 /// Server-side stack data that is not saved either.
 pub static SECRET: Component<u32> = Component::named("testkit:secret");
+static DISPLAY_PHASE: Component<u32> = Component::named("testmod:display_phase");
+static DISPLAY_PARTS: Storage = Storage::named("testmod:display_parts");
 /// A stash every player carries, for menus on an inventory that is no block's or entity's own.
 static STASH: Storage = Storage::named("testkit:stash");
 static PIG: EntityKind = EntityKind::named("base:pig");
@@ -124,6 +126,7 @@ fn count(i: usize, n: usize) {
 }
 
 pub fn register(r: &mut Registry) {
+    crate::generation::register(r);
     // A random `.ctm` with tiles of two colors, on what isn't a cube.
     static VARIED_PLANT: Block = Block::named("varied_plant");
     static VARIED_BOX: Block = Block::named("varied_box");
@@ -678,6 +681,46 @@ const OPS: &[(&str, &str, Run)] = &[
             .set(int(cmd, "index")?, ItemStack::new(id(cmd, "item")?, int(cmd, "count").unwrap_or(1)));
         Ok(String::new())
     }),
+    ("display_data", "@owner <index:int> <phase:int> <counter:int> <secret:int>", |w, cmd, _, _| {
+        let entity = owner(w, cmd)?;
+        let (inv, index) = (w.inventory(entity), int(cmd, "index")?);
+        let secret = int(cmd, "secret")?;
+        let phase = int(cmd, "phase")?;
+        let inner = Item::named("base:stick")
+            .stack(1)
+            .with(&SECRET, secret)
+            .with(&MARK, int(cmd, "counter")?);
+        let mut stack = inv
+            .get(index)
+            .with(&DISPLAY_PHASE, phase)
+            .with(&MARK, int(cmd, "counter")?)
+            .with(&SECRET, secret)
+            .with_stacks(&DISPLAY_PARTS, &[inner]);
+        if phase == 2 {
+            stack = stack
+                .with(&MODEL, Text::new("testmod:katana"))
+                .with(&WORN_MODEL, Text::new("testmod:fox_tail@body"))
+                .with(&WORN_TEXTURE, Text::new("base:armor/diamond_1"));
+        }
+        inv.set(index, stack);
+        Ok(entity.to_string())
+    }),
+    ("stack_light", "@owner <index:int> <r:int> <g:int> <b:int>", |w, cmd, _, _| {
+        let entity = owner(w, cmd)?;
+        let (inv, index) = (w.inventory(entity), int(cmd, "index")?);
+        inv.set(
+            index,
+            inv.get(index)
+                .with(&LIGHT, [int(cmd, "r")?, int(cmd, "g")?, int(cmd, "b")?]),
+        );
+        Ok(entity.to_string())
+    }),
+    ("drop_stack", "@owner <index:int> <pos:pos>", |w, cmd, _, _| {
+        let stack = w.inventory(owner(w, cmd)?).get(int(cmd, "index")?);
+        let p = pos(cmd, "pos")?;
+        Ok(w.spawn_item([p[0] as f64 + 0.5, p[1] as f64, p[2] as f64 + 0.5], stack)
+            .to_string())
+    }),
     ("wear", "@owner <index:int> <amount:int>", |w, cmd, _, _| {
         let (inv, i) = (w.inventory(owner(w, cmd)?), int(cmd, "index")?);
         inv.set(i, inv.get(i).with_wear(int(cmd, "amount")?));
@@ -742,8 +785,13 @@ const OPS: &[(&str, &str, Run)] = &[
         let e = w.entity(owner(w, cmd)?).ok_or("no such entity")?;
         Ok(format!("{} {:.2} {:.2} {:.2} {}", name_of(ek::ENTITY, e.kind), e.pos.x, e.pos.y, e.pos.z, e.health))
     }),
-    ("size", "@entity", |w, cmd, _, _| {
-        let s = w.entity(owner(w, cmd)?).ok_or("no such entity")?.size;
+    ("size", "@entity [width:float] [height:float]", |w, cmd, _, _| {
+        let id = owner(w, cmd)?;
+        let s = w.entity(id).ok_or("no such entity")?.size;
+        if let (Some(width), Some(height)) = (cmd.float("width"), cmd.float("height")) {
+            w.set_size(id, Some(abi::EntitySize { width: width as f32, height: height as f32, eye: s.eye * height as f32 / s.height }));
+        }
+        let s = w.entity(id).ok_or("no such entity")?.size;
         Ok(format!("{:.3} {:.3} {:.3}", s.width, s.height, s.eye))
     }),
     ("near", "<pos:pos> <r:float>", |w, cmd, player, _| {

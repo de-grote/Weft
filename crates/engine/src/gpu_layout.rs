@@ -530,7 +530,7 @@ gpu_struct! {
         pub fog_color: [f32; 4],
         /// x fog start, y fog end, z daylight 0..1, w seconds (shader effects).
         pub params: [f32; 4],
-        /// x the dimension's ambient light 0..1, y the Brightness setting 0 (moody) .. 1
+        /// x resolved linear ambient light, y the Brightness setting 0 (moody) .. 1
         /// (bright), z game ticks with the fraction of the current one (animated textures;
         /// wraps every 2^20), w how much the player sees as if all were lit (night vision).
         pub light: [f32; 4],
@@ -538,6 +538,8 @@ gpu_struct! {
         /// dimension without sky light). For shader packs' shadows; follows the day, whatever
         /// bodies mods put in the sky.
         pub sun: [f32; 4],
+        /// x solar sky-light multiplier; yz cloud fog start/end in blocks from the camera.
+        pub environment: [f32; 4],
     }
 }
 

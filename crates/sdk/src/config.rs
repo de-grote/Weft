@@ -96,6 +96,8 @@ pub mod settings {
     /// Which chat lines show: 0 all, 1 no players' messages, 2 none but replies to one's commands.
     pub static CHAT_VISIBILITY: Config<u32> = Config::named("core:chat_visibility");
     pub static VIEW_DISTANCE: Config<i32> = Config::named("core:view_distance");
+    /// Native cloud fog distance in blocks; environment sources can override it. Zero hides clouds.
+    pub static CLOUD_DISTANCE: Config<i32> = Config::named("core:cloud_distance");
     pub static VSYNC: Config<bool> = Config::named("core:vsync");
     pub static FOV: Config<f32> = Config::named("core:fov");
     pub static SENSITIVITY: Config<f32> = Config::named("core:sensitivity");

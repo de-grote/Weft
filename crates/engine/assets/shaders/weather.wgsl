@@ -39,7 +39,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
     if color.a < 0.01 {
         discard;
     }
-    let light = lightmap(unpack_light(in.data.y), scene.params.z, scene.light.x, scene.light.y, scene.light.w);
+    let light = lightmap(unpack_light(in.data.y), scene.params.z, scene.light.x, scene.light.y, scene.light.w, scene.environment.x);
     let fog = fog_amount(in.dist, scene.params.x, scene.params.y);
     return vec4(mix(color.rgb * pow(light, vec3(2.2)), scene.fog_color.rgb, fog), color.a * in.alpha);
 }

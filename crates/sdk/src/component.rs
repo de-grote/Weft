@@ -68,7 +68,7 @@ macro_rules! raw_data {
 unsafe impl Value for abi::Worn {}
 unsafe impl Value for abi::Energy {}
 
-/// Text owned by the engine (`str` schema). Set it with the builders' `set_text`.
+/// A stable text view (`str` schema). Values serialize as UTF-8, never as pointers.
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct Text(Str);
@@ -84,13 +84,40 @@ impl Text {
     }
 }
 
-unsafe impl Value for Text {}
-raw_data!(Text, "str");
+impl Data for Text {
+    const FIXED: bool = false;
+    fn schema() -> String {
+        "str".into()
+    }
+    fn write(&self, out: &mut Vec<u8>) {
+        self.as_str().to_string().write(out);
+    }
+    fn read(r: &mut &[u8]) -> Option<Self> {
+        Some(String::read(r)?.into())
+    }
+}
+
+impl From<String> for Text {
+    fn from(text: String) -> Self {
+        static TEXTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<&'static str>>> =
+            std::sync::LazyLock::new(Default::default);
+        let mut texts = TEXTS.lock().unwrap();
+        let text = match texts.get(text.as_str()) {
+            Some(&text) => text,
+            None => {
+                let text: &'static str = Box::leak(text.into_boxed_str());
+                texts.insert(text);
+                text
+            }
+        };
+        Text(Str::new(text))
+    }
+}
 
 /// Values written as text and read as something else: `Text` stays text, `BlockRef`,
 /// `BlockList` and `ItemRef` name things that the engine resolves when the game loads (a typo is
 /// a load error).
-pub trait TextValue: Value {}
+pub trait TextValue: Data {}
 impl TextValue for Text {}
 impl TextValue for BlockRef {}
 impl TextValue for ItemRef {}
@@ -376,6 +403,10 @@ impl Lookup {
         let stride = p.stride as usize;
         let at = unsafe { p.data.add(entry as usize * stride) };
         let mut cell = unsafe { std::slice::from_raw_parts(at as *const u8, stride) };
+        // Frozen text already owns a stable view; no decoding or interning is needed.
+        if std::any::TypeId::of::<T>() == std::any::TypeId::of::<Text>() {
+            return (stride == size_of::<Text>()).then(|| unsafe { std::ptr::read_unaligned(at as *const T) });
+        }
         if T::FIXED {
             return (stride == size_of::<T>())
                 .then(|| T::read(&mut cell))
@@ -650,7 +681,7 @@ pub fn stack_with_name(stack: ItemStack, name: Option<&str>) -> ItemStack {
 }
 
 static NAME: Tag = Tag::named(abi::comp::NAME);
-static LAYERS: Tag = Tag::named(abi::comp::LAYERS);
+static LAYERS: Component<Text> = Component::named(abi::comp::LAYERS);
 
 pub trait StackData: Sized {
     /// This stack with its own value of `c` set.
@@ -797,12 +828,7 @@ impl StackData for ItemStack {
     }
     fn with_layers(self, layers: Layers) -> Self {
         let text = layers.text();
-        let data = if text.is_empty() {
-            unsafe { (host().stack_with)(self.data, LAYERS.id(), abi::Slice::EMPTY, 1) }
-        } else {
-            unsafe { (host().stack_with)(self.data, LAYERS.id(), abi::Slice::new(text.as_bytes()), 0) }
-        };
-        ItemStack { data, ..self }
+        if text.is_empty() { self.without(&LAYERS) } else { self.with(&LAYERS, Text::from(text)) }
     }
     fn with_modifiers(self, list: &[crate::Modifier]) -> Self {
         let raw: Vec<abi::Modifier> = list.iter().map(|m| m.0.clone()).collect();
@@ -903,4 +929,20 @@ pub fn max_stack(item: u32) -> u32 {
 pub fn item_block(item: u32) -> Option<u32> {
     let s = unsafe { (host().item_block)(item) };
     (s != 0).then_some(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_views_serialize_like_owned_text() {
+        for s in ["", "base:armor/iron_1", "mod:model@body"] {
+            let bytes = abi::data::bytes_of(&Text::new(s));
+            assert_eq!(bytes, abi::data::bytes_of(&s.to_string()));
+            let view: Text = abi::data::from_bytes(&bytes).unwrap();
+            assert_eq!(view.as_str(), s);
+            assert_eq!(abi::data::bytes_of(&view), bytes);
+        }
+    }
 }

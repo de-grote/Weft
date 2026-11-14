@@ -363,6 +363,30 @@ pub async fn clouds(t: T) -> R {
     t.secs(1.0).await?;
     let (x0, y0, x1, y1) = (0.0, 0.47, 1.0, 0.53);
     let far = t.shot("far").await?.share(x0, y0, x1, y1, white);
+    let world_fog = t.c().environment_values().fog_end;
+    settings::CLOUD_DISTANCE.set(64);
+    t.frames(3).await?;
+    let limited = t
+        .shot("distance_limited")
+        .await?
+        .share(x0, y0, x1, y1, white);
+    t.probe("cloud distance removes distant clouds", limited, limited < far - 0.02);
+    t.check_eq(t.c().environment_values().fog_end, world_fog, "cloud distance leaves world fog independent");
+    t.c().environment(
+        &Environment::new("test_cloud_range")
+            .priority(100)
+            .cloud_fog(3072.0, 6144.0),
+    );
+    t.frames(3).await?;
+    let overridden = t
+        .shot("distance_override")
+        .await?
+        .share(x0, y0, x1, y1, white);
+    t.probe("environment source overrides the cloud distance setting", overridden, overridden > limited + 0.02);
+    t.c().clear_environment("test_cloud_range");
+    t.frames(3).await?;
+    t.check_eq(t.c().environment_values().cloud_fog_end, 64.0, "removing the source restores the slider value");
+    settings::CLOUD_DISTANCE.set(6144);
     // Lifted out of reach at that angle.
     LIFT.set(512);
     t.secs(0.3).await?;
@@ -375,6 +399,14 @@ pub async fn clouds(t: T) -> R {
     t.c().set_look(0.0, -60.0);
     t.secs(1.0).await?;
     let above = t.shot("above").await?.share(0.0, 0.3, 1.0, 1.0, white);
+    settings::CLOUD_DISTANCE.set(64);
+    t.frames(3).await?;
+    let culled = t
+        .shot("layer_culled")
+        .await?
+        .share(0.0, 0.3, 1.0, 1.0, white);
+    t.probe("a layer beyond the cloud fog sphere is culled", culled, culled < above - 0.02);
+    settings::CLOUD_DISTANCE.set(6144);
     LIFT.set(512);
     t.secs(0.3).await?;
     let lifted = t
@@ -393,10 +425,46 @@ pub async fn clouds(t: T) -> R {
     t.secs(1.0).await?;
     let wall = t.shot("wall").await?.share(0.2, 0.3, 0.8, 0.7, white);
     t.check(wall < 0.005, format!("clouds through a wall: {wall:.3}"));
-    // Its slider is among the others.
-    t.c().menu_open(&screens::SETTINGS);
-    t.screen("core:settings").await?;
+    // Weather supplies cloud appearance to the same environment as external sources.
+    t.c().teleport([s.pos.x + 80.0, 150.0, s.pos.z]);
+    t.c().set_look(0.0, 75.0);
+    t.secs(0.4).await?;
+    let sky_lum = |shot: &crate::runner::Shot| crate::runner::lum(shot.avg(0.1, 0.05, 0.9, 0.8));
+    let clear = sky_lum(&t.shot("clear_clouds").await?);
+    t.cmd("/weather rain").await?;
+    t.until("rain cloud tint", Duration::from_secs(8), |t| t.c().environment_values().cloud_gray > 0.9)
+        .await?;
+    let rain = sky_lum(&t.shot("rain_clouds").await?);
+    t.cmd("/weather thunder").await?;
+    t.until("thunder cloud tint", Duration::from_secs(8), |t| t.c().environment_values().cloud_dark > 0.9)
+        .await?;
+    let thunder = sky_lum(&t.shot("thunder_clouds").await?);
+    t.probe("rain grays clouds", clear - rain, clear > rain + 15.0);
+    t.probe("thunder darkens clouds", rain - thunder, rain > thunder + 15.0);
+    t.c().environment(
+        &Environment::new("test_clouds")
+            .priority(100)
+            .cloud_color(0xE03020)
+            .fade(0.3, 0.3),
+    );
+    t.secs(0.4).await?;
+    let red = t.shot("override_clouds").await?;
+    let red_clouds = red.share(0.05, 0.05, 0.95, 0.8, probe::red);
+    t.probe("cloud tint can replace thunder independently", red_clouds, red_clouds > 0.05);
+    let values = t.c().environment_values();
+    t.check(
+        values.cloud_gray == 0.0 && values.cloud_dark == 0.0 && values.fog_gray > 0.1,
+        "cloud override leaves other weather contributions intact",
+    );
+    t.c().clear_environment("test_clouds");
+    t.secs(0.4).await?;
+    let restored = sky_lum(&t.shot("restored_clouds").await?);
+    t.probe("removing the source restores weather tint", (restored - thunder).abs(), (restored - thunder).abs() < 10.0);
+    // Both cloud sliders use the normal video settings page.
+    t.c().menu_open(&Menu::named("core:video"));
+    t.screen("core:video").await?;
     t.frames(3).await?;
+    t.laid_out(&["text:Clouds elevation", "text:Cloud render distance"]);
     t.shot("settings").await?;
     t.c().menu_close();
     t.no_screen().await?;
@@ -559,4 +627,182 @@ pub async fn ctm_any_model(t: T) -> R {
     t.c().reload_assets();
     t.frames(2).await?;
     out
+}
+
+/// Sources share independent parameters, stable priority and lifetime rules across local code,
+/// synchronized entity data and content presets. Camera and body sample different positions.
+pub async fn environment_sources(t: T) -> R {
+    use weft_sdk::environment::{blend, observer};
+    t.flat().await?;
+    t.op("mode spectator").await?;
+    t.cmd("/weather clear").await?;
+    t.c().set_look(0.0, -25.0);
+    t.frames(3).await?;
+    let initial = t.c().environment_values();
+    let mut base = Environment::new("test_base")
+        .priority(10)
+        .fog(0x203040, 2.0, 40.0)
+        .acoustics(800.0, 0.2, 0.8);
+    base.values.sunlight = 0.5;
+    t.check(t.c().environment(&base), "local source accepted");
+    let mut addition = Environment::new("test_add").priority(20).blend(blend::ADD);
+    addition.values.fog_end = 10.0;
+    t.c().environment(&addition);
+    let mut mul = Environment::new("test_mul")
+        .priority(30)
+        .blend(blend::MULTIPLY);
+    mul.values.sunlight = 0.5;
+    t.c().environment(&mul);
+    t.frames(3).await?;
+    let values = t.c().environment_values();
+    t.check_eq(
+        (values.fog_start, values.fog_end, values.sunlight, values.lowpass),
+        (2.0, 50.0, 0.25, 800.0),
+        "ordered operations leave unrelated parameters alone",
+    );
+    // Updating a named source replaces it, even when insertion order differs from priority.
+    addition.values.fog_end = 20.0;
+    t.c().environment(&addition);
+    t.frames(3).await?;
+    t.check_eq(t.c().environment_values().fog_end, 60.0, "one contribution per named source");
+    for name in ["test_base", "test_add", "test_mul"] {
+        t.c().clear_environment(name);
+    }
+    t.frames(3).await?;
+    t.check_eq(t.c().environment_values().lowpass, initial.lowpass, "clearing restores the underlying environment");
+
+    let fade = Environment::new("test_fade")
+        .priority(50)
+        .fade(1.0, 1.0)
+        .sunlight(0.0);
+    t.c().environment(&fade);
+    t.secs(0.25).await?;
+    let partial = t.c().environment_values().sunlight;
+    t.check(partial > 0.1 && partial < 0.95, format!("fade begins smoothly: {partial}"));
+    // A frame hook may refresh the source every frame without restarting its transition.
+    for _ in 0..80 {
+        t.c().environment(&fade);
+        t.frames(1).await?;
+    }
+    t.secs(1.1).await?;
+    t.check_eq(t.c().environment_values().sunlight, 0.0, "a refreshed source reaches its target");
+    t.c().clear_environment("test_fade");
+    t.secs(0.25).await?;
+    let partial = t.c().environment_values().sunlight;
+    t.check(partial > 0.05 && partial < 0.9, format!("removed source fades out: {partial}"));
+    t.secs(1.0).await?;
+
+    let f = t.feet();
+    let eye = t.state().camera_pos;
+    let center = [eye.x, eye.y, eye.z];
+    let cell = [eye.x.floor() as i32, eye.y.floor() as i32, eye.z.floor() as i32];
+    t.set(cell, "stone").await?;
+    let camera = Environment::new("test_point")
+        .priority(50)
+        .around(center, 1.0, 2.0)
+        .when("block(base:stone)")
+        .acoustics(600.0, 0.0, 1.0);
+    t.c().environment(&camera);
+    t.frames(3).await?;
+    t.check_eq(t.c().environment_values().lowpass, 600.0, "condition reads the sampled block");
+    t.set(cell, "air").await?;
+    t.frames(3).await?;
+    t.check_eq(t.c().environment_values().lowpass, initial.lowpass, "condition failure removes its contribution");
+    let camera = camera.when("");
+    t.c().environment(&camera);
+    t.op("camera testmod:orbit").await?;
+    t.secs(0.8).await?;
+    t.check_eq(t.c().environment_values().lowpass, initial.lowpass, "detached camera leaves the zone");
+    let body = camera.clone().observer(observer::BODY);
+    t.c().environment(&body);
+    t.frames(3).await?;
+    t.check_eq(t.c().environment_values().lowpass, 600.0, "body source stays at the player's eyes");
+    t.c().clear_environment("test_point");
+    t.op("camera core:first_person").await?;
+    t.set(cell, "air").await?;
+    t.secs(0.8).await?;
+
+    let orb = t
+        .op(&format!("spawn testmod:orb {} {} {}", f[0], f[1], f[2] - 2))
+        .await?;
+    t.until("entity-kind zone reaches observer", Duration::from_secs(5), |t| (t.c().environment_values().lowpass - 4000.0).abs() < 1.0)
+        .await?;
+    t.op(&format!("remove {orb}")).await?;
+    t.until("despawn removes entity-kind source", Duration::from_secs(5), |t| t.c().environment_values().lowpass == initial.lowpass)
+        .await?;
+
+    let plain = t.shot("sunlight").await?;
+    let screen = Environment::new("test_screen")
+        .priority(5)
+        .overlay("base:block/stone", 0.4);
+    t.c().environment(&screen);
+    t.frames(3).await?;
+    let textured = t.grab().await?;
+    t.check(T::differ(&plain.px, &textured) > 0.03, "overlay contributes through a source, resolving a tiled block texture");
+    t.c().environment(
+        &Environment::new("test_shader")
+            .priority(6)
+            .post(&Shader::named("testmod:dream"), 1.0),
+    );
+    t.frames(3).await?;
+    let filtered = t.grab().await?;
+    t.check(T::differ(&textured, &filtered) > 0.01, "post shader contributes independently of the overlay");
+    t.c().environment(
+        &Environment::new("test_clear_screen")
+            .priority(100)
+            .replace_post()
+            .replace_overlays(),
+    );
+    t.frames(3).await?;
+    let restored = t.grab().await?;
+    t.check(T::differ(&plain.px, &restored) < 0.01, "higher empty replacement suppresses all preceding screen effects");
+    t.c().clear_environment("test_clear_screen");
+    t.c().clear_environment("test_screen");
+    t.c().clear_environment("test_shader");
+    t.frames(3).await?;
+    t.cmd("/eclipse on").await?;
+    t.until("server source reaches client", Duration::from_secs(5), |t| t.c().environment_values().sunlight == 0.0)
+        .await?;
+    let dark = t.shot("eclipse").await?;
+    t.check_eq(t.c().environment_values().fog_end, 48.0, "server source controls fog independently");
+    t.check_eq(t.c().environment_values().cloud_fog_end, 48.0, "server source controls cloud fog independently");
+    t.c().environment(
+        &Environment::new("test_cloud_range")
+            .priority(200)
+            .cloud_fog(initial.cloud_fog_start, initial.cloud_fog_end),
+    );
+    t.frames(3).await?;
+    let cloud_lighting = t.shot("eclipse_cloud_light").await?;
+    let daylight = crate::runner::lum(plain.avg(0.2, 0.6, 0.8, 0.85));
+    let eclipse = crate::runner::lum(dark.avg(0.2, 0.6, 0.8, 0.85));
+    let white_cloud = |c: probe::C| c[0] > 150 && c[0].abs_diff(c[1]) < 15 && c[0].abs_diff(c[2]) < 15;
+    let bright_clouds = plain.share(0.05, 0.02, 0.95, 0.2, white_cloud);
+    let eclipsed_clouds = cloud_lighting.share(0.05, 0.02, 0.95, 0.2, white_cloud);
+    t.probe("daylight illuminates clouds", bright_clouds, bright_clouds > 0.01);
+    t.probe("clouds lose sunlight together with the world", eclipsed_clouds, eclipsed_clouds < 0.005);
+    t.c().clear_environment("test_cloud_range");
+    t.frames(3).await?;
+    t.probe("solar illumination can be extinguished at noon", daylight - eclipse, daylight - eclipse > 30.0);
+    t.set(add(f, [0, 0, -3]), "base:torch").await?;
+    t.secs(0.5).await?;
+    let lamp = t.shot("eclipse_lamp").await?;
+    t.check(T::differ(&dark.px, &lamp.px) > 0.01, "block lighting remains visible without sunlight");
+    t.set(add(f, [0, 0, -3]), "air").await?;
+    t.secs(0.5).await?;
+    let mut unlit = Environment::new("test_unlit").priority(200).sunlight(0.0);
+    unlit.values.ambient = 0.0;
+    t.c().environment(&unlit);
+    t.frames(3).await?;
+    t.check_eq(t.c().environment_values().ambient, 0.0, "ambient minimum is externally replaceable");
+    let black = t.shot("no_ambient").await?;
+    let dark_floor = crate::runner::lum(black.avg(0.4, 0.65, 0.6, 0.8));
+    t.probe("no hidden minimum remains in the renderer", dark_floor, dark_floor < 0.5);
+    t.check_eq(t.c().environment_values().lowpass, initial.lowpass, "lighting override leaves acoustics alone");
+    t.c().clear_environment("test_unlit");
+    t.cmd("/eclipse off").await?;
+    t.until("server removal restores underlying light", Duration::from_secs(5), |t| t.c().environment_values().sunlight == 1.0)
+        .await?;
+    t.check_eq(t.c().environment_values().fog_end, initial.fog_end, "server removal restores fog");
+    t.check_eq(t.c().environment_values().cloud_fog_end, initial.cloud_fog_end, "server removal restores cloud distance");
+    Ok(())
 }

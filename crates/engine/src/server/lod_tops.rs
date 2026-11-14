@@ -83,20 +83,14 @@ pub fn shows(c: &Content, s: u32) -> bool {
     s != 0 && (st.liquid.is_some() || (st.solid() && st.flags & bf::OPAQUE != 0))
 }
 
-/// A cube or a model box the distance can draw. A cross, a wire, an empty model, or a block a
-/// placement replaces is not.
+/// Solid-volume geometry that distant terrain can represent as a column.
 fn drawn(c: &Content, s: u32) -> bool {
     let Some(st) = c.states.get(s as usize) else { return false };
-    if st.liquid.is_some() {
-        return true;
-    }
-    s != 0
-        && st.flags & bf::REPLACEABLE == 0
-        && match st.model {
-            BlockModel::Cube => true,
-            BlockModel::Boxes => !st.boxes.is_empty(),
-            _ => false,
-        }
+    st.liquid.is_some()
+        || (s != 0
+            && st.flags & bf::REPLACEABLE == 0
+            && st.model == BlockModel::Boxes
+            && st.boxes.iter().any(|b| (0..3).all(|i| b.max[i] > b.min[i])))
 }
 
 /// Each channel the brighter of the two.

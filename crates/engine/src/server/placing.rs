@@ -60,11 +60,13 @@ impl Dim {
         transform: Transform,
         palette: Option<u32>,
     ) -> Option<u64> {
-        let def = &c.dims[self.id as usize];
         let variant = t.variant(c, transform, palette);
         // Not a feature of the dimension: any of its own will do to hold it.
         let mut start = Start::loose(at, transform);
-        crate::features::add_piece(def, self.seed, &mut start, at, variant, 0, false);
+        let view =
+            crate::generation::ReadCtx { snapshot: crate::generation::Snapshot::new(c, self.id, self.seed, 0), local: None, plan: None };
+        let piece = crate::features::make_piece(&view, at, variant, 0, false);
+        crate::features::add_piece(&mut start, piece);
         self.place_start(c, &start)
     }
 

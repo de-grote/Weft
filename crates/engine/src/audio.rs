@@ -28,14 +28,19 @@ pub struct Play {
     pub pitch: f32,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub struct Acoustics {
+    pub cutoff: f32,
+    pub reverb: f32,
+    pub volume: f32,
+}
+
 /// Where the listener is, for positions and the environment.
 pub struct Listener {
     pub pos: DVec3,
     pub yaw: f32,
     pub pitch: f32,
-    pub underwater: bool,
-    /// No sky light at the head: caves echo.
-    pub enclosed: bool,
+    pub acoustics: Acoustics,
     pub dim: u32,
     /// The conditions music asks for that hold now, by id.
     pub holds: Vec<u32>,
@@ -54,7 +59,7 @@ pub struct Audio {
     globs: FxHashMap<String, Vec<String>>,
     music: Option<StreamingSoundHandle<kira::sound::FromFileError>>,
     next_music: Instant,
-    state: (bool, bool),
+    state: Acoustics,
     /// Per category, then the master volume.
     volumes: Vec<f64>,
     rng: weft_noise::Rng,
@@ -120,7 +125,7 @@ impl Audio {
                 globs: FxHashMap::default(),
                 music: None,
                 next_music: Instant::now() + Duration::from_secs(20),
-                state: (false, false),
+                state: Acoustics { cutoff: 20_000.0, reverb: 0.0, volume: 1.0 },
                 volumes: Vec::new(),
                 rng: weft_noise::Rng(0x2545_F491_4F6C_DD1D),
                 played: 0,
@@ -208,15 +213,15 @@ impl Audio {
         self.listener
             .set_position(l.pos.as_vec3(), Tween::default());
         self.listener.set_orientation(orientation, Tween::default());
-        if (l.underwater, l.enclosed) != self.state {
-            self.state = (l.underwater, l.enclosed);
-            self.lowpass
-                .set_cutoff(if l.underwater { 900.0 } else { 20_000.0 }, QUICK);
-            if let Err(e) =
-                self.world
-                    .set_send(&self.reverb, if l.enclosed && !l.underwater { Decibels(-9.0) } else { Decibels::SILENCE }, QUICK)
+        if l.acoustics != self.state {
+            self.state = l.acoustics;
+            self.lowpass.set_cutoff(l.acoustics.cutoff as f64, QUICK);
+            self.world.set_volume(db(l.acoustics.volume as f64), QUICK);
+            if let Err(e) = self
+                .world
+                .set_send(&self.reverb, db(l.acoustics.reverb as f64), QUICK)
             {
-                log::debug!("cave reverb: {e:?}");
+                log::debug!("environment reverb: {e:?}");
             }
         }
         self.music(assets, l);

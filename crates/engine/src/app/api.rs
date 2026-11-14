@@ -442,7 +442,6 @@ pub unsafe extern "C" fn client_command(c: *mut abi::ClientCtx, op: u32, text: S
                 }
             }
             op_::RELOAD_ASSETS => r.reload_requested = true,
-            op_::POST_EFFECT => return r.post.set(&text, num as f32) as u64,
             op_::BENCH => r.bench = Some(crate::bench::Bench::new(&text, num.max(0.1) as f32)),
             op_::RESPAWN => r.handle(vec![Request::Respawn]),
             op_::RUN_COMMAND => return r.run_command(&text) as u64,
@@ -751,7 +750,11 @@ unsafe fn with_entity<T>(
         if entity == g.client.player_id {
             return Some(f(&g.client, &g.client.me));
         }
-        g.client.entities.get(&entity).map(|e| f(&g.client, e))
+        g.client
+            .entities
+            .get(&entity)
+            .or_else(|| g.client.showing_blocks.get(&entity))
+            .map(|e| f(&g.client, e))
     }
 }
 
@@ -776,8 +779,54 @@ pub unsafe extern "C" fn client_clip_length(c: *mut abi::ClientCtx, entity: u64,
     }
 }
 
-pub unsafe extern "C" fn client_entity_held(c: *mut abi::ClientCtx, entity: u64, hand: u32) -> u32 {
-    unsafe { with_entity(c, entity, |_, e| if hand == abi::hand::OFF { e.off_held } else { e.held }).unwrap_or(0) }
+pub unsafe extern "C" fn client_environment_set(c: *mut abi::ClientCtx, name: Str, data: Slice<u8>) -> u32 {
+    unsafe {
+        let Some(r) = run(c) else { return 0 };
+        let name = name.as_str();
+        if data.len == 0 {
+            if let Some(g) = r.game.as_mut() {
+                g.client.environment.local.remove(name);
+                return 1;
+            }
+            return 0;
+        }
+        let Some(mut layer) = abi::data::from_bytes::<abi::environment::EnvironmentLayer>(data.as_slice()) else { return 0 };
+        if layer.post.iter().any(|effect| !r.post.has(&effect.name)) {
+            return 0;
+        }
+        let Some(g) = r.game.as_mut() else { return 0 };
+        layer.name = name.to_string();
+        g.client.environment.local.insert(name.to_string(), layer);
+        1
+    }
+}
+
+pub unsafe extern "C" fn client_environment_values(c: *mut abi::ClientCtx, out: *mut abi::environment::EnvironmentValues) {
+    unsafe {
+        if let Some(client) = client(c) {
+            *out = client.environment.values;
+        }
+    }
+}
+
+pub unsafe extern "C" fn client_displayed(c: *mut abi::ClientCtx, entity: u64, source: u32, out: *mut ItemStack, max: usize) -> usize {
+    unsafe {
+        with_entity(c, entity, |_, e| {
+            let hands = [e.held, e.off_held];
+            let stacks = match source {
+                abi::display_source::HANDS => &hands[..],
+                abi::display_source::EQUIPMENT => &e.worn,
+                abi::display_source::SHOWN => &e.shown,
+                abi::display_source::GROUND => std::slice::from_ref(&e.item),
+                _ => &[],
+            };
+            for (i, stack) in stacks.iter().take(max).enumerate() {
+                *out.add(i) = *stack;
+            }
+            stacks.len()
+        })
+        .unwrap_or(0)
+    }
 }
 
 pub unsafe extern "C" fn client_bone_position(c: *mut abi::ClientCtx, entity: u64, bone: Str, out: *mut abi::Vec3) -> u32 {

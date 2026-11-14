@@ -816,14 +816,24 @@ fn recipe_entry(ui: &mut Ui, cx: &BuildCx, kind: &str, index: usize) {
                     Kind::Progress { class: "arrow".into(), bind: Box::new(|_: &Ctx| 0.0), value: 0.0, dir: weft_abi::ui_dir::RIGHT },
                     Style::default().size(w, h),
                 );
-                if r.shaped.is_none() && grid_size(kind, r, false).0 * grid_size(kind, r, false).1 > 1 {
-                    let marker = ui
-                        .add(Kind::Image { texture: "core:gui/icon_shapeless".into(), color: 0xFFFFFFFF }, Style::default().size(9.0, 9.0));
-                    ui.nodes[marker].tooltip = Some(cx.t("recipes.shapeless", &[]));
-                }
-                if r.time > 0 && def.is_none_or(|d| d.info.is_none()) {
-                    label(ui, cx, "recipes.time", &[text::Arg::Float(r.time as f64 / crate::world::TPS as f64, 1)], "dim");
-                }
+                ui.container(
+                    Style::default()
+                        .gap(1.0)
+                        .center()
+                        .at_from([0.5, 1.0], 0.0, 1.0, [0.5, 0.0]),
+                    |ui| {
+                        if r.shaped.is_none() && grid_size(kind, r, false).0 * grid_size(kind, r, false).1 > 1 {
+                            let marker = ui.add(
+                                Kind::Image { texture: "core:gui/icon_shapeless".into(), color: 0x808080FF },
+                                Style::default().size(9.0, 9.0),
+                            );
+                            ui.nodes[marker].tooltip = Some(cx.t("recipes.shapeless", &[]));
+                        }
+                        if r.time > 0 && def.is_none_or(|d| d.info.is_none()) {
+                            label(ui, cx, "recipes.time", &[text::Arg::Float(r.time as f64 / crate::world::TPS as f64, 1)], "dim");
+                        }
+                    },
+                );
             });
             recipe_grid(ui, cx.lang, cx.input, kind, r, true);
         });

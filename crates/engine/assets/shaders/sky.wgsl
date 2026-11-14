@@ -81,9 +81,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut 
 // triangle draws them however far they reach. From outside the layer a ray crosses few cells even
 // at the horizon, since it soon leaves through the other plane.
 // uv: the camera's place in its cell (x, z), the cell in the picture (x, z). extra: cell size,
-// thickness, height over the camera, how far they reach.
-const CLOUD_STEPS: u32 = 128u;
-
+// thickness and height over the camera. Scene environment.yz supplies cloud fog distances.
 struct CloudOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) at: vec3<f32>,
@@ -116,10 +114,10 @@ fn fs_clouds(in: CloudOut) -> CloudPixel {
     let dir = normalize(mat(sky[0]) * in.at);
     let size = s.extra.x;
     let low = s.extra.z;
-    let reach = s.extra.w;
+    let reach = scene.environment.z;
     let high = low + s.extra.y;
     var near = 0.0;
-    var far = reach / max(length(dir.xz), 0.0001);
+    var far = reach;
     if abs(dir.y) > 0.00001 {
         near = max(near, min(low / dir.y, high / dir.y));
         far = min(far, max(low / dir.y, high / dir.y));
@@ -141,7 +139,8 @@ fn fs_clouds(in: CloudOut) -> CloudPixel {
     // From inside a cloud, it isn't what is seen.
     var within = near == 0.0 && cloud_at(s, cell, dims);
     var hit = false;
-    for (var i = 0u; i < CLOUD_STEPS; i++) {
+    let steps = u32(ceil((far - near) / size * (abs(dir.x) + abs(dir.z)))) + 2u;
+    for (var i = 0u; i < steps; i++) {
         let filled = cloud_at(s, cell, dims);
         if filled && !within {
             hit = true;
@@ -172,9 +171,10 @@ fn fs_clouds(in: CloudOut) -> CloudPixel {
         shade = select(1.0, 0.7, dir.y > 0.0);
     }
     let rel = dir * t;
-    let dist = length(rel.xz) / reach;
-    let color = mix(s.color.rgb * shade, scene.fog_color.rgb, smoothstep(0.5, 1.0, dist));
-    let alpha = s.color.a * (1.0 - smoothstep(0.8, 1.0, dist));
+    let fog = fog_amount(t, scene.environment.y, reach);
+    let color = mix(s.color.rgb * shade, scene.fog_color.rgb, smoothstep(0.0, 1.0, fog));
+    let alpha = s.color.a * (1.0 - smoothstep(0.6, 1.0, fog));
+    if alpha <= 0.0 { discard; }
     let clip = scene.view_proj * vec4(rel, 1.0);
     return CloudPixel(vec4(color * alpha, alpha), clip.z / clip.w);
 }
@@ -184,9 +184,9 @@ fn gradient(dir: vec3<f32>, s: Sky) -> vec4<f32> {
     if dir.y <= 0.0 {
         // Under the horizon: fog, and from below sea level the dark of vanilla's void.
         let dark = s.uv.x * smoothstep(0.0, 0.08, -dir.y);
-        return vec4(scene.fog_color.rgb * (1.0 - dark), 1.0);
+        return vec4(scene.fog_color.rgb * (1.0 - dark) * s.color.a, s.color.a);
     }
-    return vec4(mix(s.color.rgb, scene.fog_color.rgb, clamp(0.0625 / dir.y, 0.0, 1.0)), 1.0);
+    return vec4(mix(s.color.rgb, scene.fog_color.rgb, clamp(0.0625 / dir.y, 0.0, 1.0)) * s.color.a, s.color.a);
 }
 
 // Vanilla's sunset fan: an oval lying on the horizon on the side of the body.

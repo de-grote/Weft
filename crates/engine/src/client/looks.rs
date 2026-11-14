@@ -43,7 +43,10 @@ pub struct Drawn<'a> {
 }
 
 impl Drawn<'_> {
-    /// The textures it shows on a face. A plant has one face, the first.
+    pub fn cube(&self) -> Option<&ModelBox> {
+        if self.model == BlockModel::Boxes { ModelBox::full_cube(self.boxes) } else { None }
+    }
+    /// The textures its geometry shows on a face.
     pub fn on_face(&self, dir: usize) -> Vec<u32> {
         match self.model {
             BlockModel::Boxes => self
@@ -52,8 +55,6 @@ impl Drawn<'_> {
                 .filter(|b| super::mesher::box_face(b, dir).is_some())
                 .map(|b| b.textures[dir])
                 .collect(),
-            BlockModel::Cube => vec![self.textures[dir]],
-            BlockModel::Cross if dir == 0 => vec![self.textures[0]],
             _ => Vec::new(),
         }
     }
@@ -104,11 +105,8 @@ impl Looks {
     /// The sprite a block's item shows if it is flat.
     pub fn block_sprite(&self, state: u32, s: &StateInfo) -> Option<u32> {
         let d = self.drawn(state, s);
-        if d.model == BlockModel::Boxes {
-            return None;
-        }
         s.item_sprite()
-            .map(|t| if s.liquid.is_none() { d.textures[0] } else { t })
+            .map(|t| if s.liquid.is_none() { s.item_face.map_or(t, |f| d.textures[f as usize]) } else { t })
     }
 
     /// The boxes a block's item shows if it isn't.
@@ -178,9 +176,13 @@ pub fn load(assets: &Assets, c: &Content) -> (Looks, Names) {
             match &m.cube {
                 // Only a cube is kept one: it hides the faces against its neighbors. Anything
                 // else is redrawn as a cube's box.
-                Some(cube) if s.model == BlockModel::Cube => {
+                Some(cube) if ModelBox::full_cube(&s.boxes).is_some() => {
                     let own: [u32; 6] = std::array::from_fn(|i| if cube[i].is_empty() { own(i) } else { id(&cube[i]) });
-                    look.textures = Some(crate::content::turned_faces(t, own));
+                    let textures = crate::content::turned_faces(t, own);
+                    let mut cube = s.boxes[0].clone();
+                    cube.textures = textures;
+                    look.boxes = Some(vec![cube]);
+                    look.textures = Some(textures);
                 }
                 _ => {
                     let boxes: Vec<ModelBox> = file_boxes(&m, &own, &mut id)

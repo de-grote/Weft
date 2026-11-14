@@ -123,7 +123,7 @@ static DREAM: Key = Key::named("dream");
 static DREAM_EFFECT: Shader = Shader::named("dream");
 r.key(&DREAM, "N").on_client(|c| c.post_effect(&DREAM_EFFECT, 1.0));
 ```
-`PostPixel` has `uv` (0 to 1, top left first), `color` (the picture so far at that point, linear), `strength`, `time` and `size` in pixels, and `scene_at(p, uv)` reads the picture anywhere else, for blur and waves. `post_effect(&EFFECT, 0.0)` turns an effect off, and several can be on at once, applied one after another in the order they were turned on.
+`PostPixel` has `uv` (0 to 1, top left first), `color` (the picture so far at that point, linear), `strength`, `time` and `size` in pixels, and `scene_at(p, uv)` reads the picture anywhere else, for blur and waves. `post_effect(&EFFECT, 0.0)` turns an effect off, and several can be on at once. It is a convenience over named [environment sources](environment.md); priority and source identity determine their order. Use an environment contribution to set transitions, conditions or override other effects.
 
 ## Shader packs
 Snippets add to the engine's shaders, a shader pack replaces them. It is a folder `shaderpacks/<id>/` next to the game, chosen by players in the settings, with any of these files:

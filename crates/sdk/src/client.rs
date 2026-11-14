@@ -130,10 +130,24 @@ impl Client {
         (secs >= 0.0).then_some(secs)
     }
 
-    /// The item id in `entity`'s `hand`; 0 for none. Other players' stacks aren't sent, so this
-    /// is the item without what is in it.
-    pub fn held_item(&self, entity: u64, hand: Hand) -> u32 {
-        unsafe { (host().client_held_item)(self.raw, entity, hand as u32) }
+    /// The stack in `entity`'s hand, including its public components; empty for none.
+    pub fn held(&self, entity: u64, hand: Hand) -> abi::ItemStack {
+        let mut hands = [ItemStack::EMPTY; 2];
+        unsafe { (host().client_displayed)(self.raw, entity, abi::display_source::HANDS, hands.as_mut_ptr(), hands.len()) };
+        hands[hand as usize]
+    }
+
+    /// Public stacks from a display source, in slot order, including empty slots.
+    /// Equipment, model visibility and attribute modifiers are independent.
+    pub fn displayed(&self, entity: u64, source: DisplaySource) -> Vec<ItemStack> {
+        let mut stacks = vec![ItemStack::EMPTY; 8];
+        let n = unsafe { (host().client_displayed)(self.raw, entity, source as u32, stacks.as_mut_ptr(), stacks.len()) };
+        if n > stacks.len() {
+            stacks.resize(n, ItemStack::EMPTY);
+            unsafe { (host().client_displayed)(self.raw, entity, source as u32, stacks.as_mut_ptr(), stacks.len()) };
+        }
+        stacks.truncate(n);
+        stacks
     }
 
     /// Where a bone of `entity`'s model or of what it has on was in the world the last frame: for
@@ -400,6 +414,16 @@ impl Client {
         let got = unsafe { (host().client_command_reply)(self.raw, id, &mut out) } != 0;
         got.then(|| unsafe { out.as_str() }.to_string())
     }
+}
+
+/// Where an entity displays stacks. A source does not imply a model or attribute modifiers.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplaySource {
+    Hands = abi::display_source::HANDS,
+    Equipment = abi::display_source::EQUIPMENT,
+    Shown = abi::display_source::SHOWN,
+    Ground = abi::display_source::GROUND,
 }
 
 /// Which hand.

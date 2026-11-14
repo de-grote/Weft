@@ -81,7 +81,7 @@ pub mod shot {
 
     /// `extra` blocks further back than third person (more on a mount), kept out of blocks.
     pub fn behind(extra: f32) -> Shot {
-        Shot::new(&[cc::BODY, cc::HUD, cc::CLIP], move |a| {
+        Shot::new(&[cc::BODY, cc::HUD, cc::BOB, cc::CLIP], move |a| {
             let d = look_dir(a.eye_yaw, a.eye_pitch);
             let back = (a.back + extra) as f64;
             let e = v(a.eye);

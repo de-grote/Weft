@@ -24,31 +24,31 @@ Rolls (1 by default) of one weighted choice each.
 
 ## RecipeBuilder
 
-- <a id="RecipeBuilder-named"></a>`.named(name: &str)`: Its name instead of `<mod>:<kind>/<output>`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1925)
-- <a id="RecipeBuilder-input_amounts"></a>`.input_amounts(counts: &[u32])`: How many of each input it takes, in the order of the inputs (millibuckets for liquids). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1931)
-- <a id="RecipeBuilder-output"></a>`.output(item: &str, count: u32)`: Another result (an item, or a liquid by its name and millibuckets). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1935)
-- <a id="RecipeBuilder-output_chance"></a>`.output_chance(item: &str, count: u32, chance: f32)`: A result that comes out with chance `chance` (0..1) each time: a pool of it and nothing. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1939)
-- <a id="RecipeBuilder-extra"></a>`.extra(pool: crate::Pool)`: Rolls of more results, as a loot table's (`r.loot(..).pool(..)`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1947)
-- <a id="RecipeBuilder-keep"></a>`.keep(key: impl RecipeSlot)`: Works, but the recipe viewer doesn't list it. Ingredient `key` (its pattern character, or for a recipe without a pattern its place among the inputs) stays as it is: a mold, a catalyst. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1954)
-- <a id="RecipeBuilder-wear"></a>`.wear(key: impl RecipeSlot, amount: u32)`: Ingredient `key` stays and wears by `amount` a run, breaking when it is worn out: a hammer. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1958)
-- <a id="RecipeBuilder-leaves"></a>`.leaves(key: impl RecipeSlot, item: &str)`: Ingredient `key` is used up and `item` takes its place (any mod's): a lava bucket leaving its bucket. Without this one leaves its item's `remainder`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1963)
-- <a id="RecipeBuilder-hidden"></a>`.hidden()` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1971)
+- <a id="RecipeBuilder-named"></a>`.named(name: &str)`: Its name instead of `<mod>:<kind>/<output>`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1926)
+- <a id="RecipeBuilder-input_amounts"></a>`.input_amounts(counts: &[u32])`: How many of each input it takes, in the order of the inputs (millibuckets for liquids). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1932)
+- <a id="RecipeBuilder-output"></a>`.output(item: &str, count: u32)`: Another result (an item, or a liquid by its name and millibuckets). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1936)
+- <a id="RecipeBuilder-output_chance"></a>`.output_chance(item: &str, count: u32, chance: f32)`: A result that comes out with chance `chance` (0..1) each time: a pool of it and nothing. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1940)
+- <a id="RecipeBuilder-extra"></a>`.extra(pool: crate::Pool)`: Rolls of more results, as a loot table's (`r.loot(..).pool(..)`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1948)
+- <a id="RecipeBuilder-keep"></a>`.keep(key: impl RecipeSlot)`: Works, but the recipe viewer doesn't list it. Ingredient `key` (its pattern character, or for a recipe without a pattern its place among the inputs) stays as it is: a mold, a catalyst. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1955)
+- <a id="RecipeBuilder-wear"></a>`.wear(key: impl RecipeSlot, amount: u32)`: Ingredient `key` stays and wears by `amount` a run, breaking when it is worn out: a hammer. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1959)
+- <a id="RecipeBuilder-leaves"></a>`.leaves(key: impl RecipeSlot, item: &str)`: Ingredient `key` is used up and `item` takes its place (any mod's): a lava bucket leaving its bucket. Without this one leaves its item's `remainder`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1964)
+- <a id="RecipeBuilder-hidden"></a>`.hidden()` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1972)
 
 ## RecipeKindBuilder
 
 A recipe kind being registered; sent when dropped.
 
-- <a id="RecipeKindBuilder-inputs"></a>`.inputs(cols: u32, rows: u32)`: The recipe viewer shows inputs as a grid this big, whatever a recipe uses (a crafting table's 3 x 3). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1997)
-- <a id="RecipeKindBuilder-outputs"></a>`.outputs(cols: u32, rows: u32)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2000)
-- <a id="RecipeKindBuilder-info_line"></a>`.info_line(key: &str, values: &[&str])`: A line under each recipe: translation `key`, its `{0}`.. filled with `values`: `time` (seconds) or components the recipe carries (`mymod:energy_per_tick`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2005)
-- <a id="RecipeKindBuilder-layout"></a>`.layout(f: impl Fn(&mut Ui, &RecipeView) + Send + Sync + 'static)`: Builds each recipe yourself instead of the usual inputs, arrow, outputs: `ui.recipe_inputs()`, `ui.recipe_outputs()` and `ui.recipe_input(i)` place its slots. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2012)
+- <a id="RecipeKindBuilder-inputs"></a>`.inputs(cols: u32, rows: u32)`: The recipe viewer shows inputs as a grid this big, whatever a recipe uses (a crafting table's 3 x 3). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1998)
+- <a id="RecipeKindBuilder-outputs"></a>`.outputs(cols: u32, rows: u32)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2001)
+- <a id="RecipeKindBuilder-info_line"></a>`.info_line(key: &str, values: &[&str])`: A line under each recipe: translation `key`, its `{0}`.. filled with `values`: `time` (seconds) or components the recipe carries (`mymod:energy_per_tick`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2006)
+- <a id="RecipeKindBuilder-layout"></a>`.layout(f: impl Fn(&mut Ui, &RecipeView) + Send + Sync + 'static)`: Builds each recipe yourself instead of the usual inputs, arrow, outputs: `ui.recipe_inputs()`, `ui.recipe_outputs()` and `ui.recipe_input(i)` place its slots. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2013)
 
 ## RecipeView
 
 One recipe of a kind, found by `recipe_find` (or shown by a kind's `layout`).
 
-- <a id="RecipeView-time"></a>`.time() -> u32`: Its time in ticks. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2142)
-- <a id="RecipeView-outputs"></a>`.outputs() -> Vec<(ItemStack, f32)>`: Its results with their chances; a liquid's is its item by the millibucket. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2146)
-- <a id="RecipeView-roll"></a>`.roll(w: &crate::World) -> Vec<ItemStack>`: What else one run of it gives this time, its pools rolled. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2156)
-- <a id="RecipeView-value"></a>`.value<T: Value, K>(comp: &Component<T, K>) -> Option<T>`: A value the recipe carries (`r.shaped(..).set(&COMP, v)`): its entry's. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2163)
-- <a id="RecipeView-consume"></a>`.consume(stacks: &mut [ItemStack]) -> bool`: Takes its inputs out of `stacks` (the ones `recipe_find` was given); false, and nothing taken, if they are not all there. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2168)
+- <a id="RecipeView-time"></a>`.time() -> u32`: Its time in ticks. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2143)
+- <a id="RecipeView-outputs"></a>`.outputs() -> Vec<(ItemStack, f32)>`: Its results with their chances; a liquid's is its item by the millibucket. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2147)
+- <a id="RecipeView-roll"></a>`.roll(w: &crate::World) -> Vec<ItemStack>`: What else one run of it gives this time, its pools rolled. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2157)
+- <a id="RecipeView-value"></a>`.value<T: Value, K>(comp: &Component<T, K>) -> Option<T>`: A value the recipe carries (`r.shaped(..).set(&COMP, v)`): its entry's. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2164)
+- <a id="RecipeView-consume"></a>`.consume(stacks: &mut [ItemStack]) -> bool`: Takes its inputs out of `stacks` (the ones `recipe_find` was given); false, and nothing taken, if they are not all there. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2169)

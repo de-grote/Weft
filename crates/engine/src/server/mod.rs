@@ -1381,23 +1381,6 @@ impl Server {
     }
 }
 
-/// Items in an entity's equipment slots that show on the model.
-fn worn_of(c: &Content, ents: &entity::Entities, id: u64) -> Vec<u32> {
-    let Some(e) = ents.get(id) else { return Vec::new() };
-    let worn = &c.game.entities[e.kind as usize].worn;
-    let Some(inv) = ents
-        .inventories
-        .get(&id)
-        .and_then(|i| i.get(worn.start as usize..worn.end as usize))
-    else {
-        return Vec::new();
-    };
-    inv.iter()
-        .filter(|s| !s.is_empty() && c.worn(s.item).is_some())
-        .map(|s| s.item)
-        .collect()
-}
-
 pub(super) fn serialize(c: &Content, d: &Dim, ids: &[u64]) -> Vec<u8> {
     // What is on a body comes right after it, for it to be there when those are read back.
     let ids: Vec<u64> = ids

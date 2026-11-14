@@ -1089,7 +1089,7 @@ impl Registry {
     }
 
     /// Declares a component stacks carry a value of (`stack.with(&COMP, v)`), with its flags
-    /// (`abi::stack_flags`: kept on the server, not saved), 0 for neither.
+    /// (`abi::stack_flags`: server-only, not saved, or read by conditional looks), 0 for none.
     pub fn stack_component<T: crate::component::Data>(
         &mut self,
         c: &crate::Component<T>,

@@ -89,12 +89,10 @@ impl Server {
                 .collect();
         r.entities.insert_with(c, e, inv, comps);
         r.keep_sources(c, id);
-        let worn = worn_of(c, &r.entities, id);
         // Known only now that the modifiers are back; a new player (no saved health) starts full.
         let max = r.max_health(c, id);
         let mut dead = false;
         if let Some(e) = r.entities.get_mut(id) {
-            e.worn = worn;
             if e.health < 0.0 {
                 e.health = max;
             }

@@ -9,6 +9,7 @@
 extern crate alloc;
 
 pub mod data;
+pub mod environment;
 
 use core::ffi::c_void;
 use core::sync::atomic::AtomicU32;
@@ -689,7 +690,6 @@ pub mod comp {
     pub const ENTITY_EFFECT_BENEFICIAL: &str = "entity_effect.beneficial";
     pub const ENTITY_EFFECT_HARMFUL: &str = "entity_effect.harmful";
     pub const ENTITY_EFFECT_INSTANT: &str = "entity_effect.instant";
-    pub const ENTITY_EFFECT_SCREEN: &str = "entity_effect.screen";
     pub const ENTITY_EFFECT_HIDES: &str = "entity_effect.hides";
     /// An entity effect's `callback` (`EffectTickArgs`) every tick with every entity that has it.
     pub const ENTITY_EFFECT_ON_TICK: &str = "entity_effect.on_tick";
@@ -739,6 +739,8 @@ pub mod comp {
         /// The player's effects move it: walking bob, the wider view sprinting and flying, the tilt
         /// when hurt, what is over the screen inside a block or a liquid.
         pub const EFFECTS: &str = "camera.effects";
+        /// Walking bob, hurt tilt and held-item recoil, without FOV changes or screen overlays.
+        pub const BOB: &str = "camera.bob";
         /// Pulled in towards `CameraArgs::anchor` where a block is in the way (third person).
         pub const CLIP: &str = "camera.clip";
         /// A small box that bumps into blocks, moved from where it was to where `call` says, and
@@ -954,8 +956,11 @@ pub mod comp {
             ("component.keep_on_respawn", f::KEEP_ON_RESPAWN),
             ("component.carried", f::CARRIED),
         ];
-        pub const STACK_FLAGS: [(&str, u32); 2] =
-            [("component.server_only", crate::stack_flags::SERVER_ONLY), ("component.no_save", crate::stack_flags::NO_SAVE)];
+        pub const STACK_FLAGS: [(&str, u32); 3] = [
+            ("component.server_only", crate::stack_flags::SERVER_ONLY),
+            ("component.no_save", crate::stack_flags::NO_SAVE),
+            ("component.visual", crate::stack_flags::VISUAL),
+        ];
     }
 
     /// A recipe's (`entry_kind::RECIPE`): `KIND` (`str`, a recipe kind), `PATTERN` (`[str]`, rows
@@ -1074,8 +1079,7 @@ pub mod comp {
     /// liquid looks for a way down, 4), `RENEWABLE` (`u32`, a spot over solid ground or a source
     /// with at least this many sources beside it becomes one, 0 always; never), `DENSITY` (`i32`,
     /// negative rises, 1000), `HEAT` (`u32`, roughly Kelvin, 300; from 1000 up it burns what
-    /// touches it), `FOG` (`LiquidFog`, seen from inside, the average color of its texture and 96
-    /// blocks), `OVERLAY` (`LiquidOverlay`, over the screen from inside, its own texture at 0.1).
+    /// touches it). Perception is configured with environment layers.
     pub mod liquid {
         pub const DELAY: &str = "liquid.delay";
         pub const DROP_OFF: &str = "liquid.drop_off";
@@ -1083,8 +1087,6 @@ pub mod comp {
         pub const RENEWABLE: &str = "liquid.renewable";
         pub const DENSITY: &str = "liquid.density";
         pub const HEAT: &str = "liquid.heat";
-        pub const FOG: &str = "liquid.fog";
-        pub const OVERLAY: &str = "liquid.overlay";
     }
 
     /// What happens where two liquids meet (`entry_kind::REACTION`): when `LIQUID` (`match`) has
@@ -1238,6 +1240,8 @@ pub mod comp {
         pub const LIGHT_OPACITY: &str = "block.light_opacity";
         pub const LAYER: &str = "block.layer";
         pub const MODEL: &str = "block.model";
+        /// Item sprite from this face (u8, FACE_DIRS); 255 draws the model.
+        pub const ITEM_FACE: &str = "block.item_face";
         pub const TEXTURES: &str = "block.textures";
         pub const TURNS: &str = "block.turns";
         pub const TURN: &str = "block.turn";
@@ -1670,8 +1674,9 @@ pub mod block_flags {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockModel {
     None = 0,
+    /// Preset: a single full box, expanded when content is frozen.
     Cube = 1,
-    /// Two diagonal quads (plants).
+    /// Preset: two flat, rotated boxes per cell, expanded when content is frozen.
     Cross = 2,
     /// `boxes` with their own textures.
     Boxes = 4,
@@ -2175,8 +2180,26 @@ pub struct GateArgs {
     pub output: u32,
 }
 
+/// A generation snapshot, borrowed for the duration of a generation callback.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GenSource {
+    pub dim: u32,
+    pub seed: u64,
+    /// Completed stages strictly before this one.
+    pub before: u32,
+    /// Engine-local writes; null for a standalone snapshot.
+    pub ctx: *const core::ffi::c_void,
+}
+
 #[repr(C)]
 pub struct GenArgs {
+    pub source: GenSource,
+    /// Optional engine write-intent masks (64 words for blocks, 4 for biomes).
+    /// Writers set bits for explicit assignments, including assigning the input value.
+    /// Null when the entire buffer is the output, as in a dimension generator.
+    pub written: *mut u64,
+    pub biomes_written: *mut u64,
     pub seed: u64,
     pub cube: BlockPos,
     /// 4096 state ids, index = (y * 16 + z) * 16 + x. Pre-filled with 0 (air).
@@ -2199,6 +2222,7 @@ pub struct PlanCtx {
 /// A feature's plan (`comp::feature::PLAN`), once per start.
 #[repr(C)]
 pub struct PlanArgs {
+    pub source: GenSource,
     pub seed: u64,
     pub dim: u32,
     /// The start: the block above the ground for a feature on a grid.
@@ -2277,6 +2301,8 @@ pub mod stage {
     pub const VEGETATION: u32 = 2;
     /// Grass, flowers and the rest decided column by column.
     pub const DECORATION: u32 = 3;
+    /// Work on the completed terrain, structures and vegetation.
+    pub const POST_PROCESS: u32 = 4;
 }
 
 /// `comp::feature::SPREAD`.
@@ -4159,7 +4185,10 @@ pub struct Host {
     /// Seconds a clip of an action takes on `entity`; below 0 if it has none.
     pub client_clip_length: unsafe extern "C" fn(c: *mut ClientCtx, entity: u64, name: Str) -> f32,
     /// The item in `entity`'s `hand`; 0 for none.
-    pub client_held_item: unsafe extern "C" fn(c: *mut ClientCtx, entity: u64, hand: u32) -> u32,
+    pub environment_set: unsafe extern "C" fn(w: *mut WorldCtx, entity: u64, name: Str, data: Slice<u8>) -> u32,
+    pub client_environment_set: unsafe extern "C" fn(c: *mut ClientCtx, name: Str, data: Slice<u8>) -> u32,
+    pub client_environment_values: unsafe extern "C" fn(c: *mut ClientCtx, out: *mut environment::EnvironmentValues),
+    pub client_displayed: unsafe extern "C" fn(c: *mut ClientCtx, entity: u64, source: u32, out: *mut ItemStack, max: usize) -> usize,
     /// Where a bone of what `entity` is or has on was, the last frame. 0 if there is none.
     pub client_bone_position: unsafe extern "C" fn(c: *mut ClientCtx, entity: u64, bone: Str, out: *mut Vec3) -> u32,
     /// Message channel `name` between a mod's client and server parts, carrying values of
@@ -4383,6 +4412,8 @@ pub struct Host {
     pub unplace: unsafe extern "C" fn(world: *mut WorldCtx, placing: u64) -> u32,
     /// A plan puts something (`PlanOp`); 0 where it goes past the feature's reach (left out).
     pub plan_op: unsafe extern "C" fn(ctx: *mut PlanCtx, op: *const PlanOp) -> u32,
+    /// A block in a generation snapshot, including this callback's earlier writes.
+    pub generation_read: unsafe extern "C" fn(source: *const GenSource, pos: BlockPos) -> u32,
     /// Template `name`'s size once transformed; 0 if there is no such template.
     pub template_size: unsafe extern "C" fn(name: Str, transform: u32, out: *mut BlockPos) -> u32,
     /// Template `name`'s joints once transformed, up to `cap` into `out`; how many it has.
@@ -4426,11 +4457,6 @@ pub struct Host {
     /// Column (`x`, `z`) of dimension `dim` for `seed` (its terrain's or `comp::dimension::COLUMN`),
     /// generated or not. Returns 0 if the dimension has neither.
     pub dim_column: unsafe extern "C" fn(dim: u32, seed: u64, x: i32, z: i32, out: *mut TerrainColumn) -> u32,
-    /// 1 if caves took the surface block of column (`x`, `z`), so nothing should stand there.
-    pub dim_surface_carved: unsafe extern "C" fn(dim: u32, seed: u64, x: i32, z: i32) -> u32,
-    /// The state the terrain leaves at the top of column (`x`, `z`): 0 where caves took it or the
-    /// dimension has no terrain.
-    pub dim_surface_block: unsafe extern "C" fn(dim: u32, seed: u64, x: i32, z: i32) -> u32,
 
     /// Puts `player` in camera mode `mode` (`u32::MAX`: back to its own choice); `locked`, it
     /// can't leave it until told. The change takes `transition` seconds eased by `easing`
@@ -4516,7 +4542,15 @@ pub mod gizmo_kind {
     pub const FILL: u32 = 2;
 }
 
-/// Which hand (`Host::client_held_item`).
+/// Sources of displayed stacks (`Host::client_displayed`). Slot order and empty slots are preserved.
+pub mod display_source {
+    pub const HANDS: u32 = 0;
+    pub const EQUIPMENT: u32 = 1;
+    pub const SHOWN: u32 = 2;
+    pub const GROUND: u32 = 3;
+}
+
+/// Which hand.
 pub mod hand {
     pub const MAIN: u32 = 0;
     pub const OFF: u32 = 1;
@@ -5349,18 +5383,8 @@ pub mod stack_flags {
     pub const SERVER_ONLY: u32 = 1;
     /// Not written to saves.
     pub const NO_SAVE: u32 = 2;
-}
-
-crate::data! {
-    /// A liquid's fog from inside (`comp::liquid::FOG`): 0xRRGGBB (`u32::MAX`: the average color
-    /// of its texture) and the blocks it takes to hide everything.
-    pub struct LiquidFog { pub color: u32, pub distance: f32 }
-}
-
-crate::data! {
-    /// The picture over the screen inside a liquid (`comp::liquid::OVERLAY`), under `textures/`
-    /// (empty: its own texture), and how much of it shows.
-    pub struct LiquidOverlay { pub texture: alloc::string::String, pub opacity: f32 }
+    /// Read by an item's conditional look. Only public visual data participates in its cache.
+    pub const VISUAL: u32 = 4;
 }
 
 // ---------------------------------------------------------------- client side
@@ -5377,6 +5401,8 @@ pub struct ItemModelArgs {
     pub stack: ItemStack,
     pub model: Str,
     pub texture: Str,
+    pub worn_model: Str,
+    pub worn_texture: Str,
 }
 
 /// One entity on the client, for `comp::entity::FRAMES`.
@@ -5630,7 +5656,6 @@ pub mod client_op {
     pub const RESPAWN: u32 = 12;
     /// Post-processing effect `text` (`shaders/post/<name>.wgsl`) at strength `num`, 0 turns it
     /// off. Effects stay on until changed and run in the order they were turned on.
-    pub const POST_EFFECT: u32 = 14;
     /// Runs command `text` (`/tp ~ ~5 ~`) as the player, here if it is a client command, else
     /// on the server; returns an id for `Host::client_command_reply`. The chat stays out of it.
     pub const RUN_COMMAND: u32 = 16;

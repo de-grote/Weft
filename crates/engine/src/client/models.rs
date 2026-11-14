@@ -384,18 +384,15 @@ pub struct Models {
     pub kinds: Vec<KindModel>,
     /// Items with a model of bones: their place in `kinds`, past the entities'.
     pub item_kinds: FxHashMap<u32, u32>,
-    /// Worn items that show as a model: which, and on what bone of the wearer.
-    pub worn_kinds: FxHashMap<u32, (u32, String)>,
     /// Models read from files, by name, also those that aren't there.
     files: FxHashMap<String, Option<u32>>,
-    /// What an item's `condition` said for a stack.
-    by_stack: FxHashMap<(u32, u32), Option<u32>>,
     stock: FxHashMap<&'static str, Vec<Arc<Animation>>>,
     /// What items bring along: holders of models added later need it.
     item_clips: Vec<(u32, Vec<Arc<Animation>>)>,
     /// Everyone's boxes and triangles; the GPU has them as of the last `sync`.
     tables: (Vec<GpuCuboid>, Vec<GpuCorner>),
     stale: bool,
+    carriers: FxHashSet<(u32, u32)>,
     /// Textures of new models, for whoever loads them.
     pub new_skins: Vec<String>,
     swings: FxHashMap<(u64, u32, u32), Swings>,
@@ -442,14 +439,14 @@ pub static ICONS: std::sync::LazyLock<std::sync::Mutex<Icons>> = std::sync::Lazy
 /// The picture of a model that shows `stack` in a slot, if it has one by now.
 pub fn icon_of(stack: ItemStack) -> Option<(u32, [f32; 4])> {
     let mut i = ICONS.lock().unwrap();
-    if !i.items.contains(&stack.item) {
+    if !i.items.contains(&stack.item) && crate::stack::model(stack, false).is_none() {
         return None;
     }
-    let key = (stack.item, stack.data);
+    let key = crate::stack::visual_key(stack);
     match i.ready.get(&key) {
         Some(r) => *r,
         None => {
-            if !i.wanted.iter().any(|w| (w.item, w.data) == key) {
+            if !i.wanted.iter().any(|w| crate::stack::visual_key(*w) == key) {
                 i.wanted.push(stack);
             }
             None
@@ -462,7 +459,7 @@ pub fn icon_done(stack: ItemStack, icon: Option<(u32, [f32; 4])>) {
         .lock()
         .unwrap()
         .ready
-        .insert((stack.item, stack.data), icon);
+        .insert(crate::stack::visual_key(stack), icon);
 }
 
 /// The text of a component of an item or an entity, with `{name}` as the entry's path.
@@ -1014,13 +1011,12 @@ impl Models {
         let mut m = Models {
             kinds: Vec::new(),
             item_kinds: FxHashMap::default(),
-            worn_kinds: FxHashMap::default(),
             files: FxHashMap::default(),
-            by_stack: FxHashMap::default(),
             stock: FxHashMap::default(),
             item_clips: Vec::new(),
             tables: (Vec::new(), Vec::new()),
             stale: false,
+            carriers: FxHashSet::default(),
             new_skins: Vec::new(),
             swings: FxHashMap::default(),
             turned: FxHashMap::default(),
@@ -1050,7 +1046,7 @@ impl Models {
         self.tables = (vec![GpuCuboid::default()], vec![GpuCorner::default()]);
         self.kinds.clear();
         self.files.clear();
-        self.by_stack.clear();
+        self.carriers.clear();
         self.swings.clear();
         self.kept.clear();
         self.new_skins.clear();
@@ -1085,9 +1081,7 @@ impl Models {
         // Items: where they sit in the hand, and those made of bones like an entity. Such a model
         // is posed by the holder's clips of the same names (a gun's slide in its `swing`).
         self.item_kinds.clear();
-        self.worn_kinds.clear();
         self.displays.clear();
-        let worn_model = c.components.id(comp::WORN_MODEL);
         let model_comp = c.components.id(comp::MODEL);
         for (i, d) in c.items.iter().enumerate().skip(1) {
             let Some((ns, path)) = d.name.split_once(':') else { continue };
@@ -1111,25 +1105,6 @@ impl Models {
             };
             self.item_kinds.insert(i as u32, kind);
         }
-        for (i, _) in c.items.iter().enumerate().skip(1) {
-            let Some(said) = worn_model.and_then(|id| c.components.text(ITEM, i as u32, id)) else { continue };
-            let Some((file, bone)) = said.split_once('@') else { continue };
-            let Some(kind) = self.load_file(assets, file, None) else {
-                log::error!("item {}: no model {file} to wear", c.items[i].name);
-                continue;
-            };
-            self.worn_kinds.insert(i as u32, (kind, bone.to_string()));
-            let mut anyone = false;
-            for holder in 0..c.game.entities.len() as u32 {
-                if model::bone_named(&self.kinds[holder as usize].parts, bone).is_some() {
-                    self.bring_clips(holder, kind);
-                    anyone = true;
-                }
-            }
-            if !anyone {
-                log::warn!("item {}: no entity has a bone {bone} to wear {file} on", c.items[i].name);
-            }
-        }
         for (holder, entity) in c.game.entities.iter().enumerate() {
             for (file, bone) in &entity.bone_models {
                 let Some(kind) = self.load_file(assets, file, None) else {
@@ -1139,11 +1114,7 @@ impl Models {
                 self.carry(holder as u32, kind, bone);
             }
         }
-        for (file, bone, _) in &c.game.bone_motions {
-            if self.files.get(file).is_none_or(Option::is_none) && !c.game.entity_names.contains_key(file) {
-                log::warn!("bone {bone} of model {file}, which nothing shows");
-            }
-        }
+
         {
             let mut i = ICONS.lock().unwrap();
             *i = Icons::default();
@@ -1162,12 +1133,18 @@ impl Models {
         push_kind(&mut self.kinds, &mut self.tables, parts, texture, (own, stocked, &self.item_clips))
     }
 
+    // Items that bring clips along have a model each: the same boxes, not the same clips.
+    fn file_key<'a>(&self, name: &'a str, item: Option<u32>) -> std::borrow::Cow<'a, str> {
+        match item.filter(|i| self.item_clips.iter().any(|t| t.0 == *i)) {
+            Some(i) => format!("{name}#{i}").into(),
+            None => name.into(),
+        }
+    }
+
     /// `name`'s model from its file, read once: `models/<name>.geo.json`, its clips, what its bones
     /// do. An item adds the clips it brings along.
     pub fn load_file(&mut self, assets: &Assets, name: &str, item: Option<u32>) -> Option<u32> {
-        // Items that bring clips along have a model each: the same boxes, not the same clips.
-        let brings = item.filter(|i| self.item_clips.iter().any(|t| t.0 == *i));
-        let key = brings.map_or_else(|| name.to_string(), |i| format!("{name}#{i}"));
+        let key = self.file_key(name, item).into_owned();
         if let Some(&k) = self.files.get(&key) {
             return k;
         }
@@ -1204,6 +1181,9 @@ impl Models {
 
     /// `model` is on `holder` from now on: what plays on the holder moves those of its bones it names.
     fn bring_clips(&mut self, holder: u32, model: u32) {
+        if !self.carriers.insert((holder, model)) {
+            return;
+        }
         let mut clips: Vec<Arc<Animation>> = Vec::new();
         for b in &self.kinds[holder as usize].anims {
             if !clips.iter().any(|a| Arc::ptr_eq(a, &b.anim)) {
@@ -1254,12 +1234,6 @@ impl Models {
                 self.carry(k, model, bone);
             }
         }
-        let worn: Vec<(u32, String)> = self.worn_kinds.values().cloned().collect();
-        for (model, bone) in worn {
-            if model::bone_named(&self.kinds[k as usize].parts, &bone).is_some() {
-                self.bring_clips(k, model);
-            }
-        }
         self.files.insert(key, Some(k));
         self.stale = true;
         Ok(k)
@@ -1280,58 +1254,53 @@ impl Models {
         gpu.write_buffer(self.corners, 0, bytemuck::cast_slice(corners));
     }
 
-    /// The model `stack` shows as, deciding if nobody has yet (its item's `condition`).
+    /// Resolves a stack's model through the shared look, then the item's default.
     pub fn model_for(&mut self, assets: &Assets, stack: ItemStack) -> Option<u32> {
-        let c = content();
-        if let Some(&(owner, cb)) = c.game.item_model_for_stack.get(&stack.item) {
-            let key = (stack.item, stack.data);
-            let kind = match self.by_stack.get(&key) {
-                Some(&k) => k,
-                None => {
-                    let mut a = weft_abi::ItemModelArgs { stack, model: weft_abi::Str::new(""), texture: weft_abi::Str::new("") };
-                    crate::host::invoke(owner, cb, &mut a);
-                    let name = unsafe { a.model.as_str() }.to_string();
-                    let k = if name.is_empty() { None } else { self.load_file(assets, &name, Some(stack.item)) };
-                    if k.is_none() && !name.is_empty() {
-                        log::error!("item {}: no model {name}", c.items[stack.item as usize].name);
-                    }
-                    self.by_stack.insert(key, k);
-                    k
-                }
-            };
-            if kind.is_some() {
-                return kind;
-            }
-        }
-        self.item_kinds.get(&stack.item).copied()
-    }
-
-    /// The model `stack` shows as, of what `model_for` has decided.
-    pub fn model_seen(&self, stack: ItemStack) -> Option<u32> {
-        if self.item_kinds.is_empty() && self.by_stack.is_empty() {
+        if stack.is_empty() {
             return None;
         }
-        self.by_stack
-            .get(&(stack.item, stack.data))
-            .copied()
-            .flatten()
-            .or_else(|| self.item_kinds.get(&stack.item).copied())
+        match crate::stack::model(stack, false) {
+            Some(file) => self
+                .load_file(assets, file, Some(stack.item))
+                .or_else(|| self.item_kinds.get(&stack.item).copied()),
+            None => self.item_kinds.get(&stack.item).copied(),
+        }
+    }
+
+    /// A model already loaded for a displayed stack.
+    pub fn model_seen(&self, stack: ItemStack) -> Option<u32> {
+        if stack.is_empty() {
+            return None;
+        }
+        match crate::stack::model(stack, false) {
+            Some(file) => self
+                .files
+                .get(self.file_key(file, Some(stack.item)).as_ref())
+                .copied()
+                .flatten()
+                .or_else(|| self.item_kinds.get(&stack.item).copied()),
+            None => self.item_kinds.get(&stack.item).copied(),
+        }
+    }
+
+    pub fn prepare_worn(&mut self, assets: &Assets, holder: u32, stack: ItemStack) {
+        let Some((file, bone)) = crate::stack::model(stack, true).and_then(|s| s.split_once('@')) else { return };
+        let Some(model) = self.load_file(assets, file, None) else { return };
+        if model::bone_named(&self.kinds[holder as usize].parts, bone).is_some() {
+            self.bring_clips(holder, model);
+        }
     }
 
     /// What `kind`, wearing `worn`, has on: (model, bone).
-    pub fn carried_by(&self, kind: u32, worn: &[u32], mut each: impl FnMut(u32, usize)) {
+    pub fn carried_by(&self, kind: u32, worn: &[ItemStack], mut each: impl FnMut(u32, usize)) {
         let Some(m) = self.kinds.get(kind as usize) else { return };
         for &(model, bone) in &m.carries {
             each(model, bone);
         }
-        if self.worn_kinds.is_empty() {
-            return;
-        }
-        for i in worn {
-            if let Some((model, bone)) = self.worn_kinds.get(i) {
-                if let Some(b) = model::bone_named(&m.parts, bone) {
-                    each(*model, b);
-                }
+        for &stack in worn {
+            let Some((file, bone)) = crate::stack::model(stack, true).and_then(|s| s.split_once('@')) else { continue };
+            if let (Some(Some(model)), Some(b)) = (self.files.get(file), model::bone_named(&m.parts, bone)) {
+                each(*model, b);
             }
         }
     }

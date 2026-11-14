@@ -20,6 +20,7 @@ pub mod editor;
 pub mod entries;
 pub mod features;
 pub mod game_screens;
+mod generation;
 pub mod hitbox;
 pub mod host;
 pub mod hud;

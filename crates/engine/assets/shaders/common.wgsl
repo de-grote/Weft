@@ -16,7 +16,10 @@ fn fog_amount(dist: f32, start: f32, end: f32) -> f32 {
     if dist <= start {
         return 0.0;
     }
-    return clamp((dist - start) / max(end - start, 1.0), 0.0, 1.0);
+    if dist >= end {
+        return 1.0;
+    }
+    return (dist - start) / (end - start);
 }
 
 fn brightness_curve(level: f32) -> f32 {
@@ -35,10 +38,10 @@ fn unpack_light(l: u32) -> vec4<f32> {
 // `night` night vision 0..1: lit everywhere as under the open sky at noon, lamps adding their
 // warmth on top (not vanilla's raising of each color to full, which makes a torch at night look
 // like a dark patch).
-fn lightmap(light: vec4<f32>, day: f32, ambient: f32, bright: f32, night: f32) -> vec3<f32> {
+fn lightmap(light: vec4<f32>, day: f32, ambient: f32, bright: f32, night: f32, sunlight: f32) -> vec3<f32> {
     let d = clamp((mix(day, 1.0, night) - 0.12) / 0.88, 0.0, 1.0);
-    let sky = brightness_curve(mix(light.x, 1.0, night)) * mix(0.24, 1.0, d);
-    var c = max(vec3(0.04), vec3(brightness_curve(ambient))) + mix(vec3(0.478, 0.478, 1.0), vec3(1.0), d) * sky;
+    let sky = brightness_curve(mix(light.x, 1.0, night)) * mix(0.24, 1.0, d) * mix(sunlight, 1.0, night);
+    var c = vec3(ambient) + mix(vec3(0.478, 0.478, 1.0), vec3(1.0), d) * sky;
     let block = light.yzw;
     if any(block > vec3(0.0)) {
         // Vanilla's warmth of block light: yellower the dimmer it is, white at full, by the

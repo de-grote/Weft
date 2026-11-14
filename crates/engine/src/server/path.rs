@@ -9,6 +9,7 @@ use glam::{DVec3, IVec3};
 use rustc_hash::FxHashMap;
 
 use crate::content::Content;
+use crate::physics::{self, Aabb, Dims};
 
 /// Where an entity is walking to.
 pub struct Nav {
@@ -47,37 +48,69 @@ thread_local! {
     static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new((FxHashMap::default(), BinaryHeap::new()));
 }
 
-/// Cells a body `height` blocks tall can stand in, from the feet cell `from` towards `to`: the
-/// whole way, or as far as it gets (the reachable cell closest to the target) when `to` is out
-/// of reach or more than `MAX_NODES` cells away.
+// Center even-sized footprints between cells so they fit even-width passages.
+fn offset(dims: Dims) -> DVec3 {
+    let half = (dims.half_width * 2.0).ceil() * 0.5;
+    DVec3::new(half, 0.0, half)
+}
+
+/// Positions a body can stand in, from `from` towards `to`: the whole way, or as far as
+/// it gets when the target is out of reach or more than `MAX_NODES` nodes away.
 /// `drop`: the most blocks it goes down at once (what it falls without harm).
-pub fn find(c: &Content, block: &impl crate::physics::Cells, from: IVec3, to: IVec3, height: i32, drop: i32) -> Vec<IVec3> {
-    // Judged by the collision boxes walking bumps into, like the step itself.
-    let top = |s: u32| crate::physics::collision_top(c, s);
-    let open = |p: IVec3| {
-        let free = |s: u32| {
-            let st = &c.states[s as usize];
-            top(s).is_none() && st.liquid.is_none_or(|l| !c.liquids[l as usize].burns())
-        };
-        block.main(p).is_some_and(free) && block.extras(p).iter().all(|&s| free(s))
-    };
-    let room = |p: IVec3| (0..height).all(|k| open(p + IVec3::Y * k));
+pub fn find(c: &Content, block: &impl physics::Cells, from: DVec3, to: DVec3, dims: Dims, drop: i32) -> Vec<IVec3> {
+    let offset = offset(dims);
+    let cell = |p: DVec3| (p - offset + DVec3::new(0.5, 0.0, 0.5)).floor().as_ivec3();
+    let target = to;
+    let (from, to) = (cell(from), cell(to));
+    let area = |p: IVec3| Aabb::around(p.as_dvec3() + offset, dims.half_width, dims.height);
+    let top = |s: u32| physics::collision_top(c, s);
     let burns = |s: u32| {
         c.states[s as usize]
             .liquid
             .is_some_and(|l| c.liquids[l as usize].burns())
     };
+    let room = |p: IVec3| {
+        let area = area(p);
+        if physics::collides(c, block, area) {
+            return false;
+        }
+        let lo = area.min.floor().as_ivec3();
+        let hi = area.max.ceil().as_ivec3() - IVec3::ONE;
+        for y in lo.y..=hi.y {
+            for z in lo.z..=hi.z {
+                for x in lo.x..=hi.x {
+                    let p = IVec3::new(x, y, z);
+                    if block.main(p).is_none_or(burns) || block.extras(p).iter().any(|&s| burns(s)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    };
     let ground = |p: IVec3| {
-        let below = p - IVec3::Y;
+        let area = area(p);
+        let lo = area.min.floor().as_ivec3();
+        let hi = area.max.ceil().as_ivec3() - IVec3::ONE;
         let holds = |s: u32| c.states[s as usize].liquid.is_some() || top(s).is_some_and(|t| t >= 0.5);
-        block.main(below).is_some_and(|s| {
-            let extras = block.extras(below);
-            !burns(s) && !extras.iter().any(|&e| burns(e)) && (holds(s) || extras.iter().any(|&e| holds(e)))
-        })
+        let mut supported = false;
+        for z in lo.z..=hi.z {
+            for x in lo.x..=hi.x {
+                let below = IVec3::new(x, p.y - 1, z);
+                if let Some(s) = block.main(below) {
+                    let extras = block.extras(below);
+                    if burns(s) || extras.iter().any(|&s| burns(s)) {
+                        return false;
+                    }
+                    supported |= holds(s) || extras.iter().any(|&s| holds(s));
+                }
+            }
+        }
+        supported
     };
     let standable = |p: IVec3| room(p) && ground(p);
     let wet = |p: IVec3| block.liquid(c, p).is_some();
-    let h = |p: IVec3| (p - to).as_vec3().length();
+    let h = |p: IVec3| (p.as_dvec3() + offset - target).length() as f32;
 
     let (mut came, mut queue) = SCRATCH.with_borrow_mut(std::mem::take);
     came.clear();
@@ -93,7 +126,7 @@ pub fn find(c: &Content, block: &impl crate::physics::Cells, from: IVec3, to: IV
         if d < best.0 {
             best = (d, p);
         }
-        if p == to || (d < 1.5 && (p.y - to.y).abs() <= 1) {
+        if p == to || (d < 1.0 && (p.y - to.y).abs() <= 1) {
             best = (0.0, p);
             break;
         }
@@ -115,14 +148,14 @@ pub fn find(c: &Content, block: &impl crate::physics::Cells, from: IVec3, to: IV
             } else if !room(q) {
                 // A step up: jump, with room above the head first.
                 let up = q + IVec3::Y;
-                if standable(up) && open(p + IVec3::Y * height) {
+                if standable(up) && room(p + IVec3::Y) {
                     next = Some((up, base + 1.0));
                 }
             } else {
                 // Open but nothing to stand on: drop down to the first ground.
                 for k in 1..=drop {
                     let down = q - IVec3::Y * k;
-                    if !open(down) {
+                    if !room(down) {
                         break;
                     }
                     if ground(down) {
@@ -153,10 +186,10 @@ pub fn find(c: &Content, block: &impl crate::physics::Cells, from: IVec3, to: IV
 }
 
 /// Steering for this tick: walk direction, jump, and whether the target is reached.
-pub fn steer(nav: &mut Nav, pos: DVec3, blocked: bool) -> Option<([f32; 2], bool)> {
+pub fn steer(nav: &mut Nav, pos: DVec3, dims: Dims, blocked: bool) -> Option<([f32; 2], bool)> {
     let feet = pos.floor().as_ivec3();
     while let Some(&w) = nav.path.get(nav.next) {
-        let center = w.as_dvec3() + DVec3::new(0.5, 0.0, 0.5);
+        let center = w.as_dvec3() + offset(dims);
         let flat = (center - pos).with_y(0.0);
         if flat.length() < 0.35 && (w.y - feet.y).abs() <= 1 {
             nav.next += 1;

@@ -1,4 +1,4 @@
-//! Screen effects mods turn on (`client_op::POST_EFFECT`): `shaders/post/<name>.wgsl` snippets in
+//! Screen effects selected by the resolved environment: `shaders/post/<name>.wgsl` snippets in
 //! one pipeline. With none on, the world is drawn straight to the screen; with some, or drawn
 //! smaller than the screen (`core:render_scale`), it goes into an image the effects read one
 //! after another, the last one onto the screen, stretched (with none, a pass without an effect).
@@ -70,14 +70,8 @@ impl Post {
         }
     }
 
-    /// Turns `name` on at `strength` (0 = off). False if no such effect exists.
-    pub fn set(&mut self, name: &str, strength: f32) -> bool {
-        let known = self.slots.slot(name) != 0;
-        self.active.retain(|(n, _)| n != name);
-        if strength > 0.0 && known {
-            self.active.push((name.to_string(), strength));
-        }
-        known || strength <= 0.0
+    pub fn has(&self, name: &str) -> bool {
+        self.slots.slot(name) != 0
     }
 
     /// Whether this frame needs the scene drawn into an image first.

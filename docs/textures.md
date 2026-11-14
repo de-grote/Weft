@@ -89,3 +89,5 @@ Each layer's `_e` glows where that layer shows.
 A broken picture never stops the game: a texture that is missing or has a wrong size shows the missing
 texture pattern, and the log says which file caused it.\
 `F3+T` reloads the textures, so a `.anim` or an `_e` file can be changed while the game is running.
+
+`BlockModel::Cube` and `Cross` are registration presets expanded into model boxes when content is loaded. All block geometry uses the same box renderer; a single full cube with standard UVs uses packed faces automatically. `block.item_sprite(Dir::West)` selects a face as a flat item icon independently of the model. The `comps::block::ITEM_FACE` value 255 draws the model instead.

@@ -31,10 +31,10 @@ Read-only client state for bindings.
 
 A HUD element being registered (`Registry::hud_element`).
 
-- <a id="HudElementBuilder-rebuild_when"></a>`.rebuild_when(f: impl Fn(&crate::ClientView) -> u64 + Send + Sync + 'static)`: Rebuilds the layout when this revision changes. Keep changing text and numbers in bindings; use this for a different set of widgets, such as a new inspected block. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2043)
-- <a id="HudElementBuilder-anchor"></a>`.anchor(anchor: &str)`: Where it sits (`hud_anchor::*`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2052)
-- <a id="HudElementBuilder-order"></a>`.order(order: i32)`: 0 sits nearest the anchor's edge. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2056)
-- <a id="HudElementBuilder-ui"></a>`.ui(f: impl Fn(&mut Ui) + Send + Sync + 'static)`: What it shows. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2060)
+- <a id="HudElementBuilder-rebuild_when"></a>`.rebuild_when(f: impl Fn(&crate::ClientView) -> u64 + Send + Sync + 'static)`: Rebuilds the layout when this revision changes. Keep changing text and numbers in bindings; use this for a different set of widgets, such as a new inspected block. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2044)
+- <a id="HudElementBuilder-anchor"></a>`.anchor(anchor: &str)`: Where it sits (`hud_anchor::*`). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2053)
+- <a id="HudElementBuilder-order"></a>`.order(order: i32)`: 0 sits nearest the anchor's edge. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2057)
+- <a id="HudElementBuilder-ui"></a>`.ui(f: impl Fn(&mut Ui) + Send + Sync + 'static)`: What it shows. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2061)
 
 ## Icons
 
@@ -56,13 +56,13 @@ A row of icons in the making (`Ui::icons`); it goes in as this goes.
 
 ## MenuCtx
 
-- <a id="MenuCtx-world"></a>`.world() -> World` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1316)
-- <a id="MenuCtx-taken_in"></a>`.taken_in(name: &str) -> Option<u32>`: In `on_take`, which slot of group `name` was taken from; `None` for another group's. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1320)
-- <a id="MenuCtx-player"></a>`.player() -> u64` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1326)
-- <a id="MenuCtx-times"></a>`.times() -> u32`: In `on_take` of a crafting grid's result (`Slots::crafting`), how many runs of its recipe that was (a shift-click crafts all that fit at once); 1 otherwise. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1331)
-- <a id="MenuCtx-owner"></a>`.owner() -> Option<Holder>`: What the menu was opened on (a block entity, a mob, a pouch in a slot); `None` for the player's own and a crafting table's. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1336)
-- <a id="MenuCtx-group"></a>`.group(name: &str) -> SlotGroup<'_>`: Slot group `name` of this menu; asking for one it doesn't have is a mistake that gets logged, and the group is empty. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1341)
-- <a id="MenuCtx-find_group"></a>`.find_group(name: &str) -> Option<SlotGroup<'_>>`: `group`, when not having it is fine. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1348)
+- <a id="MenuCtx-world"></a>`.world() -> World` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1317)
+- <a id="MenuCtx-taken_in"></a>`.taken_in(name: &str) -> Option<u32>`: In `on_take`, which slot of group `name` was taken from; `None` for another group's. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1321)
+- <a id="MenuCtx-player"></a>`.player() -> u64` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1327)
+- <a id="MenuCtx-times"></a>`.times() -> u32`: In `on_take` of a crafting grid's result (`Slots::crafting`), how many runs of its recipe that was (a shift-click crafts all that fit at once); 1 otherwise. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1332)
+- <a id="MenuCtx-owner"></a>`.owner() -> Option<Holder>`: What the menu was opened on (a block entity, a mob, a pouch in a slot); `None` for the player's own and a crafting table's. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1337)
+- <a id="MenuCtx-group"></a>`.group(name: &str) -> SlotGroup<'_>`: Slot group `name` of this menu; asking for one it doesn't have is a mistake that gets logged, and the group is empty. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1342)
+- <a id="MenuCtx-find_group"></a>`.find_group(name: &str) -> Option<SlotGroup<'_>>`: `group`, when not having it is fine. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L1349)
 
 ## S
 
@@ -141,5 +141,5 @@ How a part is laid out and shown: the same properties the engine's own screens u
 
 A word set being registered or added to (`Registry::word_set`).
 
-- <a id="WordSetBuilder-words"></a>`.words(words: &[&str])` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2078)
-- <a id="WordSetBuilder-remove_word"></a>`.remove_word(word: &str)`: Takes a word out (another mod's, in an edit). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2084)
+- <a id="WordSetBuilder-words"></a>`.words(words: &[&str])` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2079)
+- <a id="WordSetBuilder-remove_word"></a>`.remove_word(word: &str)`: Takes a word out (another mod's, in an edit). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/game.rs#L2085)

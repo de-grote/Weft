@@ -184,7 +184,9 @@ A look that depends on the stack, a sword that broke say, is the item's `conditi
 ```rust
 r.item(&SWORD).condition(|s, v| if s.wear() > 100 { v.model("sword_broken"); });
 ```
-`v.texture(..)` swaps the flat picture the same way, in slots, hands and on the ground. It is asked once per kind of stack. The stacks in other players' hands aren't sent, so there they show the usual model.
+`v.texture(..)` swaps the flat picture; `v.worn_model(model, bone)` and `v.worn_texture(texture)` choose its equipment appearance. The same public stack data reaches other clients, so these choices also work on observed entities.
+
+The callback reads components marked `abi::stack_flags::VISUAL` (`r.stack_component(&STYLE, abi::stack_flags::VISUAL)`). Wear and the built-in appearance components are marked already. Its input contains only public visual data, including in nested stacks, with the top-level count normalized to one. One result is shared by all display uses; changing another component still synchronizes that value but reuses the appearance. A stack's `MODEL`, `WORN_MODEL` and `WORN_TEXTURE` override its item's defaults when the callback leaves those choices unset.
 
 ## Models on models
 A second model can sit on a bone of the first, with its own texture and clips, like a tail:
@@ -210,7 +212,7 @@ c.bone_scale(e.id(), "hat", [0.0; 3]);                                    // 0 h
 c.bone_position(e.id(), "tip");                                           // where it was in the world, for sparks off a sword
 c.action_current(e.id());                                                 // what `action_play` has it doing, until its clip is over
 c.clip_length(e.id(), "bow");                                             // seconds
-c.held_item(e.id(), Hand::Main);                                    // the item id in a hand
+c.held(e.id(), Hand::Main);                                                // the public stack in a hand
 ```
 The bones are looked for in the entity's model and in what it holds and has on. An entity out of the view isn't posed, so `bone_position` has nothing for it, and far away a pose lasts a few frames. This runs on each client by itself, so nobody else's swing is exactly yours. A kind with `.own_effects()` gets no steps and such from the engine, its `client_entity_frame` does them.
 

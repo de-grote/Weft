@@ -296,18 +296,24 @@ async fn energy_grid(t: T, g: [i32; 3]) -> R {
     Ok(())
 }
 
-/// Navigation finds the way around a wall through its only gap.
+/// Bodies of different sizes choose openings they fit through.
 async fn pathfinding(t: T, o: [i32; 3]) -> R {
-    t.fill(add(o, [3, 0, -6]), add(o, [3, 2, 6]), "cobblestone")
-        .await?;
-    t.fill(add(o, [3, 0, 5]), add(o, [3, 1, 5]), "air").await?;
-    let id = spawn(&t, "testmod:idol", o).await?;
-    let goal = add(o, [7, 0, 0]);
-    t.check_eq(t.op(&format!("navigate {id} {}", at(goal))).await?, "1".to_string(), "the walk is accepted");
-    t.secs(8.0).await?;
-    let p = pos_of(&t, id).await?;
-    let d = ((p[0] - goal[0] as f64 - 0.5).powi(2) + (p[2] - goal[2] as f64 - 0.5).powi(2)).sqrt();
-    t.check(d < 1.5, format!("the idol walked around the wall ({:.1} {:.1}, {d:.1} from the target)", p[0], p[2]));
+    for (width, height) in [(0.6_f64, 1.1_f64), (1.4, 0.9), (2.4, 2.4)] {
+        t.fill(add(o, [3, 0, -7]), add(o, [3, 3, 7]), "cobblestone")
+            .await?;
+        t.fill(add(o, [3, 0, 0]), add(o, [3, 1, 0]), "air").await?;
+        t.fill(add(o, [3, 0, 4]), add(o, [3, height.ceil() as i32 - 1, 4 + width.ceil() as i32 - 1]), "air")
+            .await?;
+        let id = spawn(&t, "testmod:idol", o).await?;
+        t.op(&format!("size {id} {width} {height}")).await?;
+        let goal = add(o, [7, 0, 0]);
+        t.check_eq(t.op(&format!("navigate {id} {}", at(goal))).await?, "1".to_string(), "the walk is accepted");
+        t.secs(8.0).await?;
+        let p = pos_of(&t, id).await?;
+        let d = ((p[0] - goal[0] as f64 - 0.5).powi(2) + (p[2] - goal[2] as f64 - 0.5).powi(2)).sqrt();
+        t.check(d < 1.5, format!("{width} x {height} body walked through a fitting gap ({:.1} {:.1}, {d:.1} from target)", p[0], p[2]));
+        t.op(&format!("remove {id}")).await?;
+    }
     Ok(())
 }
 

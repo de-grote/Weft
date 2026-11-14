@@ -1051,8 +1051,9 @@ impl EntityBuilder<'_> {
     pub fn light_at(self, x: f32, y: f32, z: f32) -> Self {
         self.set(&comps::entity::LIGHT_AT, [x, y, z])
     }
-    /// Slots of its inventory everyone around sees (what a pedestal holds): their items give
-    /// their light, and clients read them as `core:shown` (`[u32]`, 0 empty).
+    /// Shares these inventory slots as public stacks, preserving order and empty slots.
+    /// Clients read them with `Client::displayed` (`DisplaySource::Shown`); their light is
+    /// independent of whether a model draws them.
     pub fn shown_slots(self, slots: &[u32]) -> Self {
         self.set(&comps::entity::SHOWN_SLOTS, slots.to_vec())
     }
@@ -2105,7 +2106,7 @@ impl DeclarationBuilder<'_> {
             .flags(&abi::comp::component::FLAGS, flags)
     }
     /// Stacks carry it, with `stack_flags`.
-    pub(crate) fn stack(self, flags: u32) -> Self {
+    pub fn stack(self, flags: u32) -> Self {
         self.tag(abi::comp::component::STACK)
             .flags(&abi::comp::component::STACK_FLAGS, flags)
     }

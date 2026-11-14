@@ -324,7 +324,7 @@ impl Client {
             fov: if effects { eye.fov } else { eye.fov / self.player.fov_mul / self.inside_fov() } * pose.fov,
             bob: (glam::Vec3::ZERO, pose.roll, 0.0),
         };
-        if effects {
+        if effects || m.has(cf::BOB) {
             let bob = self.bobbed(cam).bob;
             cam.bob = (bob.0, bob.1 + pose.roll, bob.2);
         }

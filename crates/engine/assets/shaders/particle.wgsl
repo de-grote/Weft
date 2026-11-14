@@ -39,7 +39,7 @@ fn shade(in: VOut) -> vec4<f32> {
     var color = unpack_color(in.data.x);
     color = particle_shade(in.data.y >> PARTICLE_SLOT_SHIFT, ParticleFrag(in.quad, albedo, color, in.life, scene.params.w));
     if in.data.w != 0xffffffffu {
-        let light = lightmap(unpack_light(in.data.w), scene.params.z, scene.light.x, scene.light.y, scene.light.w);
+        let light = lightmap(unpack_light(in.data.w), scene.params.z, scene.light.x, scene.light.y, scene.light.w, scene.environment.x);
         color = vec4(color.rgb * pow(light, vec3(2.2)), color.a);
     }
     let fog = fog_amount(in.dist, scene.params.x, scene.params.y);

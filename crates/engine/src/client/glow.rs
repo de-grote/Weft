@@ -10,7 +10,6 @@ use super::ClientEntity;
 use super::world::ClientWorld;
 use crate::content::Content;
 use crate::world::{DIRS, cube_of};
-use weft_abi::ItemStack;
 
 /// Sources nearest the camera that are drawn; far ones hardly show.
 const MAX_SOURCES: usize = 64;
@@ -29,15 +28,7 @@ pub fn with_glow(l: u32, g: [u8; 3]) -> u32 {
 /// Where an entity's light comes from and what it gives off: its own `LIGHT` (`stored`, else its
 /// kind's), its effects' (fire's while it burns) and every stack it shows (in hand, worn, a dropped
 /// one), the brightest of each channel.
-pub fn entity_glow(
-    c: &Content,
-    e: &ClientEntity,
-    now: u64,
-    pos: DVec3,
-    yaw: f32,
-    stored: Option<&[u8]>,
-    stacks: &[ItemStack],
-) -> (DVec3, [u8; 3]) {
+pub fn entity_glow(c: &Content, e: &ClientEntity, now: u64, pos: DVec3, yaw: f32, stored: Option<&[u8]>) -> (DVec3, [u8; 3]) {
     let kind = &c.game.entities[e.kind as usize];
     let own = stored
         .and_then(|b| b.try_into().ok())
@@ -51,12 +42,7 @@ pub fn entity_glow(
     let light = effects
         .filter_map(|f| c.game.entity_effects.get(f as usize))
         .map(|d| d.light)
-        .chain(
-            stacks
-                .iter()
-                .filter(|s| !s.is_empty())
-                .map(|s| c.stack_light(s)),
-        )
+        .chain(e.displayed().map(|s| c.stack_light(&s)))
         .fold(own, brightest);
     (pos + crate::world::turned(kind.light_at, yaw), light)
 }

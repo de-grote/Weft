@@ -134,7 +134,7 @@ A kind of entity: mobs, players, projectiles, moving platforms, block entities. 
 | `SEATS` | `[Seat]` | none | `.seat` |
 | `ATTACH` | `[Attach]` | none | components each one carries, starting as the kind's own value (`.attach`, `.attach_with`, `.attach_storage`) |
 | `LIGHT_AT` | `[f32;3]` | its middle, a block entity's block | where its light comes from, from its feet, +Z ahead, turned with it (`.light_at`) |
-| `SHOWN_SLOTS` | `[u32]` | none | inventory slots everyone around sees, in `core:shown` (`.shown_slots`) |
+| `SHOWN_SLOTS` | `[u32]` | none | inventory slots shared as public stacks (`.shown_slots`, `Client::displayed`) |
 | `ON_TICK`, `ON_INTERACT`, `STEER`, `DISMOUNT` | callback | none | `.on_tick`, `.on_interact`, `.steering`, seat exits |
 | `FRAMES` | `[callback]` | none | client frame hooks (`r.client_entity_frame`) |
 | `SLOT_GROUPS`, `INVENTORY_MENU` | `[SlotGroupDef]`, `str` | 9 + 27 | the player's inventory (`r.player_slots`, `r.player_menu`) |

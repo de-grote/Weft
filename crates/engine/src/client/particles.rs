@@ -340,41 +340,28 @@ impl Particles {
         if !pos.is_finite() {
             return;
         }
-        // Block dust shows the block's side texture (a box model's first box's).
+        // Dust uses the side's base layer, with that layer's own tint.
         let looks = super::looks::current();
-        let side = |s: &crate::content::StateInfo| {
-            let d = looks.drawn(b.block as u32, s);
-            match d.boxes.first() {
-                Some(b) if d.model == weft_abi::BlockModel::Boxes => b.textures[1],
-                // A piece of wire shows its dot, red: the picture has no color of its own.
-                _ if d.model == weft_abi::BlockModel::Wire => d.textures[3],
-                _ => d.textures[1],
-            }
-        };
         let dust = c
             .states
             .get(b.block as usize)
             .filter(|_| k.frames.is_empty());
-        let layer = dust.map_or(0, side);
-        // Only if the side it shows is a tinted one: grass blocks' sides are dirt with a tinted
-        // overlay, and their dust stays brown like vanilla's. Wire's picture is gray, its red
-        // comes from its power when drawn: dust takes vanilla's wire at middling power.
-        let dust_tint = if dust.is_some_and(|s| s.model == weft_abi::BlockModel::Wire) {
-            0xC8_1414
-        } else {
-            dust.filter(|s| s.tint != 0 && s.tint_faces & 2 != 0)
-                .map_or(0xFF_FFFF, |s| {
-                    let p = pos.floor().as_ivec3();
-                    let biome = world
-                        .cube(p >> 4i32)
-                        .map_or(0, |cube| cube.biome((p.x & 15) as usize, (p.z & 15) as usize));
-                    c.biomes
-                        .get(biome as usize)
-                        .and_then(|b| b.tints.get(s.tint as usize - 1))
-                        .copied()
-                        .unwrap_or_else(|| crate::content::item_tint(s.tint))
-                })
-        };
+        let (layer, dust_tint) = dust.map_or((0, 0xFF_FFFF), |s| {
+            let d = looks.drawn(b.block, s);
+            let (tex, dir) = match d.boxes.first() {
+                Some(b) if d.model == weft_abi::BlockModel::Boxes => (b.textures[1], 1),
+                _ if d.model == weft_abi::BlockModel::Wire => (d.textures[3], 3),
+                _ => (d.textures[1], 1),
+            };
+            let layer = super::mesher::face_layers(c, s, tex & crate::gpu_layout::face::TEX_MASK, dir)[0];
+            let p = pos.floor().as_ivec3();
+            let biome = world
+                .cube(p >> 4i32)
+                .map(|cube| cube.biome((p.x & 15) as usize, (p.z & 15) as usize));
+            // Wire's gray picture takes the color of wire at middling power.
+            let tint = if d.model == weft_abi::BlockModel::Wire { 0xC8_1414 } else { c.kind_color(layer.tint, biome) };
+            (layer.tex, tint)
+        });
         let tint = multiply(dust_tint, b.color & 0xFF_FFFF);
         // Drawn apart by how they blend and kept apart by how long they live; bursts beyond
         // what there is room for are dropped.

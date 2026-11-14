@@ -116,7 +116,6 @@ pub mod entity_effect {
     pub static BENEFICIAL: crate::Tag<EntityEffect> = crate::Tag::named(crate::abi::comp::ENTITY_EFFECT_BENEFICIAL);
     pub static HARMFUL: crate::Tag<EntityEffect> = crate::Tag::named(crate::abi::comp::ENTITY_EFFECT_HARMFUL);
     pub static INSTANT: crate::Tag<EntityEffect> = crate::Tag::named(crate::abi::comp::ENTITY_EFFECT_INSTANT);
-    pub static SCREEN: Component<Text, EntityEffect> = Component::named(crate::abi::comp::ENTITY_EFFECT_SCREEN);
     pub static HIDES: crate::Tag<EntityEffect> = crate::Tag::named(crate::abi::comp::ENTITY_EFFECT_HIDES);
     pub static ON_TICK: Component<crate::abi::Callback, EntityEffect> = Component::named(crate::abi::comp::ENTITY_EFFECT_ON_TICK);
 }
@@ -408,7 +407,7 @@ pub mod feature {
 /// How a liquid flows and looks from inside (`abi::comp::liquid`).
 pub mod liquid {
     use crate::Component;
-    use crate::abi::{self, comp::liquid as l};
+    use crate::abi::comp::liquid as l;
     use crate::kind::Liquid;
     pub static DELAY: Component<u32, Liquid> = Component::named(l::DELAY);
     pub static DROP_OFF: Component<u32, Liquid> = Component::named(l::DROP_OFF);
@@ -416,8 +415,6 @@ pub mod liquid {
     pub static RENEWABLE: Component<u32, Liquid> = Component::named(l::RENEWABLE);
     pub static DENSITY: Component<i32, Liquid> = Component::named(l::DENSITY);
     pub static HEAT: Component<u32, Liquid> = Component::named(l::HEAT);
-    pub static FOG: Component<abi::LiquidFog, Liquid> = Component::named(l::FOG);
-    pub static OVERLAY: Component<abi::LiquidOverlay, Liquid> = Component::named(l::OVERLAY);
 }
 
 /// What a liquid reaction is made of (`abi::comp::reaction`).
@@ -566,6 +563,7 @@ pub mod block {
     pub static LIGHT_OPACITY: Component<u8, Block> = Component::named(b::LIGHT_OPACITY);
     pub static LAYER: Component<u32, Block> = Component::named(b::LAYER);
     pub static MODEL: Component<u32, Block> = Component::named(b::MODEL);
+    pub static ITEM_FACE: Component<u8, Block> = Component::named(b::ITEM_FACE);
     pub static TEXTURES: Component<[String; 6], Block> = Component::named(b::TEXTURES);
     pub static TURNS: Component<[u8; 6], Block> = Component::named(b::TURNS);
     pub static TURN: Component<u8, Block> = Component::named(b::TURN);

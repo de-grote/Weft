@@ -375,7 +375,7 @@ fn decorate(g: &mut Gen) {
             if y == 0 && roll >= grass_chance.max(0.08) {
                 continue;
             }
-            let below = if y == 0 { g.surface_block(wx, wz) } else { g.get(x, y - 1, z) };
+            let below = g.read([wx, oy + y as i32 - 1, wz]);
             if PLANT_SOIL.on_block(below) {
                 if roll < 0.012 {
                     let flower = FLOWERS

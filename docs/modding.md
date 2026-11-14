@@ -272,10 +272,12 @@ The rest is split by what you are making. Each page starts with the common case 
 **The world from code**
 
 - [World API](world-api.md): positions, blocks, entities, raycasts, hitboxes, particles, sounds
+- [Reading generation](worldgen.md#reading-generation): `p.read(pos)`, spatial searches and postprocessing with `abi::stage::POST_PROCESS`
 
 **Client side**
 
 - [Client](client.md): keys, packets, settings, frame hooks
+- [Environment](environment.md): fog, sky lighting, overlays, post effects and acoustics from content or live code
 - [UI](ui.md), [camera modes](details/camera.md), [models and animations](models.md), [shaders](shaders.md)
 
 **Assets and systems**

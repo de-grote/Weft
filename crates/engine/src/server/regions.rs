@@ -303,7 +303,7 @@ impl DimSet {
             let mut args = abi::SpawnArgs { seed: self.seed, pos: pos.into() };
             host::invoke(by, cb, &mut args);
             pos = args.pos.to_array();
-        } else if let Some(p) = search_spawn(c, def, self.seed) {
+        } else if let Some(p) = search_spawn(c, def, self.id, self.seed) {
             pos = p;
         }
         DVec3::new(pos[0] as f64 + 0.5, pos[1] as f64 + 1.0, pos[2] as f64 + 0.5)
@@ -584,7 +584,7 @@ impl DimSet {
 
 /// Open ground near 0, 0 on the dimension's columns: biomes tagged `spawn_biome` first, then
 /// any land above the sea, never where caves took the ground or in a scattered thing (trees).
-fn search_spawn(c: &Content, def: &crate::content::DimensionDef, seed: u64) -> Option<[i32; 3]> {
+fn search_spawn(c: &Content, def: &crate::content::DimensionDef, dim: u32, seed: u64) -> Option<[i32; 3]> {
     def.column(seed, 0, 0)?;
     let sea = def.sea_level().unwrap_or(i32::MIN + 2);
     let preferred = c.components.id(abi::comp::SPAWN_BIOME);
@@ -595,7 +595,7 @@ fn search_spawn(c: &Content, def: &crate::content::DimensionDef, seed: u64) -> O
             && col.height > sea + 1
             && biome_ok
             && !def.carved(seed, x, z)
-            && !crate::features::stands_near(c, def, seed, x, z))
+            && !crate::features::stands_near(c, def, dim, seed, x, z))
         .then_some([x, col.height, z])
     };
     for prefer in [true, false] {

@@ -91,4 +91,8 @@ r.sky_dome(&OVERWORLD, &AURORA).shader(&AURORA_SHADER);
 ## The sky's colors
 Behind everything there is a gradient from the `sky_color(sky, fog)` of the dimension, with the sky color above and the fog color at the horizon, and both of them get darker during the night like in vanilla. A dome with an opaque texture simply covers this gradient.
 
-If you are inside a liquid, the sky is replaced by the fog of that liquid, and you can read about `fog` and `overlay` in [liquids](details/liquids.md).
+The video settings have separate cloud elevation and render-distance sliders. Cloud distance
+is a camera-centered radius in blocks, with fog fading at its edge; mods can override it with
+`Environment::cloud_fog(start, end)` independently of world fog.
+
+Liquids supply environment presets that hide the sky and set their own fog. See [liquids](details/liquids.md) for the convenience methods and [environment sources](environment.md) for live overrides of fog, sky objects, illumination and clouds.

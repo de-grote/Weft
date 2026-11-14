@@ -555,7 +555,9 @@ pub fn client_holds(client: Option<&crate::client::Client>, e: &Expr, a: &Ask) -
             return Some(v);
         }
         let def = c.game.conditions.get(id as usize)?;
-        let enclosed = || client.is_some_and(|cl| cl.enclosed());
+        let enclosed = || {
+            client.is_some_and(|cl| crate::world::light::enclosed(&c.dims[cl.world.dim as usize], cl.world.light(a.pos.floor().as_ivec3())))
+        };
         Some(match def.answer {
             Answer::Engine => match id {
                 k::DAY => client.is_some_and(|cl| cl.daylight() > 0.5),
@@ -585,7 +587,7 @@ pub fn client_holds(client: Option<&crate::client::Client>, e: &Expr, a: &Ask) -
                     world: std::ptr::null_mut(),
                     client: v.raw(),
                     pos: a.pos.to_array().into(),
-                    entity: 0,
+                    entity: a.entity,
                     arg: abi::Str::new(text),
                     result: 0,
                 };

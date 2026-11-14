@@ -22,7 +22,7 @@ use std::ops::{Add, Bound, Mul, Neg, RangeBounds, Sub};
 use crate::abi::{self, ExprStep as Step, expr as ek, rule_field as rf};
 use crate::comps::terrain as t;
 use crate::noise::fixed::{ONE, q4, q12, salt};
-use crate::{Dimension, Gen, Registry, WithComponents, host, qualify};
+use crate::{Dimension, Gen, Registry, WithComponents, qualify};
 
 /// Surface `height` and `biome` id of a column.
 pub type Column = abi::TerrainColumn;
@@ -619,17 +619,21 @@ impl TerrainBuilder<'_> {
 }
 
 impl Dimension {
+    /// Inspect the deterministic result before `stage` (use `abi::stage::POST_PROCESS`
+    /// for terrain, structures and vegetation), without loading the live world.
+    pub fn generation(&self, seed: u64, stage: u32) -> crate::Generation<'_> {
+        crate::Generation::new(abi::GenSource { dim: self.id(), seed, before: stage, ctx: std::ptr::null() })
+    }
     /// Height and biome of column (`x`, `z`) for `seed`, generated or not: from the terrain or
     /// the dimension's `column`. A dimension with neither gives height `i32::MIN`.
     pub fn column(&self, seed: u64, x: i32, z: i32) -> Column {
-        let mut out = Column { height: i32::MIN, biome: 0 };
-        unsafe { (host().dim_column)(self.id(), seed, x, z, &mut out) };
-        out
+        self.generation(seed, abi::stage::UNDERGROUND).column(x, z)
     }
 
     /// Whether caves took the surface block of column (`x`, `z`), so nothing should stand there.
     pub fn surface_carved(&self, seed: u64, x: i32, z: i32) -> bool {
-        unsafe { (host().dim_surface_carved)(self.id(), seed, x, z) != 0 }
+        self.generation(seed, abi::stage::UNDERGROUND)
+            .surface_carved(x, z)
     }
 }
 
@@ -647,20 +651,16 @@ impl Gen {
 
     /// Any column of this dimension, in world coordinates.
     pub fn column(&self, x: i32, z: i32) -> Column {
-        let mut out = Column { height: i32::MIN, biome: 0 };
-        unsafe { (host().dim_column)(self.args.dim, self.args.seed, x, z, &mut out) };
-        out
+        self.view().column(x, z)
     }
 
     /// Whether caves took the surface block of column (`x`, `z`), in world coordinates.
     pub fn surface_carved(&self, x: i32, z: i32) -> bool {
-        unsafe { (host().dim_surface_carved)(self.args.dim, self.args.seed, x, z) != 0 }
+        self.view().surface_carved(x, z)
     }
 
-    /// The block the terrain leaves at the top of column (`x`, `z`), in world coordinates: 0
-    /// where caves took it or the dimension has no terrain. `get` only sees this cube, so this is
-    /// how to know the ground under its lowest layer.
+    /// The block at the terrain's reference surface, in this callback's generation view.
     pub fn surface_block(&self, x: i32, z: i32) -> u32 {
-        unsafe { (host().dim_surface_block)(self.args.dim, self.args.seed, x, z) }
+        self.view().surface_block(x, z)
     }
 }

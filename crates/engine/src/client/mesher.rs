@@ -152,104 +152,84 @@ fn draw_block(
     let drawn = looks.drawn(s, info);
     let tile = ctm.model(c, n, x, y, z, s);
     let boxes = tile.unwrap_or(drawn.boxes);
-    let textures = drawn.textures;
-    let model = if tile.is_some() { BlockModel::Boxes } else { drawn.model };
-    match model {
-        // Drawn apart, for its power to change without a new mesh (`wires.rs`).
-        BlockModel::None | BlockModel::Wire => {}
-        BlockModel::Cube => {
+    // Wire is drawn separately so its power changes without remeshing.
+    if tile.is_none() && matches!(drawn.model, BlockModel::None | BlockModel::Wire) {
+        return;
+    }
+    if let Some(cube) = crate::content::ModelBox::full_cube(boxes) {
+        let textures = cube.textures;
+        for dir in 0..6 {
+            let [dx, dy, dz] = NORMALS[dir];
+            let ni = pidx(x + dx, y + dy, z + dz);
+            if face_hidden(c, ctm, s, n.states[ni]) {
+                continue;
+            }
+            let (ao, light) = corner_data(c, n, ctm, opaque, x, y, z, dir);
+            for (k, l) in face_layers(c, info, textures[dir] & face::TEX_MASK, dir)
+                .iter()
+                .enumerate()
+            {
+                // Each layer connects by its own picture's rules.
+                let tex = ctm.resolve(c, n, x, y, z, dir, l.tex, [0; 3]);
+                // All that is translucent is kept far to near as one list of quads.
+                if info.layer == RenderLayer::Translucent {
+                    let corners = CORNERS[dir].map(|k| [(x + k[0]) as f32, (y + k[1]) as f32, (z + k[2]) as f32]);
+                    let light: [u32; 4] = std::array::from_fn(|k| darker_by_ao(light[k], (ao >> (k * 2)) & 3));
+                    let rotated = |i: usize| (i + cube.turn[dir] as usize) % 4;
+                    let corners = std::array::from_fn(|i| corners[rotated(i)]);
+                    let light = std::array::from_fn(|i| light[rotated(i)]);
+                    mesh.quads[RenderLayer::Translucent as usize].push(quad(corners, WHOLE, tex, biome, l.tint, light));
+                } else {
+                    mesh.faces[if k == 0 { info.layer as usize } else { UPPER }].push(crate::gpu_layout::face_record(
+                        [x, y, z],
+                        dir as u32,
+                        ao,
+                        l.tint as u32,
+                        cube.turn[dir] as u32,
+                        tex,
+                        biome,
+                        light,
+                    ));
+                }
+            }
+        }
+    } else {
+        let l = light16(n.light[i]);
+        // A file's model on a block with no holes may have them, which a texture
+        // of a block with none wouldn't get to show otherwise.
+        let layer = if info.layer == RenderLayer::Opaque { RenderLayer::Cutout } else { info.layer };
+        // No light is kept inside an opaque block, whatever a pack drew there,
+        // nor in others like it next to it: the brightest around goes for all.
+        let dark_inside = info.flags & bf::OPAQUE != 0;
+        let l = if dark_inside { light16(brightest_around(n, x, y, z)) } else { l };
+        for bx in boxes {
+            let center = std::array::from_fn(|a| (bx.min[a] + bx.max[a]) * 0.5);
+            let center = if bx.tilt.degrees == 0.0 { center } else { tilted(center, &bx.tilt) };
+            let at = [x, y, z].map(|v| v as f32);
+            let sample: [i32; 3] = std::array::from_fn(|a| ((at[a] + center[a]).floor() as i32).clamp(-1, 16));
+            let l = if dark_inside { l } else { light16(n.light[pidx(sample[0], sample[1], sample[2])]) };
             for dir in 0..6 {
                 let [dx, dy, dz] = NORMALS[dir];
-                let ni = pidx(x + dx, y + dy, z + dz);
-                if face_hidden(c, ctm, s, n.states[ni]) {
+                let axis = dir / 2;
+                // Against one neighbor only if it stays in the cell along the other axes: a
+                // big block's box runs past several.
+                let within = (0..3).all(|a| a == axis || (bx.min[a] >= 0.0 && bx.max[a] <= 1.0));
+                let at_edge = bx.tilt.degrees == 0.0 && within && if dir % 2 == 0 { bx.min[axis] <= 0.0 } else { bx.max[axis] >= 1.0 };
+                let (ns, nl) = (n.states[pidx(x + dx, y + dy, z + dz)], n.light[pidx(x + dx, y + dy, z + dz)]);
+                if at_edge && ctm.hides(c.states[ns as usize].flags, ns) {
                     continue;
                 }
-                let (ao, light) = corner_data(c, n, ctm, opaque, x, y, z, dir);
-                for (k, l) in face_layers(c, info, textures[dir] & face::TEX_MASK, dir)
+                let fl = if at_edge && !dark_inside { light16(nl) } else { l };
+                let Some((corners, uv)) = box_face(bx, dir) else { continue };
+                let corners = corners.map(|p| [p[0] + x as f32, p[1] + y as f32, p[2] + z as f32]);
+                for (k, l) in face_layers(c, info, bx.textures[dir] & face::TEX_MASK, dir)
                     .iter()
                     .enumerate()
                 {
-                    // Each layer connects by its own picture's rules.
-                    let tex = ctm.resolve(c, n, x, y, z, dir, l.tex);
-                    // All that is translucent is kept far to near as one list of quads.
-                    if info.layer == RenderLayer::Translucent {
-                        let corners = CORNERS[dir].map(|k| [(x + k[0]) as f32, (y + k[1]) as f32, (z + k[2]) as f32]);
-                        let light = std::array::from_fn(|k| darker_by_ao(light[k], (ao >> (k * 2)) & 3));
-                        mesh.quads[RenderLayer::Translucent as usize].push(quad(corners, WHOLE, tex, biome, l.tint, light));
-                    } else {
-                        mesh.faces[if k == 0 { info.layer as usize } else { UPPER }].push(crate::gpu_layout::face_record(
-                            [x, y, z],
-                            dir as u32,
-                            ao,
-                            l.tint as u32,
-                            info.turns[dir] as u32,
-                            tex,
-                            biome,
-                            light,
-                        ));
-                    }
-                }
-            }
-        }
-        BlockModel::Cross => {
-            // A tall plant (a cell above its own) has a cross there too, showing its top face's
-            // picture, as a plant shows its side's.
-            let tall = info.cells.iter().any(|c| c.0 == glam::IVec3::Y);
-            for (dy, side) in [(0, 0), (1, 3)].into_iter().take(1 + tall as usize) {
-                let l = light16(n.light[pidx(x, y + dy, z)]);
-                let b = [x as f32, (y + dy) as f32, z as f32];
-                let e = 0.15;
-                let (a0, a1) = ([b[0] + e, b[1], b[2] + e], [b[0] + 1.0 - e, b[1] + 1.0, b[2] + 1.0 - e]);
-                let (c0, c1) = ([b[0] + e, b[1], b[2] + 1.0 - e], [b[0] + 1.0 - e, b[1] + 1.0, b[2] + e]);
-                for (k, layer) in face_layers(c, info, textures[side] & face::TEX_MASK, side)
-                    .iter()
-                    .enumerate()
-                {
-                    let t = ctm.resolve(c, n, x, y + dy, z, 0, layer.tex);
-                    let to = if k == 0 { RenderLayer::Cutout as usize } else { UPPER };
-                    for (p0, p1) in [(a0, a1), (c0, c1)] {
-                        let corners = [[p0[0], p0[1], p0[2]], [p1[0], p0[1], p1[2]], [p1[0], p1[1], p1[2]], [p0[0], p1[1], p0[2]]];
-                        let back = [corners[1], corners[0], corners[3], corners[2]];
-                        for q in [corners, back] {
-                            mesh.quads[to].push(quad(q, WHOLE, t, biome, layer.tint | FLAT, [l; 4]));
-                        }
-                    }
-                }
-            }
-        }
-        BlockModel::Boxes => {
-            let l = light16(n.light[i]);
-            // A file's model on a block with no holes may have them, which a texture
-            // of a block with none wouldn't get to show otherwise.
-            let layer = if info.layer == RenderLayer::Opaque { RenderLayer::Cutout } else { info.layer };
-            // No light is kept inside an opaque block, whatever a pack drew there,
-            // nor in others like it next to it: the brightest around goes for all.
-            let dark_inside = info.flags & bf::OPAQUE != 0;
-            let l = if dark_inside { light16(brightest_around(n, x, y, z)) } else { l };
-            for bx in boxes {
-                for dir in 0..6 {
-                    let [dx, dy, dz] = NORMALS[dir];
-                    let axis = dir / 2;
-                    // Against one neighbor only if it stays in the cell along the other axes: a
-                    // big block's box runs past several.
-                    let within = (0..3).all(|a| a == axis || (bx.min[a] >= 0.0 && bx.max[a] <= 1.0));
-                    let at_edge = bx.tilt.degrees == 0.0 && within && if dir % 2 == 0 { bx.min[axis] <= 0.0 } else { bx.max[axis] >= 1.0 };
-                    let (ns, nl) = (n.states[pidx(x + dx, y + dy, z + dz)], n.light[pidx(x + dx, y + dy, z + dz)]);
-                    if at_edge && ctm.hides(c.states[ns as usize].flags, ns) {
-                        continue;
-                    }
-                    let fl = if at_edge && !dark_inside { light16(nl) } else { l };
-                    let Some((corners, uv)) = box_face(bx, dir) else { continue };
-                    let corners = corners.map(|p| [p[0] + x as f32, p[1] + y as f32, p[2] + z as f32]);
-                    for (k, l) in face_layers(c, info, bx.textures[dir] & face::TEX_MASK, dir)
-                        .iter()
-                        .enumerate()
-                    {
-                        let tex = ctm.resolve(c, n, x, y, z, dir, l.tex);
-                        let tint = l.tint | if bx.flat { FLAT } else { 0 };
-                        let to = if k == 0 || layer == RenderLayer::Translucent { layer as usize } else { UPPER };
-                        mesh.quads[to].push(quad(corners, uv, tex, biome, tint, [fl; 4]));
-                    }
+                    let tex = ctm.resolve(c, n, x, y, z, dir, l.tex, [sample[0] - x, sample[1] - y, sample[2] - z]);
+                    let tint = l.tint | if bx.flat { FLAT } else { 0 };
+                    let to = if k == 0 || layer == RenderLayer::Translucent { layer as usize } else { UPPER };
+                    mesh.quads[to].push(quad(corners, uv, tex, biome, tint, [fl; 4]));
                 }
             }
         }

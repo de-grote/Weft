@@ -187,7 +187,7 @@ pub async fn armor(t: T) -> R {
     t.op(&format!("put {z} 0 iron_sword 1")).await?;
     let id: u64 = z.trim().parse().map_err(|_| format!("spawn zombie: {z}"))?;
     let sword = Item::named("base:iron_sword").id();
-    t.until("the zombie holds the sword", Duration::from_secs(3), |t| t.c().view().component_of(id, &HELD) == Some(sword))
+    t.until("the zombie holds the sword", Duration::from_secs(3), |t| t.c().held(id, weft_sdk::Hand::Main).item == sword)
         .await?;
     t.c().set_look((-3f32).atan2(2.0).to_degrees(), -10.0);
     t.secs(0.5).await?;
@@ -1695,7 +1695,6 @@ pub async fn burning(t: T) -> R {
 }
 
 static ON_FIRE: Component<u8> = Component::named("core:burning");
-static HELD: Component<u32> = Component::named("core:held");
 
 /// Fields the engine keeps on entities reach clients like any synced component: a pig in lava
 /// shows on fire and losing health, and stays for its death animation once the server drops it.

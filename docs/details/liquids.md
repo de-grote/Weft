@@ -7,10 +7,13 @@
 - `renewable(n)`: a new source where n sources meet (water 2)
 - `heat` (roughly Kelvin, 1000 and more burns)
 - what can swim in it isn't the liquid's say: an entity kind's `SWIMS_IN` (which blocks, base gives players `#water`) and the same on anything it wears, so a suit with `.set_text(&SWIMS_IN, "#lava")` swims in lava. It changes nothing else: a burning liquid keeps burning unless `actions::HURT` says no
-- `fog(rgb, blocks)` and `overlay(texture, opacity)` or `no_overlay()`: what you see from inside. By default both come from its texture; set them when the inside should look different from the surface: `r.liquid(&TAR).fog(0x1A1408, 6.0).overlay("tar_inside", 0.4)`
+- `fog(rgb, start, end)` and `overlay(texture, opacity)` or `no_overlay()`: what you see from inside. By default both come from its texture; set them when the inside should look different from the surface: `r.liquid(&TAR).fog(0x1A1408, 0.0, 6.0).overlay("tar_inside", 0.4)`
 - `bucket(..)`
 
-Another mod's liquid: `r.edit(WATER.liquid()).fog(0x204020, 12.0)`, any of the above; what you don't set stays, and `.block(..)` there edits its block.
+Another mod's liquid: `r.edit(WATER.liquid()).fog(0x204020, -8.0, 12.0)`, any of the above; what you don't set stays, and `.block(..)` there edits its block.
+
+Fog, overlays and sound are independent [environment sources](../environment.md).
+A liquid has no audio filter unless one is configured with `.environment(..)`.
 
 ## Reactions
 

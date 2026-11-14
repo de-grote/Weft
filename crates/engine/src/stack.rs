@@ -16,6 +16,7 @@ pub type Data = Arc<[(u32, Box<[u8]>)]>;
 struct Interner {
     list: Vec<Data>,
     index: FxHashMap<Data, u32>,
+    projections: FxHashMap<(u32, Projection), u32>,
 }
 
 fn table() -> &'static RwLock<Interner> {
@@ -24,7 +25,7 @@ fn table() -> &'static RwLock<Interner> {
         let empty: Data = Arc::from(Vec::new());
         let mut index = FxHashMap::default();
         index.insert(empty.clone(), 0);
-        RwLock::new(Interner { list: vec![empty], index })
+        RwLock::new(Interner { list: vec![empty], index, projections: FxHashMap::default() })
     })
 }
 
@@ -102,27 +103,91 @@ pub fn layers(stack: &ItemStack) -> Option<&'static str> {
     let c = crate::content::try_content()?;
     c.ids
         .layers
-        .and_then(|l| value(stack.data, l))
-        .and_then(|b| std::str::from_utf8(b).ok())
+        .filter(|&id| value(stack.data, id).is_some())
+        .and_then(|_| text(*stack, weft_abi::comp::LAYERS))
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| condition_texture(c, stack))
+        .or_else(|| {
+            let t = look(*stack).texture;
+            (!t.is_empty()).then_some(t)
+        })
         .or_else(|| c.items.get(stack.item as usize)?.layers.as_deref())
 }
 
-/// What the item's `condition` says `stack` shows as, asked once per kind of stack.
-fn condition_texture(c: &crate::content::Content, stack: &ItemStack) -> Option<&'static str> {
-    static SEEN: std::sync::LazyLock<RwLock<FxHashMap<(u32, u32), Option<&'static str>>>> = std::sync::LazyLock::new(Default::default);
-    let &(owner, cb) = c.game.item_model_for_stack.get(&stack.item)?;
-    let key = (stack.item, stack.data);
-    if let Some(&t) = SEEN.read().get(&key) {
-        return t;
+/// The data that can change a model, shared by every place a stack is displayed.
+pub fn visual_key(stack: ItemStack) -> (u32, u32) {
+    (stack.item, projected(stack.data, Projection::Visual))
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Look {
+    pub model: &'static str,
+    pub texture: &'static str,
+    pub worn_model: &'static str,
+    pub worn_texture: &'static str,
+}
+
+/// One conditional result for models, textures and every display context.
+pub fn look(stack: ItemStack) -> Look {
+    static SEEN: std::sync::LazyLock<RwLock<FxHashMap<(u32, u32), Look>>> = std::sync::LazyLock::new(Default::default);
+    let c = crate::content::content();
+    let Some(&(owner, cb)) = c.game.item_model_for_stack.get(&stack.item) else { return Look::default() };
+    let key = visual_key(stack);
+    if let Some(&look) = SEEN.read().get(&key) {
+        return look;
     }
-    let mut a = weft_abi::ItemModelArgs { stack: *stack, model: weft_abi::Str::new(""), texture: weft_abi::Str::new("") };
-    crate::host::invoke(owner, cb, &mut a);
-    let t = unsafe { a.texture.as_str() };
-    let t = (!t.is_empty()).then(|| &*Box::leak(t.to_string().into_boxed_str()));
-    SEEN.write().insert(key, t);
-    t
+    let empty = weft_abi::Str::new("");
+    let mut args = weft_abi::ItemModelArgs {
+        stack: ItemStack { item: key.0, count: 1, data: key.1 },
+        model: empty,
+        texture: empty,
+        worn_model: empty,
+        worn_texture: empty,
+    };
+    crate::host::invoke(owner, cb, &mut args);
+    let keep = |s: weft_abi::Str| -> &'static str {
+        let text = unsafe { s.as_str() };
+        if text.is_empty() { "" } else { Box::leak(text.to_string().into_boxed_str()) }
+    };
+    let look = Look {
+        model: keep(args.model),
+        texture: keep(args.texture),
+        worn_model: keep(args.worn_model),
+        worn_texture: keep(args.worn_texture),
+    };
+    SEEN.write().insert(key, look);
+    look
+}
+
+/// The asset to resolve for a use of a displayed stack. Being shown does not imply being worn.
+pub fn model(stack: ItemStack, worn: bool) -> Option<&'static str> {
+    if stack.is_empty() {
+        return None;
+    }
+    let look = look(stack);
+    let (said, component) = if worn { (look.worn_model, weft_abi::comp::WORN_MODEL) } else { (look.model, weft_abi::comp::MODEL) };
+    if !said.is_empty() {
+        return Some(said);
+    }
+    if worn {
+        text(stack, component)
+    } else {
+        let id = crate::content::content().components.id(component)?;
+        value(stack.data, id)?;
+        text(stack, component)
+    }
+}
+
+/// Stack text is packed data, while frozen item text is owned by its component table.
+pub fn text(stack: ItemStack, name: &str) -> Option<&'static str> {
+    let c = crate::content::content();
+    let id = c.components.id(name)?;
+    if let Some(bytes) = value(stack.data, id) {
+        use weft_abi::data::Data;
+        let mut rest = bytes;
+        let len = u32::read(&mut rest)? as usize;
+        return std::str::from_utf8(rest.get(..len)?).ok();
+    }
+    c.components.text(crate::components::ITEM, stack.item, id)
 }
 
 /// `layers` text as (texture name, tint 0xRRGGBB) pairs, white where none is given. A layer
@@ -172,34 +237,84 @@ pub fn with_damage(stack: ItemStack, damage: u32) -> ItemStack {
     ItemStack { data: with(stack.data, comp, (damage > 0).then_some(&bytes[..])), ..stack }
 }
 
-fn without(data: u32, flag: u32) -> u32 {
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Projection {
+    Client,
+    Save,
+    Visual,
+}
+
+fn projected(data: u32, projection: Projection) -> u32 {
+    use weft_abi::stack_flags as flags;
+    if data == 0 {
+        return 0;
+    }
+    if let Some(&known) = table().read().projections.get(&(data, projection)) {
+        return known;
+    }
     let Some(c) = crate::content::try_content() else { return data };
-    if data == 0 || c.stack_flags.is_empty() {
-        return data;
-    }
-    let d = get(data);
-    if !d
-        .iter()
-        .any(|(id, _)| c.stack_flags.get(id).is_some_and(|f| f & flag != 0))
-    {
-        return data;
-    }
-    intern(
-        d.iter()
-            .filter(|(id, _)| !c.stack_flags.get(id).is_some_and(|f| f & flag != 0))
-            .cloned()
+    let (include, exclude) = match projection {
+        Projection::Client => (0, flags::SERVER_ONLY),
+        Projection::Save => (0, flags::NO_SAVE),
+        Projection::Visual => (flags::VISUAL, flags::SERVER_ONLY),
+    };
+    let result = intern(
+        get(data)
+            .iter()
+            .filter_map(|(id, bytes)| {
+                let flags = c.stack_flags.get(id).copied().unwrap_or(0);
+                if flags & exclude != 0 || include != 0 && flags & include == 0 {
+                    return None;
+                }
+                let mut bytes = bytes.clone();
+                if holds_stacks(c, *id) {
+                    for stack in bytes.chunks_exact_mut(12) {
+                        let data = u32::from_le_bytes(stack[8..12].try_into().unwrap());
+                        stack[8..12].copy_from_slice(&projected(data, projection).to_le_bytes());
+                    }
+                }
+                Some((*id, bytes))
+            })
             .collect(),
-    )
+    );
+    table()
+        .write()
+        .projections
+        .insert((data, projection), result);
+    result
 }
 
 /// The stack as clients may see it: without `SERVER_ONLY` components.
 pub fn for_client(s: ItemStack) -> ItemStack {
-    ItemStack { data: without(s.data, weft_abi::stack_flags::SERVER_ONLY), ..s }
+    ItemStack { data: projected(s.data, Projection::Client), ..s }
+}
+
+pub fn client_bytes(stack: ItemStack) -> Vec<u8> {
+    use crate::net::codec::Wire;
+    let mut out = crate::net::codec::W::default();
+    if !stack.is_empty() {
+        for_client(stack).put(&mut out);
+    }
+    out.0
+}
+
+/// Public stacks in slot order, using the same codec as inventories and dropped items.
+pub fn shown_bytes(stacks: &[ItemStack]) -> Vec<u8> {
+    use crate::net::codec::Wire;
+    if stacks.is_empty() {
+        return Vec::new();
+    }
+    let mut out = crate::net::codec::W::default();
+    (stacks.len() as u32).put(&mut out);
+    for &stack in stacks {
+        for_client(stack).put(&mut out);
+    }
+    out.0
 }
 
 /// Stack data to write to saves: without `NO_SAVE` components.
 pub fn for_save(data: u32) -> u32 {
-    without(data, weft_abi::stack_flags::NO_SAVE)
+    projected(data, Projection::Save)
 }
 
 /// Components by name, for saves and the network; names the reader does not know are dropped.

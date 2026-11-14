@@ -520,23 +520,24 @@ impl Terrain {
     /// Whether caves took the block at the surface of column (`x`, `z`): decorations placed from
     /// outside the cube (trees) and spawn search check it so they do not float over pits.
     pub fn surface_carved(&self, seed: u64, x: i32, z: i32) -> bool {
-        if self.caves.is_none() {
-            return false;
-        }
         let h = self.column(seed, x, z).height;
-        if self.sea.is_some_and(|s| h <= s.0) {
+        self.carved_at(seed, x, h, z)
+    }
+
+    fn carved_at(&self, seed: u64, x: i32, y: i32, z: i32) -> bool {
+        let h = self.column(seed, x, z).height;
+        if self.caves.is_none() || y > h || self.sea.is_some_and(|s| h <= s.0 && y > h - 4) {
             return false;
         }
-        let (gx, gy, gz) = (x.div_euclid(4) * 4, h.div_euclid(4) * 4, z.div_euclid(4) * 4);
+        let (gx, gy, gz) = (x.div_euclid(4) * 4, y.div_euclid(4) * 4, z.div_euclid(4) * 4);
         let (t, c) = interpolate(
             |dy, dz, dx| cave_node(seed, gx + dx as i32 * 4, gy + dy as i32 * 4, gz + dz as i32 * 4),
             (x - gx) as usize,
-            (h - gy) as usize,
+            (y - gy) as usize,
             (z - gz) as usize,
         );
-        let corners: [i32; 4] = [(0, 0), (1, 0), (0, 1), (1, 1)].map(|(dx, dz)| self.column(seed, gx + dx * 4, gz + dz * 4).height);
-        let smooth = smooth4(corners, (x - gx) as i32, (z - gz) as i32);
-        carves(t > 0, c, cavern_roof(seed, x, z), smooth - h * 16)
+        let corners = [(0, 0), (1, 0), (0, 1), (1, 1)].map(|(dx, dz)| self.column(seed, gx + dx * 4, gz + dz * 4).height);
+        carves(t > 0, c, cavern_roof(seed, x, z), smooth4(corners, x - gx, z - gz) - y * 16)
     }
 
     /// What rule `rule` puts at the top of a column `h` high, before caves.
@@ -554,15 +555,55 @@ impl Terrain {
     /// The block generation leaves at the top of column (`x`, `z`), 0 where caves took it: the
     /// ground of a decoration on the lowest layer of a cube is in the cube below.
     pub fn surface_block(&self, seed: u64, x: i32, z: i32) -> u32 {
-        if self.surface_carved(seed, x, z) {
-            return 0;
-        }
-        let cols = self.columns(seed, x.div_euclid(16), z.div_euclid(16));
-        let i = (z.rem_euclid(16) * 16 + x.rem_euclid(16)) as usize;
-        self.surface_of(cols.rules[i], cols.cols[i].height)
+        self.read(seed, x, self.column(seed, x, z).height, z)
     }
 
-    /// Smoothed surface height (Q4) at local column (x, z) from the cube's corner grid.
+    /// The same cell evaluation as cube generation, without generating a cube.
+    pub fn read(&self, seed: u64, x: i32, y: i32, z: i32) -> u32 {
+        let cols = self.columns(seed, x.div_euclid(16), z.div_euclid(16));
+        let i = (z.rem_euclid(16) * 16 + x.rem_euclid(16)) as usize;
+        self.state(seed, y, cols.cols[i].height, cols.rules[i], self.carved_at(seed, x, y, z))
+    }
+
+    fn state(&self, seed: u64, y: i32, h: i32, rule: u32, carved: bool) -> u32 {
+        let sea = self.sea.map_or(i32::MIN, |s| s.0);
+        let rule_def = self.rules.get(rule as usize);
+        if let Some(c) = self.caves.as_ref().filter(|_| carved) {
+            return match lake(seed, y).filter(|_| (c.lava_from..c.lava_to).contains(&y)) {
+                Some(true) => c.lava,
+                Some(false) => self.stone,
+                None => 0,
+            };
+        }
+        if y > h {
+            return if y <= sea {
+                if y == sea {
+                    rule_def
+                        .and_then(|r| r.ice)
+                        .unwrap_or_else(|| self.sea.map_or(0, |s| s.1))
+                } else {
+                    self.sea.map_or(0, |s| s.1)
+                }
+            } else {
+                0
+            };
+        }
+        if rule_def.and_then(|r| r.bare_above).is_some_and(|v| h > v) {
+            return self.stone;
+        }
+        if y == h {
+            return self.surface_of(rule, h);
+        }
+        let depth = rule_def.map_or(0, |r| r.depth);
+        if y >= h - depth {
+            return match rule_def.and_then(|r| r.under) {
+                Some((b, layers)) if y < h - depth + layers => b,
+                _ => rule_def.and_then(|r| r.filler).unwrap_or(self.stone),
+            };
+        }
+        self.stone
+    }
+
     fn smooth(corners: &[i32; 25], x: usize, z: usize) -> i32 {
         let (cx, cz) = (x / 4, z / 4);
         let c = |dx: usize, dz: usize| corners[(cz + dz) * 5 + cx + dx];
@@ -600,19 +641,10 @@ impl Terrain {
                     .height
             })
         });
-        let stone = self.stone;
-        let water = self.sea.map_or(0, |s| s.1);
         for z in 0..16usize {
             for x in 0..16usize {
                 let i = z * 16 + x;
                 let h = cols.cols[i].height;
-                let rule = self.rules.get(cols.rules[i] as usize);
-                let bare = rule.and_then(|r| r.bare_above).is_some_and(|y| h > y);
-                let top = self.surface_of(cols.rules[i], h);
-                let filler = rule.and_then(|r| r.filler).unwrap_or(stone);
-                let depth = rule.map_or(0, |r| r.depth);
-                let under = rule.and_then(|r| r.under);
-                let ice = rule.and_then(|r| r.ice);
                 let closed = if cave.is_some() { cavern_roof(seed, ox + x as i32, oz + z as i32) } else { 0 };
                 let smooth = Self::smooth(&corners, x, z);
                 // Keeps a seal under water so seas and canyons do not drain into caves.
@@ -624,28 +656,7 @@ impl Terrain {
                 };
                 for y in 0..16usize {
                     let wy = oy + y as i32;
-                    let mut s = if wy > h {
-                        if wy <= sea { if wy == sea { ice.unwrap_or(water) } else { water } } else { 0 }
-                    } else if bare {
-                        stone
-                    } else if wy == h {
-                        top
-                    } else if wy >= h - depth {
-                        match under {
-                            Some((b, layers)) if wy < h - depth + layers => b,
-                            _ => filler,
-                        }
-                    } else {
-                        stone
-                    };
-                    if let Some(c) = self.caves.as_ref().filter(|_| carved(y)) {
-                        s = match lake(seed, wy).filter(|_| (c.lava_from..c.lava_to).contains(&wy)) {
-                            Some(true) => c.lava,
-                            Some(false) => stone,
-                            None => 0,
-                        };
-                    }
-                    blocks[(y * 16 + z) * 16 + x] = s;
+                    blocks[(y * 16 + z) * 16 + x] = self.state(seed, wy, h, cols.rules[i], carved(y));
                 }
             }
         }
@@ -911,6 +922,33 @@ mod tests {
                     let h = t.column(3, x, z).height;
                     let made = cube(&t, 3, [cx, h >> 4, cz])[((h & 15) as usize * 16 + i / 16) * 16 + i % 16];
                     assert_eq!(made, t.surface_block(3, x, z), "at {x} {z}");
+                }
+            }
+        }
+    }
+
+    /// Point reads and cube generation share material, cave, sea and surface decisions.
+    #[test]
+    fn reads_match_cubes() {
+        let mut r = rule(0);
+        r.top = Some(3);
+        r.filler = Some(4);
+        r.under = Some((5, 2));
+        r.ice = Some(6);
+        r.deep_top = Some((8, 62));
+        r.bare_above = Some(72);
+        let mut t = terrain(vec![hills(16, 110)], vec![r], Some(7), 64.0);
+        t.sea = Some((64, 2));
+        for seed in [3, 11] {
+            for cx in -1..=1 {
+                for cz in -1..=1 {
+                    for cy in [-2, 0, 3, 4, 5] {
+                        let made = cube(&t, seed, [cx, cy, cz]);
+                        for i in (0..4096).step_by(13) {
+                            let (x, y, z) = (cx * 16 + (i % 16) as i32, cy * 16 + (i / 256) as i32, cz * 16 + (i / 16 % 16) as i32);
+                            assert_eq!(made[i], t.read(seed, x, y, z), "seed {seed}, at {x} {y} {z}");
+                        }
+                    }
                 }
             }
         }

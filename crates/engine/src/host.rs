@@ -121,7 +121,10 @@ pub static HOST: Host = Host {
     client_bone_position: crate::app::api::client_bone_position,
     client_action_current: crate::app::api::client_entity_action,
     client_clip_length: crate::app::api::client_clip_length,
-    client_held_item: crate::app::api::client_entity_held,
+    environment_set,
+    client_environment_set: crate::app::api::client_environment_set,
+    client_environment_values: crate::app::api::client_environment_values,
+    client_displayed: crate::app::api::client_displayed,
     reg_packet,
     reg_mistake,
     launch_option: crate::app::api::launch_option,
@@ -203,6 +206,7 @@ pub static HOST: Host = Host {
     place,
     unplace,
     plan_op,
+    generation_read,
     template_size,
     template_joints,
     world_seed,
@@ -221,8 +225,6 @@ pub static HOST: Host = Host {
     body_move_to,
     signal_read_changed,
     dim_column,
-    dim_surface_carved,
-    dim_surface_block,
     ease,
     force_load,
     asset_exists,
@@ -273,6 +275,26 @@ unsafe extern "C" fn place(w: *mut abi::WorldCtx, name: Str, pos: *const abi::Bl
 
 unsafe extern "C" fn unplace(w: *mut abi::WorldCtx, placing: u64) -> u32 {
     unsafe { dim(w).unplace(content(), placing) as u32 }
+}
+
+unsafe extern "C" fn generation_read(source: *const abi::GenSource, pos: abi::BlockPos) -> u32 {
+    let Some(source) = (unsafe { source.as_ref() }) else { return 0 };
+    let c = content();
+    if source.dim as usize >= c.dims.len() {
+        return 0;
+    }
+    let pos = crate::world::ivec(pos);
+    if source.ctx.is_null() {
+        if !crate::generation::can_read(source) {
+            misuse("generation_read", || {
+                "a generation callback cannot read its own or a later stage's output; use its borrowed view".into()
+            });
+            return 0;
+        }
+        crate::generation::Snapshot::new(c, source.dim, source.seed, source.before).read(pos)
+    } else {
+        unsafe { (&*source.ctx.cast::<crate::generation::ReadCtx>()).read(pos) }
+    }
 }
 
 unsafe extern "C" fn plan_op(ctx: *mut abi::PlanCtx, op: *const abi::PlanOp) -> u32 {
@@ -1384,6 +1406,36 @@ unsafe extern "C" fn component_get(w: *mut abi::WorldCtx, h: *const abi::Holder,
     }
 }
 
+unsafe extern "C" fn environment_set(w: *mut abi::WorldCtx, entity: u64, name: abi::Str, data: abi::Slice<u8>) -> u32 {
+    unsafe {
+        let d = dim(w);
+        if d.entities.get(entity).is_none_or(|e| e.removed) {
+            return 0;
+        }
+        let c = content();
+        let id = c.components.id(abi::environment::COMPONENT).unwrap();
+        let old = d
+            .entities
+            .comps
+            .get(&(entity, id))
+            .map_or(&[][..], |b| b.as_ref());
+        let mut layers: Vec<abi::environment::EnvironmentLayer> = abi::data::from_bytes(old).unwrap_or_default();
+        let key = name.as_str();
+        if !data.as_slice().is_empty() {
+            let Some(mut layer) = abi::data::from_bytes::<abi::environment::EnvironmentLayer>(data.as_slice()) else { return 0 };
+            layer.name = key.to_string();
+            layers.retain(|l| l.name != key);
+            layers.push(layer);
+        } else {
+            layers.retain(|l| l.name != key);
+        }
+        d.entities
+            .comps
+            .insert((entity, id), abi::data::bytes_of(&layers).into_boxed_slice());
+        1
+    }
+}
+
 unsafe extern "C" fn component_set(w: *mut abi::WorldCtx, h: *const abi::Holder, comp: u32, value: abi::Slice<u8>) -> u32 {
     unsafe {
         let v = value.as_slice();
@@ -1876,20 +1928,6 @@ unsafe extern "C" fn dim_column(dim: u32, seed: u64, x: i32, z: i32, out: *mut a
     };
     unsafe { *out = col };
     1
-}
-
-unsafe extern "C" fn dim_surface_carved(dim: u32, seed: u64, x: i32, z: i32) -> u32 {
-    content()
-        .dims
-        .get(dim as usize)
-        .is_some_and(|d| d.carved(seed, x, z)) as u32
-}
-
-unsafe extern "C" fn dim_surface_block(dim: u32, seed: u64, x: i32, z: i32) -> u32 {
-    content()
-        .dims
-        .get(dim as usize)
-        .map_or(0, |d| d.surface_block(seed, x, z))
 }
 
 unsafe extern "C" fn reg_command(r: *mut abi::Registrar, name: Str, usage: Str, client: u32, cb: Callback) {

@@ -237,7 +237,7 @@ fn ranges(v: &str) -> Vec<(i32, i32)> {
 
 /// Whether something drawn other than as a cube shows `tex`, on a face in `faces`.
 fn off_cube(d: &Drawn, tex: u32, faces: u8) -> bool {
-    d.model != weft_abi::BlockModel::Cube && (0..6).any(|f| faces & (1 << f) != 0 && d.on_face(f).contains(&tex))
+    d.cube().is_none() && (0..6).any(|f| faces & (1 << f) != 0 && d.on_face(f).contains(&tex))
 }
 
 /// The tile `name` as a model, if it has a file. A face the file names no texture for shows the
@@ -570,7 +570,7 @@ impl Ctm {
             .enumerate()
             .map(|(st, s)| {
                 let d = looks.drawn(st as u32, s);
-                let plain = d.model == weft_abi::BlockModel::Cube
+                let plain = d.cube().is_some_and(|b| b.textures == s.textures)
                     && d.textures == s.textures
                     && !s
                         .textures
@@ -647,7 +647,7 @@ impl Ctm {
             .get(state as usize)
             .filter(|f| f.1 != NO_MODEL)?;
         let &(start, len) = self.by_texture.get(tex as usize)?;
-        let (rule, tile) = self.pick(c, n, x, y, z, dir as usize, tex, start as usize..(start + len) as usize)?;
+        let (rule, tile) = self.pick(c, n, x, y, z, dir as usize, tex, start as usize..(start + len) as usize, [0; 3])?;
         self.models
             .get(*rule.models.get(tile)? as usize)
             .map(Vec::as_slice)
@@ -656,10 +656,10 @@ impl Ctm {
     /// Texture for face `dir` of the block at `(x, y, z)` in the cube, `tex` being its plain one.
     #[inline]
     #[allow(clippy::too_many_arguments)]
-    pub fn resolve(&self, c: &Content, n: &Neighborhood, x: i32, y: i32, z: i32, dir: usize, tex: u32) -> u32 {
+    pub fn resolve(&self, c: &Content, n: &Neighborhood, x: i32, y: i32, z: i32, dir: usize, tex: u32, offset: [i32; 3]) -> u32 {
         match self.by_texture.get(tex as usize) {
             Some(&(start, len)) if len > 0 => self
-                .pick(c, n, x, y, z, dir, tex, start as usize..(start + len) as usize)
+                .pick(c, n, x, y, z, dir, tex, start as usize..(start + len) as usize, offset)
                 .map_or(tex, |(rule, tile)| rule.tiles.get(tile).copied().unwrap_or(tex)),
             _ => tex,
         }
@@ -686,10 +686,11 @@ impl Ctm {
         dir: usize,
         tex: u32,
         rules: std::ops::Range<usize>,
+        offset: [i32; 3],
     ) -> Option<(&Rule, usize)> {
         let s = n.states[pidx(x, y, z)];
         let info = &c.states[s as usize];
-        let world = [n.origin[0] + x, n.origin[1] + y, n.origin[2] + z];
+        let world = [n.origin[0] + x + offset[0], n.origin[1] + y + offset[1], n.origin[2] + z + offset[2]];
         let (r, u) = AXES[dir];
         let nrm = NORMALS[dir];
         let at = |a: i32, b: i32, extra: [i32; 3]| {
@@ -801,13 +802,14 @@ mod tests {
     fn only_what_shows_a_texture_off_a_cube_counts() {
         use weft_abi::BlockModel;
         let (t, sides_only) = ([7; 6], 0b110011);
-        let plain = |model| Drawn { model, boxes: &[], textures: t };
-        assert!(off_cube(&plain(BlockModel::Cross), 7, 0b111111));
-        assert!(!off_cube(&plain(BlockModel::Cross), 8, 0b111111));
-        assert!(!off_cube(&plain(BlockModel::Cube), 7, 0b111111));
-        let top = [ModelBox::whole([0, 0, 0, 7, 0, 0])];
+        let cube = [ModelBox::whole(t)];
+        assert!(!off_cube(&Drawn { model: BlockModel::Boxes, boxes: &cube, textures: t }, 7, 0b111111));
+        let mut top = ModelBox::whole([0, 0, 0, 7, 0, 0]);
+        top.max[1] = 0.5;
+        let top = [top];
         let boxes = Drawn { model: BlockModel::Boxes, boxes: &top, textures: [0; 6] };
         assert!(off_cube(&boxes, 7, 0b111111));
+        assert!(!off_cube(&boxes, 8, 0b111111));
         assert!(!off_cube(&boxes, 7, sides_only), "not on the faces the rule is for");
         // A face the file leaves out holds a texture only to fill the field.
         let mut gone = ModelBox::whole([7; 6]);

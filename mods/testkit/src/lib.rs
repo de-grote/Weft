@@ -8,6 +8,7 @@
 //! `--test-keep` keeps the test worlds. `weft --world w --script file.txt` runs a line script (see `script.rs`).
 //! Without those options the mod only registers its message channels.
 
+mod generation;
 mod runner;
 mod script;
 mod server;
@@ -71,6 +72,7 @@ pub(crate) fn same_conditions(c: &Client) {
     LANGUAGE.set("en_us");
     GUI_SCALE.set(2);
     VIEW_DISTANCE.set(12);
+    CLOUD_DISTANCE.set(6144);
     FOV.set(70.0);
     BRIGHTNESS.set(0.5);
     VSYNC.set(true);

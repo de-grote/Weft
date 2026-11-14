@@ -31,13 +31,38 @@ What a condition is asked about.
 - <a id="ConditionCtx-entity"></a>`.entity() -> u64`: Who it is about (the killer or breaker for loot), 0 for nobody. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L352)
 - <a id="ConditionCtx-arg"></a>`.arg() -> &str`: What is between its parentheses where it is used, empty for none. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L356)
 
+## Environment
+
+A named contribution. Public fields are available through Deref for arbitrary mod code.
+
+- <a id="Environment-new"></a>`.new(name: &str)`: Starts an empty contribution; only explicitly selected fields participate. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L26)
+- <a id="Environment-priority"></a>`.priority(priority: i32)`: Higher priorities apply later. Equal priorities are ordered by source identity. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L30)
+- <a id="Environment-when"></a>`.when(condition: &str)`: Activates while this condition holds at the chosen observation point. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L35)
+- <a id="Environment-blend"></a>`.blend(mode: u32)`: One of REPLACE, ADD, MULTIPLY or MAX, also used for named shader/object weights. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L40)
+- <a id="Environment-fade"></a>`.fade(enter: f32, leave: f32)`: Real seconds to reach full weight, or to disappear after removal/condition failure. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L45)
+- <a id="Environment-observer"></a>`.observer(point: u32)`: CAMERA by default; BODY samples the local player's eyes, even with a detached camera. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L51)
+- <a id="Environment-radius"></a>`.radius(inner: f32, outer: f32)`: An entity-centered zone, full inside inner and zero outside outer, linear between. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L56)
+- <a id="Environment-around"></a>`.around(center: [f64`: A fixed zone instead of following the entity that owns it. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L62)
+- <a id="Environment-fog"></a>`.fog(rgb: u32, start: f32, end: f32)`: Absolute fog color (0xRRGGBB) and explicit start/end distances in blocks. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L68)
+- <a id="Environment-sunlight"></a>`.sunlight(strength: f32)`: Sky illumination, cloud lighting and directional sunlight, independent of sky-object visibility. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L76)
+- <a id="Environment-sky_color"></a>`.sky_color(rgb: u32)`: Absolute sky color (0xRRGGBB), independent of illumination. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L81)
+- <a id="Environment-cloud_color"></a>`.cloud_color(rgb: u32)`: Cloud tint (0xRRGGBB) before lighting, replacing the time/weather tint. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L87)
+- <a id="Environment-cloud_fog"></a>`.cloud_fog(start: f32, end: f32)`: Cloud fog start/end in blocks from the camera, independent of world fog. Zero end hides clouds. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L94)
+- <a id="Environment-sky_opacity"></a>`.sky_opacity(opacity: f32)`: Visibility of the complete sky, including clouds. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L100)
+- <a id="Environment-sky_object"></a>`.sky_object(object: &crate::SkyObject, opacity: f32)`: Visibility of a dimension-qualified object (`DIM.sky(&SUN)`), including sunset glow. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L105)
+- <a id="Environment-acoustics"></a>`.acoustics(cutoff_hz: f32, reverb: f32, volume: f32)`: World low-pass cutoff in Hz, linear reverb send and linear volume gain. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L111)
+- <a id="Environment-overlay"></a>`.overlay(texture: &str, opacity: f32)`: Appends a screen texture; relative paths start at this mod's textures directory, without `.png`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L118)
+- <a id="Environment-post"></a>`.post(shader: &crate::Shader, strength: f32)`: Adds a named post shader at this strength. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L131)
+- <a id="Environment-replace_overlays"></a>`.replace_overlays(mut self)`: Crossfades out preceding overlays, even when this layer adds none. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L137)
+- <a id="Environment-replace_post"></a>`.replace_post(mut self)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/environment.rs#L141)
+
 ## MusicBuilder
 
 Background music being registered (`Registry::music`): after a quiet while, a track of the first music whose conditions hold.
 
-- <a id="MusicBuilder-tracks"></a>`.tracks(names: &[&str])`: Files streamed (`sounds/<name>.ogg|.wav`), relative to this mod. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L542)
-- <a id="MusicBuilder-dimension"></a>`.dimension(dimension: &crate::Dimension)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L546)
-- <a id="MusicBuilder-when"></a>`.when(c: impl Into<crate::Cond>)`: Plays only while this holds (`&conditions::NIGHT`, a mod's own, any `Cond`); call again for more, all of which have to hold. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L551)
+- <a id="MusicBuilder-tracks"></a>`.tracks(names: &[&str])`: Files streamed (`sounds/<name>.ogg|.wav`), relative to this mod. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L548)
+- <a id="MusicBuilder-dimension"></a>`.dimension(dimension: &crate::Dimension)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L552)
+- <a id="MusicBuilder-when"></a>`.when(c: impl Into<crate::Cond>)`: Plays only while this holds (`&conditions::NIGHT`, a mod's own, any `Cond`); call again for more, all of which have to hold. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L557)
 
 ## ParticleBuilder
 
@@ -65,19 +90,19 @@ A particle kind being registered (`Registry::particle`): half a second to a seco
 
 A sound about to play (`Output::play_sound`).
 
-- <a id="PlaySound-to"></a>`.to(who: impl Into<crate::Who>)`: Who hears it, of the players on the server (those in its range unless said). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L599)
-- <a id="PlaySound-pitch"></a>`.pitch(pitch: f32)`: Playback speed (1 = as recorded, 2 an octave up) instead of one picked from the sound's range: a note block's `2f32.powf((key - 12) as f32 / 12.0)`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L605)
+- <a id="PlaySound-to"></a>`.to(who: impl Into<crate::Who>)`: Who hears it, of the players on the server (those in its range unless said). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L605)
+- <a id="PlaySound-pitch"></a>`.pitch(pitch: f32)`: Playback speed (1 = as recorded, 2 an octave up) instead of one picked from the sound's range: a note block's `2f32.powf((key - 12) as f32 / 12.0)`. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L611)
 
 ## SoundBuilder
 
 A sound event being registered (`Registry::sound`): at volume 1 and as recorded, heard 16 blocks away, a block sound, unless told otherwise.
 
-- <a id="SoundBuilder-files"></a>`.files(names: &[&str])`: Variants picked at random: `sounds/<name>.ogg` or `.wav`, relative to this mod. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L490)
-- <a id="SoundBuilder-category"></a>`.category(category: &SoundCategory)`: Category for its volume setting: the engine's (`core:creatures` ...) or one registered with `Registry::sound_category` (any mod's). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L496)
-- <a id="SoundBuilder-volume"></a>`.volume(v: f32)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L499)
-- <a id="SoundBuilder-pitch"></a>`.pitch(min: f32, max: f32)`: Playback speed picked between the two. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L503)
-- <a id="SoundBuilder-range"></a>`.range(blocks: f32)`: Blocks away it is still heard. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L507)
-- <a id="SoundBuilder-falloff"></a>`.falloff(full_within: f32, curve: Falloff)`: Full volume within `full_within` blocks, then fading to nothing at `range` along `curve` (by default within 1 block, evenly). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L512)
+- <a id="SoundBuilder-files"></a>`.files(names: &[&str])`: Variants picked at random: `sounds/<name>.ogg` or `.wav`, relative to this mod. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L496)
+- <a id="SoundBuilder-category"></a>`.category(category: &SoundCategory)`: Category for its volume setting: the engine's (`core:creatures` ...) or one registered with `Registry::sound_category` (any mod's). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L502)
+- <a id="SoundBuilder-volume"></a>`.volume(v: f32)` [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L505)
+- <a id="SoundBuilder-pitch"></a>`.pitch(min: f32, max: f32)`: Playback speed picked between the two. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L509)
+- <a id="SoundBuilder-range"></a>`.range(blocks: f32)`: Blocks away it is still heard. [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L513)
+- <a id="SoundBuilder-falloff"></a>`.falloff(full_within: f32, curve: Falloff)`: Full volume within `full_within` blocks, then fading to nothing at `range` along `curve` (by default within 1 block, evenly). [source](https://github.com/Weft-Rust/Weft/blob/master/crates/sdk/src/effects.rs#L518)
 
 ## Then
 

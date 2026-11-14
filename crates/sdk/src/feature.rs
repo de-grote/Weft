@@ -200,7 +200,7 @@ impl FeatureBuilder<'_> {
     pub fn stage(self, stage: u32) -> Self {
         self.set(&f::STAGE, stage)
     }
-    /// After `other` in the same dimension.
+    /// After `other` in the same stage. Stage order cannot be reversed.
     pub fn after(self, other: &Feature) -> Self {
         self.push(&f::AFTER, other.name().to_string())
     }
@@ -255,8 +255,8 @@ impl FeatureBuilder<'_> {
     pub fn buried(self, blocks: i32) -> Self {
         self.set(&f::BURIED, blocks)
     }
-    /// One with a higher priority keeps it `separation` blocks away; only what really stands
-    /// counts.
+    /// One with a higher priority in this or an earlier stage keeps it `separation` blocks
+    /// away; only what really stands counts.
     pub fn priority(self, p: i32) -> Self {
         self.set(&f::PRIORITY, p)
     }
@@ -308,8 +308,8 @@ impl FeatureBuilder<'_> {
     pub fn palette(self, p: &Palette) -> Self {
         self.push(&f::PALETTES, p.name().to_string())
     }
-    /// `f` lays out each start: blocks, templates, entities. It runs once per start, on the
-    /// server and on clients alike, so it may use only the seed (`p.random()`) and the ground.
+    /// Lays out each start on the server and clients alike. `p.read` sees the completed
+    /// earlier stages and this plan's own writes; `p.random()` is deterministic.
     pub fn plan(self, f: impl Fn(&mut Plan) + Send + Sync + 'static) -> Self {
         self.set(&f::SHAPE, abi::shape::PLAN)
             .set(&f::PLAN, callback(move |a: &mut abi::PlanArgs| f(Plan::wrap(a))))
@@ -415,6 +415,13 @@ impl Plan {
     fn wrap(a: &mut abi::PlanArgs) -> &mut Plan {
         unsafe { &mut *(a as *mut abi::PlanArgs as *mut Plan) }
     }
+    pub fn view(&self) -> crate::Generation<'_> {
+        crate::Generation::new(self.args.source)
+    }
+    /// A block in the earlier stages and this plan's own writes, in world coordinates.
+    pub fn read(&self, pos: impl Into<BlockPos>) -> u32 {
+        self.view().read(pos)
+    }
     /// The start: the block above the ground for one on a grid.
     pub fn pos(&self) -> BlockPos {
         self.args.pos
@@ -480,13 +487,11 @@ impl Plan {
 
     /// The ground of column (`x`, `z`): its height and biome.
     pub fn ground(&self, x: i32, z: i32) -> Column {
-        let mut out = Column { height: i32::MIN, biome: 0 };
-        unsafe { (host().dim_column)(self.args.dim, self.args.seed, x, z, &mut out) };
-        out
+        self.view().column(x, z)
     }
     /// Whether caves took the surface block of column (`x`, `z`).
     pub fn surface_carved(&self, x: i32, z: i32) -> bool {
-        unsafe { (host().dim_surface_carved)(self.args.dim, self.args.seed, x, z) != 0 }
+        self.view().surface_carved(x, z)
     }
     /// Template `t`'s size once placed with `transform`; zero for none.
     pub fn size(&self, t: &Template, transform: Transform) -> BlockPos {
@@ -500,21 +505,7 @@ impl Plan {
     /// (`x`, `z`): its lowest corner on the ground (its middle column's), if the ground under it
     /// varies by at most `max_slope` and caves took none of it.
     pub fn fit(&self, t: &Template, x: i32, z: i32, transform: Transform, max_slope: i32) -> Option<BlockPos> {
-        let s = self.size(t, transform);
-        if s.x <= 0 {
-            return None;
-        }
-        let mid = self.ground(x + s.x / 2, z + s.z / 2).height;
-        let (mut lo, mut hi) = (mid, mid);
-        for (cx, cz) in [(x, z), (x + s.x - 1, z), (x, z + s.z - 1), (x + s.x - 1, z + s.z - 1)] {
-            if self.surface_carved(cx, cz) {
-                return None;
-            }
-            let h = self.ground(cx, cz).height;
-            lo = lo.min(h);
-            hi = hi.max(h);
-        }
-        (mid != i32::MIN && hi - lo <= max_slope).then_some(BlockPos { x, y: mid + 1, z })
+        self.view().fit(x, z, self.size(t, transform), max_slope)
     }
 
     /// Joins pieces from `pools` onto template `start` (placed at `corner` with `transform`)

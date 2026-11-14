@@ -231,7 +231,6 @@ wire_struct! {
         pub pos: DVec3,
         pub yaw: f32,
         pub pitch: f32,
-        pub item: ItemStack,
         // The tick it came into the world (`Moves::tick`'s), its clips' clock.
         pub born: u64,
         // Where its body faces (`physics::turn_body`) and its legs are, for those seeing it from now on.

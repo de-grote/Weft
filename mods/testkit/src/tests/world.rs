@@ -1375,3 +1375,54 @@ pub async fn big_blocks(t: T) -> R {
     }
     Ok(())
 }
+
+/// Snapshot reads agree with actual generation across boundaries and do not observe same-phase peers.
+pub async fn generation_reads(t: T) -> R {
+    t.flat().await?;
+    let d = &crate::generation::DIM;
+    let stone = Block::named("base:stone");
+    let gold = Block::named("base:gold_block");
+    let cobble = Block::named("base:cobblestone");
+    let bad = Block::named("base:red_lamp");
+    let raw = d.generation(1, abi::stage::UNDERGROUND);
+    let early = d.generation(1, abi::stage::STRUCTURES);
+    let done = d.generation(1, abi::stage::POST_PROCESS + 1);
+    t.check(raw.all([-17, 7, -1], [17, 7, 1], |s| s == gold.id()), "raw reads include the dimension generator across cubes");
+    t.check(raw.all([-17, 6, -1], [17, 6, 1], |s| s == gold.id()), "the generator's input excludes the generator itself");
+    t.check(early.all([-17, 8, -1], [17, 8, 1], |s| s == cobble.id()), "completed underground phase is visible");
+    t.check(raw.read([0, -1, 0]) == stone.id() && raw.read([0, 32, 0]) == 0, "negative coordinates and dimension bounds");
+    let mut points = Vec::new();
+    let mut plans = 0;
+    for z in -16..16 {
+        for x in -16..16 {
+            for y in [8, 9, 10, 12] {
+                let s = done.read([x, y, z]);
+                t.check(s != bad.id(), format!("generation read invariant at {x} {y} {z}"));
+                plans += (y == 8 && s == gold.id()) as usize;
+                points.push(([x, y, z], s));
+            }
+        }
+    }
+    t.check(plans > 4, format!("{plans} plans checked their own set/put/fill/replace/template writes"));
+    for &(p, s) in points.iter().rev() {
+        t.check_eq(done.read(p), s, "read order does not change the snapshot");
+    }
+    t.check(
+        done.read([1, 12, 0]) == 0 && done.read([0, 12, 0]) == gold.id(),
+        "ordered writers preserve explicit resets to the phase input",
+    );
+    let floor = early.find([15, 12, 0], Dir::Down, 8, |s| s == gold.id());
+    t.check(floor == Some([15, 7, 0].into()), "find crosses from air through another material to the requested surface");
+    t.op("mode spectator").await?;
+    t.cmd("/dim testkit:read_world").await?;
+    t.cmd("/tp 0 14 0").await?;
+    t.loaded().await?;
+    for (p, s) in points.into_iter().step_by(31) {
+        t.check_eq(
+            t.op(&format!("get {}", at(p))).await?,
+            name_of(ek::BLOCK, block_of(s)).to_string(),
+            "generated cubes agree with snapshots",
+        );
+    }
+    Ok(())
+}

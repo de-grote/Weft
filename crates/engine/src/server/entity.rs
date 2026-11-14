@@ -55,8 +55,6 @@ pub struct Entity {
     pub mining: Option<Mining>,
     pub anchor: Option<IVec3>,
     pub sent: Option<(DVec3, f32, f32, crate::world::Pose, bool)>,
-    /// Worn items as last sent to clients.
-    pub worn: Vec<u32>,
     /// The solid body it rides (stands on, or flies above within its carry height).
     /// The body it is on: what it rides, or whose blocks hold it if it has an `anchor`.
     pub frame: Option<u64>,
@@ -225,7 +223,6 @@ impl Entity {
             mining: None,
             anchor: None,
             sent: None,
-            worn: Vec::new(),
             frame: None,
             motion: Motion::Free,
             falls: false,

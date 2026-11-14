@@ -585,10 +585,10 @@ fn bake_sky(e: &Entry, dims: &FxHashMap<String, u32>, errors: &mut Vec<String>) 
     use abi::comp::sky as s;
     use abi::sky_kind as k;
     // Either name may have slashes of its own.
-    let Some((dim, name)) = e
+    let Some(dim) = e
         .name
         .match_indices('/')
-        .find_map(|(i, _)| dims.get(&e.name[..i]).map(|&d| (d, &e.name[i + 1..])))
+        .find_map(|(i, _)| dims.get(&e.name[..i]).copied())
     else {
         errors.push(format!("sky object {}: not <dimension>/<object> of a dimension there is", e.name));
         return None;
@@ -605,7 +605,7 @@ fn bake_sky(e: &Entry, dims: &FxHashMap<String, u32>, errors: &mut Vec<String>) 
     Some((
         dim,
         SkyDef {
-            name: name.to_string(),
+            name: e.name.clone(),
             kind,
             texture,
             shader,
@@ -697,6 +697,8 @@ fn engine_components() -> Vec<RawEntry> {
         (BURNING, "u8", shown, vec![0]),
         (abi::comp::LIGHT, "[u8;3]", own, vec![0; 3]),
         (SHOWN, "bytes", shown, Vec::new()),
+        (GROUND, "bytes", shown, Vec::new()),
+        (abi::environment::COMPONENT, &<Vec<abi::environment::EnvironmentLayer> as abi::data::Data>::schema(), own | cf::SAVE, Vec::new()),
         (WORN, "bytes", shown, Vec::new()),
         (SHAPE, "bytes", own, shape),
         (HELD, "bytes", shown, Vec::new()),
@@ -1311,8 +1313,6 @@ pub struct EntityEffectDef {
     pub kind: u8,
     /// Acts once when given and doesn't stay.
     pub instant: bool,
-    /// A screen shader its player sees through while it has it; empty for none.
-    pub screen: String,
     /// Its entity isn't drawn for others.
     pub hides: bool,
     /// As registered, then resolved at freeze.
@@ -1878,10 +1878,11 @@ pub const TIMERS: &str = "core:timers";
 /// Engine fields clients show, kept as synced components (`Dim::mirror_fields`): health and
 /// max health (`[f32; 2]`, max only for players), on fire (`u8`), worn items (`u32` each), own
 /// size and look (`[f32; 3]` with width 0 for the kind's, `u32` kind with `u32::MAX` for its own),
-/// a player's item in hand (`u32`, 0 for none).
+/// and displayed public stacks (the stack wire codec).
 pub const HEALTH: &str = "core:health";
 pub const BURNING: &str = "core:burning";
 pub const WORN: &str = "core:worn";
+pub const GROUND: &str = "core:ground";
 pub const SHAPE: &str = "core:shape";
 pub const HELD: &str = "core:held";
 pub const OFF_HELD: &str = "core:off_held";
@@ -1898,7 +1899,7 @@ pub const RIDING: &str = "core:riding";
 /// with its body) and its own yaw there (`f32`); empty while it isn't. Clients hold it on the
 /// bone of the model it went into.
 pub const STUCK: &str = "core:stuck";
-/// Entity component (`[u32]`, synced to watchers): the items in its kind's `SHOWN_SLOTS`, 0 empty.
+/// Entity component (stack list wire codec, synced to watchers): its kind's `SHOWN_SLOTS`.
 pub const SHOWN: &str = "core:shown";
 use abi::comp::{ATTRIBUTES, GAME_MODE, PERMISSION};
 /// Entity component (`ItemStack`, not saved): what a player last put in its trash
@@ -1928,6 +1929,7 @@ pub struct FieldComps {
     pub permission: u32,
     pub attributes: u32,
     pub shown: u32,
+    pub ground: u32,
     pub trash: u32,
 }
 
@@ -2237,10 +2239,6 @@ pub fn freeze(
                 effect_kind::NEUTRAL
             },
             instant: e.has(abi::comp::ENTITY_EFFECT_INSTANT),
-            screen: e
-                .text(abi::comp::ENTITY_EFFECT_SCREEN)
-                .unwrap_or_default()
-                .to_string(),
             hides: e.has(abi::comp::ENTITY_EFFECT_HIDES),
             raw_hazards: e.or(abi::comp::ENTITY_EFFECT_HAZARDS, Vec::new()),
             hazards: Vec::new(),
@@ -2450,6 +2448,7 @@ fn freeze_entity_storage(
         permission: id(PERMISSION),
         attributes: id(ATTRIBUTES),
         shown: id(SHOWN),
+        ground: id(GROUND),
         trash: id(TRASH),
     };
     g.simulated_comp = g.component_names[SIMULATED];
@@ -3280,9 +3279,9 @@ mod sky_tests {
         let mut errors = Vec::new();
         let (dim, m) = bake_sky(&moon, &dims, &mut errors).unwrap();
         assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!((dim, m.name.as_str(), m.size, m.phase), (1, "a:moons/1", 40f32.to_radians(), 0.5));
+        assert_eq!((dim, m.name.as_str(), m.size, m.phase), (1, "a:e/a:moons/1", 40f32.to_radians(), 0.5));
         assert!(m.orbit.is_infinite(), "nobody set an orbit, so it follows the day");
-        assert!(bake_sky(&e("a:d/x/stars"), &dims, &mut errors).is_some_and(|(d, s)| d == 0 && s.name == "stars"));
+        assert!(bake_sky(&e("a:d/x/stars"), &dims, &mut errors).is_some_and(|(d, s)| d == 0 && s.name == "a:d/x/stars"));
         assert!(bake_sky(&e("a:f/sun"), &dims, &mut errors).is_none());
     }
 }
@@ -3325,8 +3324,8 @@ fn engine_cameras() -> Vec<RawEntry> {
     };
     vec![
         mode("core:first_person", cf::HAND | cf::HUD | cf::EFFECTS | cf::CYCLE),
-        mode("core:behind", cf::BODY | cf::HUD | cf::CLIP | cf::CYCLE),
-        mode("core:front", cf::BODY | cf::HUD | cf::CLIP | cf::CYCLE),
+        mode("core:behind", cf::BODY | cf::HUD | cf::BOB | cf::CLIP | cf::CYCLE),
+        mode("core:front", cf::BODY | cf::HUD | cf::BOB | cf::CLIP | cf::CYCLE),
         mode("core:free", cf::BODY | cf::SOLID | cf::DETACHED | cf::NO_INTERACT)
             .set(abi::comp::camera::WHEN, vec!["attribute(core:can_fly, 1..)".to_string()])
             .set(abi::comp::camera::KEY, "core:freecam".to_string()),

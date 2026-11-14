@@ -3,8 +3,8 @@
 //! and one loop places them all in order, on the server and on clients alike. Ores, trees,
 //! structures, villages and grass are presets of it.
 //!
-//! Everything comes from the seed and the terrain's columns, never from blocks, so every cube
-//! and every client agrees. A start on a grid is worked out once (`DimensionDef::starts`) and
+//! Plans read deterministic snapshots of completed earlier stages, plus their own writes,
+//! so every cube and every client agrees. A start on a grid is worked out once (`DimensionDef::starts`) and
 //! each cube it reaches takes its part.
 
 use std::sync::Arc;
@@ -25,6 +25,7 @@ pub struct FeatureDef {
     /// Index in `Content::features`.
     pub id: u32,
     pub owner: ModId,
+    pub stage: u32,
     /// From the name, so adding one moves none of the others.
     pub salt: u64,
     pub biome: Option<Box<[u64]>>,
@@ -272,7 +273,14 @@ impl Start {
 /// its burying), the biome, its random bits and the transform its template takes. From the seed
 /// and the columns alone; distant terrain repeats the test for trees exactly
 /// (`terrain_gpu::describe_lod`).
-pub fn grid_site(c: &Content, def: &DimensionDef, f: &FeatureDef, seed: u64, cell: (i32, i32)) -> Option<(IVec3, u32, u64, Transform)> {
+pub fn grid_site(
+    c: &Content,
+    def: &DimensionDef,
+    dim: u32,
+    f: &FeatureDef,
+    seed: u64,
+    cell: (i32, i32),
+) -> Option<(IVec3, u32, u64, Transform)> {
     let Spread::Grid { spacing, chance } = f.spread else { return None };
     let h = hash(seed ^ f.salt, cell.0 as i64, 0, cell.1 as i64);
     let random = hash(h, 1, 2, 3);
@@ -295,13 +303,6 @@ pub fn grid_site(c: &Content, def: &DimensionDef, f: &FeatureDef, seed: u64, cel
     {
         return None;
     }
-    if let Some(ground) = fit.ground {
-        // A zero surface state means there is no usable terrain surface.
-        let state = def.surface_block(seed, mid.0, mid.1);
-        if state == 0 || !c.matchers.has(ground, state) {
-            return None;
-        }
-    }
     let chance = match chance {
         Chance::Fixed(p) => p,
         Chance::Density(d) => d
@@ -311,7 +312,18 @@ pub fn grid_site(c: &Content, def: &DimensionDef, f: &FeatureDef, seed: u64, cel
             })
             .unwrap_or(0.0),
     };
-    if weft_noise::unit(h.rotate_left(17)) >= chance as f64 || (!fit.over_caves && def.carved(seed, mid.0, mid.1)) {
+    if weft_noise::unit(h.rotate_left(17)) >= chance as f64 {
+        return None;
+    }
+    let surface = (fit.ground.is_some() || !fit.over_caves)
+        .then(|| crate::generation::Snapshot::new(c, dim, seed, f.stage).surface_block(mid.0, mid.1));
+    if let Some(ground) = fit.ground {
+        let state = surface.unwrap_or(0);
+        if state == 0 || !c.matchers.has(ground, state) {
+            return None;
+        }
+    }
+    if !fit.over_caves && surface == Some(0) {
         return None;
     }
     if let Some(most) = fit.max_slope {
@@ -334,11 +346,16 @@ pub fn start_at(c: &Content, def: &DimensionDef, dim: u32, seed: u64, fi: usize,
     let cache = def.starts.get(fi)?;
     let made = cache.get(seed, cell.0, cell.1, || {
         let f = &def.features[fi];
-        let (pos, biome, random, t) = grid_site(c, def, f, seed, cell)?;
+        let (pos, biome, random, t) = grid_site(c, def, dim, f, seed, cell)?;
         let start = make_start(c, def, dim, seed, fi, pos, biome, random, t)?;
         let room = IVec3::new(f.separation, 0, f.separation);
         for (gi, g) in def.features.iter().enumerate() {
-            let Some(spacing) = g.grid().filter(|_| g.priority > f.priority) else { continue };
+            let Some(spacing) = g
+                .grid()
+                .filter(|_| g.priority > f.priority && g.stage <= f.stage)
+            else {
+                continue;
+            };
             let (lo, hi) = (start.lo - room - IVec3::splat(g.reach[0]), start.hi + room + IVec3::splat(g.reach[0]));
             for cz in lo.z.div_euclid(spacing)..=hi.z.div_euclid(spacing) {
                 for cx in lo.x.div_euclid(spacing)..=hi.x.div_euclid(spacing) {
@@ -372,13 +389,25 @@ pub fn make_start(
         Shape::Template(id) => {
             let palette = (!f.palettes.is_empty()).then(|| f.palettes[(random >> 48) as usize % f.palettes.len()]);
             let variant = c.templates[*id as usize].variant(c, t, palette);
-            add_piece(def, seed, &mut start, pos, variant, f.write.foundation, f.write.clear_above);
+            let view =
+                crate::generation::ReadCtx { snapshot: crate::generation::Snapshot::new(c, dim, seed, f.stage), local: None, plan: None };
+            let piece = make_piece(&view, pos, variant, f.write.foundation, f.write.clear_above);
+            add_piece(&mut start, piece);
         }
         Shape::Plan(owner, cb) => {
-            let mut ctx = PlanCtx { c, def, seed, fi, random, start, warned: false };
-            let mut args =
-                abi::PlanArgs { seed, dim, pos: pos.to_array().into(), biome, random, ctx: &mut ctx as *mut PlanCtx as *mut abi::PlanCtx };
-            crate::host::invoke(*owner, *cb, &mut args);
+            let mut ctx = PlanCtx { c, def, dim, seed, fi, random, start, warned: false };
+            let snapshot = crate::generation::Snapshot::new(c, dim, seed, f.stage);
+            let read = crate::generation::ReadCtx { snapshot, local: None, plan: Some(std::ptr::addr_of!(ctx.start)) };
+            let mut args = abi::PlanArgs {
+                source: snapshot.source(&read),
+                seed,
+                dim,
+                pos: pos.to_array().into(),
+                biome,
+                random,
+                ctx: std::ptr::addr_of_mut!(ctx).cast(),
+            };
+            crate::generation::during(snapshot, || crate::host::invoke(*owner, *cb, &mut args));
             start = ctx.start;
         }
         Shape::Vein { .. } | Shape::Steps(_) => {
@@ -392,7 +421,9 @@ pub fn make_start(
 
 /// Adds template `variant` at `at` to `start`, with what it stands on and brings.
 #[allow(clippy::too_many_arguments)]
-pub fn add_piece(def: &DimensionDef, seed: u64, start: &mut Start, at: IVec3, variant: Arc<Variant>, foundation: u32, clear_above: bool) {
+pub fn make_piece(view: &crate::generation::ReadCtx<'_>, at: IVec3, variant: Arc<Variant>, foundation: u32, clear_above: bool) -> Piece {
+    let snapshot = view.snapshot;
+    let (def, seed) = (snapshot.def(), snapshot.seed);
     let size = variant.size;
     let needs_ground = foundation != 0 || clear_above || variant.cells.iter().any(|c| c.1 == GROUND);
     let ground: Arc<[(i32, u32)]> = if needs_ground {
@@ -400,12 +431,17 @@ pub fn add_piece(def: &DimensionDef, seed: u64, start: &mut Start, at: IVec3, va
             .flat_map(|z| (0..size.x).map(move |x| (x, z)))
             .map(|(x, z)| {
                 let (wx, wz) = (at.x + x, at.z + z);
-                (def.column(seed, wx, wz).map_or(i32::MIN, |c| c.height), def.surface_block(seed, wx, wz))
+                (def.column(seed, wx, wz).map_or(i32::MIN, |c| c.height), view.surface_block(wx, wz))
             })
             .collect()
     } else {
         Arc::from([])
     };
+    Piece { at, variant, foundation, clear_above, ground }
+}
+
+pub fn add_piece(start: &mut Start, piece: Piece) {
+    let (at, variant) = (piece.at, &piece.variant);
     for (p, kind, data) in &variant.entities {
         start
             .extras
@@ -431,9 +467,8 @@ pub fn add_piece(def: &DimensionDef, seed: u64, start: &mut Start, at: IVec3, va
             loot: Some(table.clone()),
         });
     }
-    let piece = Piece { at, variant, foundation, clear_above, ground };
     // What it stands on and what it cuts away count as its own.
-    if foundation != 0 || clear_above {
+    if piece.foundation != 0 || piece.clear_above {
         let (mut lo, mut hi) = (piece.at, piece.hi());
         for &(h, _) in piece.ground.iter().filter(|g| g.0 != i32::MIN) {
             lo.y = lo.y.min(h + 1);
@@ -448,6 +483,7 @@ pub fn add_piece(def: &DimensionDef, seed: u64, start: &mut Start, at: IVec3, va
 pub struct PlanCtx<'a> {
     pub c: &'a Content,
     pub def: &'a DimensionDef,
+    pub dim: u32,
     pub seed: u64,
     pub fi: usize,
     random: u64,
@@ -525,8 +561,10 @@ impl PlanCtx<'_> {
                 if !self.within(pos, pos + variant.size - IVec3::ONE) {
                     return false;
                 }
-                let (def, seed) = (self.def, self.seed);
-                add_piece(def, seed, &mut self.start, pos, variant, op.state, op.flags & abi::piece_flags::CLEAR_ABOVE != 0);
+                let snapshot = crate::generation::Snapshot::new(c, self.dim, self.seed, f.stage);
+                let view = crate::generation::ReadCtx { snapshot, local: None, plan: Some(std::ptr::addr_of!(self.start)) };
+                let piece = make_piece(&view, pos, variant, op.state, op.flags & abi::piece_flags::CLEAR_ABOVE != 0);
+                add_piece(&mut self.start, piece);
             }
             k::ENTITY => {
                 let Some(&kind) = c.game.entity_names.get(name) else {
@@ -636,24 +674,29 @@ pub fn steps_cells(shape: &crate::shape::Shape) -> Vec<IVec3> {
     out
 }
 
+fn grid_starts(c: &Content, def: &DimensionDef, dim: u32, seed: u64, fi: usize, x: i32, z: i32) -> Vec<Arc<Start>> {
+    let f = &def.features[fi];
+    let Some(spacing) = f.grid() else { return Vec::new() };
+    let (lo, hi) = (IVec3::new(x * 16, i32::MIN, z * 16), IVec3::new(x * 16 + 15, i32::MAX, z * 16 + 15));
+    let mut out = Vec::new();
+    let r = f.reach[0];
+    for cz in (lo.z - r).div_euclid(spacing)..=(hi.z + r).div_euclid(spacing) {
+        for cx in (lo.x - r).div_euclid(spacing)..=(hi.x + r).div_euclid(spacing) {
+            if let Some(s) = start_at(c, def, dim, seed, fi, (cx, cz)).filter(|s| s.touches(lo, hi)) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 /// Every start on a grid whose box reaches into cube column (`x`, `z`), in feature order: the
 /// same for every cube of the column, so worked out once for it.
 fn column_starts(c: &Content, def: &DimensionDef, dim: u32, seed: u64, x: i32, z: i32) -> Arc<Vec<Arc<Start>>> {
     def.sites.get(seed, x, z, || {
-        let (lo, hi) = (IVec3::new(x * 16, i32::MIN, z * 16), IVec3::new(x * 16 + 15, i32::MAX, z * 16 + 15));
-        let mut out = Vec::new();
-        for (fi, f) in def.features.iter().enumerate() {
-            let Some(spacing) = f.grid() else { continue };
-            let r = f.reach[0];
-            for cz in (lo.z - r).div_euclid(spacing)..=(hi.z + r).div_euclid(spacing) {
-                for cx in (lo.x - r).div_euclid(spacing)..=(hi.x + r).div_euclid(spacing) {
-                    if let Some(s) = start_at(c, def, dim, seed, fi, (cx, cz)).filter(|s| s.touches(lo, hi)) {
-                        out.push(s);
-                    }
-                }
-            }
-        }
-        out
+        (0..def.features.len())
+            .flat_map(|fi| grid_starts(c, def, dim, seed, fi, x, z))
+            .collect()
     })
 }
 
@@ -947,35 +990,88 @@ pub fn place(
     biomes: &mut [u16; 256],
     columns: *const abi::TerrainColumn,
 ) -> (bool, Generated) {
+    place_before(c, dim, seed, pos, blocks, biomes, columns, u32::MAX)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn place_before(
+    c: &Content,
+    dim: u32,
+    seed: u64,
+    pos: IVec3,
+    blocks: &mut [u32],
+    biomes: &mut [u16; 256],
+    columns: *const abi::TerrainColumn,
+    before: u32,
+) -> (bool, Generated) {
     let def = &c.dims[dim as usize];
     let mut g = CubeGen::new(c, def, seed, pos, blocks);
-    let starts = def
+    let starts =
+        (before == u32::MAX && def.features.iter().any(|f| f.grid().is_some())).then(|| column_starts(c, def, dim, seed, pos.x, pos.z));
+    let mut phase = None;
+    let mut input = Vec::new();
+    let mut input_biomes = *biomes;
+    for (fi, f) in def
         .features
         .iter()
-        .any(|f| f.grid().is_some())
-        .then(|| column_starts(c, def, dim, seed, pos.x, pos.z));
-    for (fi, f) in def.features.iter().enumerate() {
+        .enumerate()
+        .take_while(|(_, f)| f.stage < before)
+    {
+        if phase != Some(f.stage) {
+            phase = Some(f.stage);
+            if def
+                .features
+                .iter()
+                .any(|g| g.stage == f.stage && matches!(g.spread, Spread::EveryCube(..)))
+            {
+                input = g.blocks.to_vec();
+                input_biomes = *biomes;
+            }
+        }
         match &f.spread {
             Spread::PerCube { .. } => g.per_cube(dim, fi, biomes),
             Spread::Grid { .. } => {
-                for s in starts
-                    .iter()
-                    .flat_map(|v| v.iter())
-                    .filter(|s| s.feature == fi)
-                {
+                let local;
+                let sites = match &starts {
+                    Some(v) => &**v,
+                    None => {
+                        local = grid_starts(c, def, dim, seed, fi, pos.x, pos.z);
+                        &local
+                    }
+                };
+                for s in sites.iter().filter(|s| s.feature == fi) {
                     g.write_start(s);
                 }
             }
             Spread::EveryCube(owner, cb) => {
+                let mut blocks = input.clone();
+                let mut next_biomes = input_biomes;
+                let mut written = [0u64; 64];
+                let mut biomes_written = [0u64; 4];
+                let snapshot = crate::generation::Snapshot::new(c, dim, seed, f.stage);
+                let read = crate::generation::ReadCtx { snapshot, local: Some((pos, blocks.as_ptr())), plan: None };
                 let mut args = abi::GenArgs {
+                    source: snapshot.source(&read),
+                    written: written.as_mut_ptr(),
+                    biomes_written: biomes_written.as_mut_ptr(),
                     seed,
                     cube: pos.to_array().into(),
-                    blocks: g.blocks.as_mut_ptr(),
-                    biomes: biomes.as_mut_ptr(),
+                    blocks: blocks.as_mut_ptr(),
+                    biomes: next_biomes.as_mut_ptr(),
                     dim,
                     columns,
                 };
-                crate::host::invoke(*owner, *cb, &mut args);
+                crate::generation::during(snapshot, || crate::host::invoke(*owner, *cb, &mut args));
+                for (i, (&old, &new)) in input.iter().zip(&blocks).enumerate() {
+                    if old != new || written[i / 64] & (1 << (i % 64)) != 0 {
+                        g.blocks[i] = new;
+                    }
+                }
+                for (i, (&old, &new)) in input_biomes.iter().zip(&next_biomes).enumerate() {
+                    if old != new || biomes_written[i / 64] & (1 << (i % 64)) != 0 {
+                        biomes[i] = new;
+                    }
+                }
                 g.changed = true;
                 g.present = None;
             }
@@ -986,13 +1082,13 @@ pub fn place(
 
 /// Whether a feature on a grid stands within its reach of column (`x`, `z`): spawn search keeps
 /// players out of trees.
-pub fn stands_near(c: &Content, def: &DimensionDef, seed: u64, x: i32, z: i32) -> bool {
+pub fn stands_near(c: &Content, def: &DimensionDef, dim: u32, seed: u64, x: i32, z: i32) -> bool {
     def.features.iter().any(|f| {
         let Some(spacing) = f.grid() else { return false };
         let r = f.reach[0].max(1);
         let cells = |v: i32| (v - r).div_euclid(spacing)..=(v + r).div_euclid(spacing);
         cells(z).any(|cz| {
-            cells(x).any(|cx| grid_site(c, def, f, seed, (cx, cz)).is_some_and(|(p, ..)| (p.x - x).abs() <= r && (p.z - z).abs() <= r))
+            cells(x).any(|cx| grid_site(c, def, dim, f, seed, (cx, cz)).is_some_and(|(p, ..)| (p.x - x).abs() <= r && (p.z - z).abs() <= r))
         })
     })
 }

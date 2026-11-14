@@ -42,6 +42,23 @@ impl ModelBox {
         }
     }
 
+    /// The box that can use packed cube faces, if this geometry is a full, normally shaded cube.
+    pub fn full_cube(boxes: &[ModelBox]) -> Option<&ModelBox> {
+        match boxes {
+            [b] if b.min == [0.0; 3]
+                && b.max == [1.0; 3]
+                && b.tilt.degrees == 0.0
+                && !b.flat
+                && b.uv
+                    .iter()
+                    .all(|&uv| uv == weft_abi::UV_FROM_BOX || uv == [0.0, 0.0, 16.0, 16.0]) =>
+            {
+                Some(b)
+            }
+            _ => None,
+        }
+    }
+
     /// Turned with its block (`abi::Turn`), pictures and all: a face taking its picture from where
     /// the box is takes it from where it was written.
     pub fn turned(&self, t: weft_abi::Turn) -> ModelBox {
@@ -116,10 +133,9 @@ pub struct StateInfo {
     pub layer: RenderLayer,
     pub level: u8,
     pub model: BlockModel,
+    pub item_face: Option<u8>,
     /// Texture ids (`Content::textures`) per face.
     pub textures: [u32; 6],
-    /// Cube model: quarter turns of each face's picture.
-    pub turns: [u8; 6],
     pub boxes: Vec<ModelBox>,
     /// In block units.
     pub collision: Vec<[f32; 6]>,
@@ -263,13 +279,10 @@ impl StateInfo {
     /// The block texture an item of this block shows as a flat sprite (vanilla's generated item
     /// models): plants and liquids. Other shapes are drawn as their model.
     pub fn item_sprite(&self) -> Option<u32> {
-        if self.liquid.is_some() {
-            return Some(self.textures[3]);
-        }
-        match self.model {
-            BlockModel::Cross | BlockModel::None | BlockModel::Wire => Some(self.textures[0]),
-            _ => None,
-        }
+        self.item_face
+            .or_else(|| self.liquid.map(|_| 3))
+            .filter(|&f| f < 6)
+            .map(|f| self.textures[f as usize])
     }
 }
 
@@ -499,7 +512,7 @@ pub fn in_off_hand(c: &Content, kind: u32, inventory: &[weft_abi::ItemStack]) ->
 }
 
 /// By liquid, whether `kind` wearing `worn` swims in it: what its `comp::SWIMS_IN` and theirs take.
-pub fn swims_in(c: &Content, kind: u32, worn: &[u32]) -> Vec<bool> {
+pub fn swims_in(c: &Content, kind: u32, worn: &[abi::ItemStack]) -> Vec<bool> {
     use crate::components as comps;
     let id = c.components.id(weft_abi::comp::SWIMS_IN);
     let matchers: Vec<u32> = id
@@ -507,7 +520,8 @@ pub fn swims_in(c: &Content, kind: u32, worn: &[u32]) -> Vec<bool> {
         .flat_map(|id| {
             c.components.get(comps::ENTITY, kind, id).into_iter().chain(
                 worn.iter()
-                    .filter_map(move |&i| c.components.get(comps::ITEM, i, id)),
+                    .filter(|s| !s.is_empty())
+                    .filter_map(move |s| c.stack_value::<u32>(s, Some(id))),
             )
         })
         .collect();
@@ -515,6 +529,14 @@ pub fn swims_in(c: &Content, kind: u32, worn: &[u32]) -> Vec<bool> {
         .iter()
         .map(|l| matchers.iter().any(|&m| c.matchers.has(m, l.first_state)))
         .collect()
+}
+
+/// Equipment slots, including empty slots and items without a worn model.
+pub fn equipped<'a>(c: &Content, kind: u32, inventory: &'a [abi::ItemStack]) -> &'a [abi::ItemStack] {
+    let slots = &c.game.entities[kind as usize].worn;
+    inventory
+        .get(slots.start as usize..slots.end as usize)
+        .unwrap_or_default()
 }
 
 /// What the main hand really holds: an item that needs both hands does nothing while the other
@@ -670,12 +692,7 @@ pub struct LiquidDef {
     /// Lighter than air: flows up.
     pub rises: bool,
     pub temperature: u32,
-    /// 0xRRGGBB, `None` for the average of its texture.
-    pub fog_color: Option<u32>,
-    pub fog_distance: f32,
-    /// Asset name, empty for its own texture.
-    pub overlay: String,
-    pub overlay_opacity: f32,
+    pub environment: Vec<abi::environment::EnvironmentLayer>,
 }
 
 impl LiquidDef {
@@ -698,6 +715,7 @@ pub struct BiomeDef {
 }
 
 pub struct DimensionDef {
+    pub snapshots: crate::generation::Snapshots,
     pub name: String,
     pub owner: ModId,
     /// The callbacks and the mods they run as.
@@ -766,7 +784,7 @@ impl DimensionDef {
             std::array::from_fn(|i| {
                 let mut a =
                     abi::ColumnArgs { seed, x: cx * 16 + (i % 16) as i32, z: cz * 16 + (i / 16) as i32, height: i32::MIN, biome: 0 };
-                crate::host::invoke(by, cb, &mut a);
+                crate::generation::during_column(|| crate::host::invoke(by, cb, &mut a));
                 abi::TerrainColumn { height: a.height, biome: a.biome }
             })
         }))
@@ -886,7 +904,6 @@ pub struct Ids {
     pub conductor: Option<u32>,
     pub worn: Option<u32>,
     pub loot_rolls: Option<u32>,
-    pub worn_texture: Option<u32>,
     pub wear_per_hit: Option<u32>,
     pub spawn_egg: Option<u32>,
     pub attack_speed: Option<u32>,
@@ -1374,14 +1391,15 @@ impl Content {
         self.components.get(comps::BLOCK, state, comp?)
     }
 
-    /// Worn look of an item: inflation and texture.
-    pub fn worn(&self, item: u32) -> Option<(abi::Worn, &str)> {
-        let w = self.item_value::<abi::Worn>(item, self.ids.worn)?;
-        Some((
-            w,
-            self.components
-                .text(comps::ITEM, item, self.ids.worn_texture?)?,
-        ))
+    /// Worn look of a stack: inflation and texture, independent of slot effects.
+    pub fn worn(&self, stack: &abi::ItemStack) -> Option<(abi::Worn, &str)> {
+        if stack.is_empty() {
+            return None;
+        }
+        let w = self.stack_value::<abi::Worn>(stack, self.ids.worn)?;
+        let conditional = crate::stack::look(*stack).worn_texture;
+        let texture = if conditional.is_empty() { crate::stack::text(*stack, abi::comp::WORN_TEXTURE)? } else { conditional };
+        Some((w, texture))
     }
 
     /// The roles (`1 << role`) of the wearer's bones an item covers, from its equipment slot.
@@ -1615,6 +1633,7 @@ fn bake_dimension(e: &Entry) -> DimensionDef {
         .collect();
     daylight.sort_by(|a, b| a[0].total_cmp(&b[0]));
     DimensionDef {
+        snapshots: Default::default(),
         raw_hazards: e.or(abi::comp::dimension::HAZARDS, Vec::new()),
         hazards: Vec::new(),
         name: e.name.clone(),
@@ -1654,6 +1673,7 @@ pub const VOID_DIM: &str = "core:void";
 
 fn void_dimension() -> DimensionDef {
     DimensionDef {
+        snapshots: Default::default(),
         raw_hazards: Vec::new(),
         hazards: Vec::new(),
         name: VOID_DIM.into(),
@@ -2606,7 +2626,11 @@ fn declare_components(
         }
     }
     for d in decls {
-        let size = d.entity.as_ref().map(|c| c.size as usize);
+        let size = d
+            .entity
+            .as_ref()
+            .map(|c| c.size as usize)
+            .filter(|&n| n != 0);
         cb.declare(&d.name, &d.schema, size, &|| who(d.owner, "component"), errors);
     }
     cb
@@ -2743,7 +2767,6 @@ fn component_ids(components: &Components) -> Ids {
         conductor: id(abi::comp::CONDUCTOR),
         worn: id(abi::comp::WORN),
         loot_rolls: id(abi::comp::LOOT_ROLLS),
-        worn_texture: id(abi::comp::WORN_TEXTURE),
         wear_per_hit: id(abi::comp::WEAR_PER_HIT),
         spawn_egg: id(abi::comp::SPAWN_EGG),
         attack_speed: id(abi::comp::ATTACK_SPEED),
@@ -3058,10 +3081,15 @@ fn freeze_features(
                 Spread::EveryCube(..) => abi::stage::DECORATION,
             },
         );
+        if stage == u32::MAX {
+            errors.push(format!("{what}: stage u32::MAX is reserved for the completed generation view"));
+            return None;
+        }
         let mut def = FeatureDef {
             name: e.name.clone(),
             id,
             owner: e.owner,
+            stage,
             salt: crate::registry::name_hash(&e.name),
             biome: look.biomes(&what, e, errors).ok()?,
             y: heights(e),
@@ -3138,6 +3166,14 @@ fn feature_order(
                 let (a, b) = if after { (j, i) } else { (i, j) };
                 before[a].push(b);
                 needs[b] += 1;
+            }
+        }
+    }
+    for (i, a) in list.iter().enumerate() {
+        for (j, b) in list.iter().enumerate() {
+            if a.0 < b.0 && !before[i].contains(&j) {
+                before[i].push(j);
+                needs[j] += 1;
             }
         }
     }
@@ -3690,10 +3726,16 @@ fn freeze_loot(
 }
 
 fn collect_stack_flags(decls: &[crate::registry::ComponentDecl], components: &Components) -> FxHashMap<u32, u32> {
-    decls
+    let mut flags: FxHashMap<u32, u32> = decls
         .iter()
         .filter_map(|d| Some((components.id(&d.name)?, d.stack?)))
-        .collect()
+        .collect();
+    for name in [abi::comp::WEAR, abi::comp::LAYERS, abi::comp::MODEL, abi::comp::WORN, abi::comp::WORN_MODEL, abi::comp::WORN_TEXTURE] {
+        if let Some(id) = components.id(name) {
+            *flags.entry(id).or_default() |= abi::stack_flags::VISUAL;
+        }
+    }
+    flags
 }
 
 fn link_particles(game: &mut crate::registry::Game, textures: &mut Interner) {
@@ -3912,8 +3954,22 @@ fn freeze_liquids(
                 errors.push(format!("liquid {}: its block needs 16 states, has {}", e.name, def.states));
                 return None;
             }
-            let fog: abi::LiquidFog = e.or(l::FOG, abi::LiquidFog { color: u32::MAX, distance: 96.0 });
-            let overlay: abi::LiquidOverlay = e.or(l::OVERLAY, abi::LiquidOverlay { texture: String::new(), opacity: 0.1 });
+            let mut base = abi::environment::EnvironmentLayer::new("core:liquid".into());
+            base.priority = -700;
+            base.values.fog_start = -8.0;
+            base.values.fog_end = 96.0;
+            base.values.fog_gray = 0.0;
+            base.values.sky_opacity = 0.0;
+            base.fog_from_block = true;
+            base.overlays.push(abi::environment::EnvironmentOverlay {
+                color: [1.0, 1.0, 1.0, 0.1],
+                tiles: 1.0,
+                block_face: 0,
+                lit: true,
+                ..Default::default()
+            });
+            let mut environment = vec![base];
+            environment.extend(e.or::<Vec<abi::environment::EnvironmentLayer>>(abi::environment::COMPONENT, Vec::new()));
             Some(LiquidDef {
                 name: e.name.clone(),
                 first_state: def.first_state,
@@ -3923,10 +3979,7 @@ fn freeze_liquids(
                 renewable: e.or(l::RENEWABLE, u32::MAX),
                 rises: e.or(l::DENSITY, 1000) < 0,
                 temperature: e.or(l::HEAT, 300),
-                fog_color: (fog.color != u32::MAX).then_some(fog.color),
-                fog_distance: fog.distance.max(0.1),
-                overlay: overlay.texture,
-                overlay_opacity: overlay.opacity.clamp(0.0, 1.0),
+                environment,
             })
         },
     );
@@ -3998,6 +4051,27 @@ fn freeze_liquids(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn packed_faces_require_full_cube_geometry() {
+        let cube = ModelBox::whole([7; 6]);
+        assert!(ModelBox::full_cube(std::slice::from_ref(&cube)).is_some());
+        for change in [0, 1, 2, 3, 4] {
+            let mut b = cube.clone();
+            match change {
+                0 => b.max[1] = 0.5,
+                1 => b.uv[0] = weft_abi::UV_NO_FACE,
+                2 => b.uv[1] = [0.0, 0.0, 8.0, 16.0],
+                3 => b.tilt.degrees = 45.0,
+                _ => b.flat = true,
+            }
+            assert!(ModelBox::full_cube(&[b]).is_none());
+        }
+        assert!(ModelBox::full_cube(&[cube.clone(), cube.clone()]).is_none());
+        for t in weft_abi::Turn::all() {
+            assert!(ModelBox::full_cube(&[cube.turned(t)]).is_some());
+        }
+    }
 
     fn meta(id: &str, deps: &[&str]) -> ModMeta {
         ModMeta {

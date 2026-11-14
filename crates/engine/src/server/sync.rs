@@ -63,13 +63,6 @@ impl Server {
         for d in &mut self.dims {
             let mut m = Vec::new();
             for r in &mut d.regions {
-                let changed: Vec<u64> = r.entities.dirty_inv.iter().copied().collect();
-                for id in changed {
-                    let now = worn_of(c, &r.entities, id);
-                    if let Some(e) = r.entities.get_mut(id) {
-                        e.worn = now;
-                    }
-                }
                 r.mirror_fields(c);
                 r.entities.find_changes(&c.game.synced_comps);
                 for e in r
@@ -260,7 +253,6 @@ fn send_entities(
                     pos: e.pos,
                     yaw: e.yaw,
                     pitch: e.pitch,
-                    item: crate::stack::for_client(e.item),
                     born: tick.saturating_sub(e.age),
                     body_yaw: e.body_yaw,
                     strode: e.strode,

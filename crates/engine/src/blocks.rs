@@ -596,6 +596,28 @@ fn model_file(
     })
 }
 
+/// Cross is only a registration preset; every consumer receives ordinary boxes.
+fn cross(textures: [u32; 6], tall: bool) -> Vec<ModelBox> {
+    let edge = 0.5 - 0.35 * std::f32::consts::SQRT_2;
+    [(0.0, textures[0]), (1.0, textures[3])]
+        .into_iter()
+        .take(1 + tall as usize)
+        .flat_map(|(y, tex)| {
+            [-45.0, 45.0].map(|degrees| {
+                let mut bx = ModelBox::whole([tex; 6]);
+                bx.min = [edge, y, 0.5];
+                bx.max = [1.0 - edge, y + 1.0, 0.5];
+                bx.uv = [abi::UV_NO_FACE; 6];
+                bx.uv[4] = [0.0, 0.0, 16.0, 16.0];
+                bx.uv[5] = [0.0, 0.0, 16.0, 16.0];
+                bx.tilt = abi::BoxTilt { origin: [0.5, y, 0.5], axis: [0.0, 1.0, 0.0], degrees };
+                bx.flat = true;
+                bx
+            })
+        })
+        .collect()
+}
+
 /// One state as its values say (absent: the defaults), its textures renamed by `retexture` and
 /// shaped by its block's model file. Also gives its piston head's name and its pieces, their
 /// properties still text.
@@ -735,7 +757,9 @@ fn bake_state(
             .map(|b| [b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]])
             .collect()
     };
-    let cells = cells_of(name, turn, s.or::<Vec<[i32; 3]>>(b::CELLS, Vec::new()), errors);
+    let own_cells = s.or::<Vec<[i32; 3]>>(b::CELLS, Vec::new());
+    let tall = own_cells.contains(&[0, 1, 0]);
+    let cells = cells_of(name, turn, own_cells, errors);
     // A big block's reach out of its cell is its cells.
     let (lo, hi) = cells
         .iter()
@@ -769,6 +793,24 @@ fn bake_state(
         vec![[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]]
     };
     let own: [u32; 6] = if model == BlockModel::None { [0; 6] } else { std::array::from_fn(|i| tex(&faces[i])) };
+    let item_face = match s.get::<u8>(b::ITEM_FACE) {
+        Some(f) => Some(f),
+        None => matches!(model, BlockModel::Cross | BlockModel::None | BlockModel::Wire).then_some(0),
+    }
+    .map(|f| if f < 6 { turn.face(f as usize) as u8 } else { f });
+    if model == BlockModel::Cube {
+        let mut cube = ModelBox::whole(crate::content::turned_faces(turn, own));
+        cube.turn = crate::content::turned_pictures(turn, s.or(b::TURNS, [0u8; 6]).map(|t| t % 4));
+        boxes = vec![cube];
+        model = BlockModel::Boxes;
+    }
+    if model == BlockModel::Cross {
+        boxes = cross(own, tall)
+            .into_iter()
+            .map(|b| if turn == abi::Turn::NONE { b } else { b.turned(turn) })
+            .collect();
+        model = BlockModel::Boxes;
+    }
     let info = StateInfo {
         liquid_walls: match s.or(b::LIQUID_WALLS, u8::MAX) {
             u8::MAX => u8::MAX,
@@ -787,6 +829,7 @@ fn bake_state(
         layer,
         level: 0,
         model,
+        item_face,
         signal: Signal {
             kind: signal.kind,
             inputs: turn.faces(signal.inputs as u8),
@@ -801,7 +844,6 @@ fn bake_state(
         },
         // A box model's faces default to these (the particles of breaking it show them too).
         textures: crate::content::turned_faces(turn, own),
-        turns: crate::content::turned_pictures(turn, s.or(b::TURNS, [0u8; 6]).map(|t| t % 4)),
         boxes,
         collision,
         selection,
@@ -898,8 +940,8 @@ fn air() -> StateInfo {
         layer: RenderLayer::Opaque,
         level: 0,
         model: BlockModel::None,
+        item_face: None,
         textures: [0; 6],
-        turns: [0; 6],
         boxes: Vec::new(),
         collision: Vec::new(),
         selection: Vec::new(),

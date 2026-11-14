@@ -75,7 +75,7 @@ fn fs(in: VOut) -> @location(0) vec4<f32> {
         let w = unpack_light(in.around);
         own = vec4(min(own.x, w.x), max(own.yzw, w.yzw));
     }
-    let light = pow(lightmap(own, scene.params.z, scene.light.x, scene.light.y, scene.light.w), vec3(2.2));
+    let light = pow(lightmap(own, scene.params.z, scene.light.x, scene.light.y, scene.light.w, scene.environment.x), vec3(2.2));
     // Power shows in the dark as well.
     let shown = color.rgb * red * max(light, vec3(p * 0.7));
     let fog = fog_amount(in.dist, scene.params.x, scene.params.y);

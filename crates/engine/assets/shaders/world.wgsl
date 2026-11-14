@@ -211,7 +211,7 @@ fn vs_quad(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> 
 }
 
 fn shade(in: VOut, albedo: vec4<f32>) -> vec4<f32> {
-    var light = in.color * lightmap(in.light, scene.params.z, scene.light.x, scene.light.y, scene.light.w);
+    var light = in.color * lightmap(in.light, scene.params.z, scene.light.x, scene.light.y, scene.light.w, scene.environment.x);
     // Glowing texels are lifted towards full brightness by their mask: lit = albedo * max(light,
     // emission), so they stay their own (tinted, unshaded) color in the dark.
     if in.glow != 0xffffffffu {

@@ -71,7 +71,12 @@ fn glow_color(glow: u32, along: f32) -> Vec3 {
 
 /// Where the glowing bodies of a dimension stand now: toward them along the horizon, their
 /// color so far (not linear), how strong, and how far along.
-fn glows(dim: usize, d: &DimensionDef, time: f64) -> impl Iterator<Item = (Vec3, Vec3, f32, f32)> {
+fn glows<'a>(
+    dim: usize,
+    d: &'a DimensionDef,
+    time: f64,
+    weights: &'a FxHashMap<String, f32>,
+) -> impl Iterator<Item = (Vec3, Vec3, f32, f32)> + 'a {
     let list = content().game.sky.get(dim).map_or(&[][..], |l| &l[..]);
     list.iter()
         .filter(|s| s.glow != 0 && s.kind == sky_kind::BODY)
@@ -79,13 +84,13 @@ fn glows(dim: usize, d: &DimensionDef, time: f64) -> impl Iterator<Item = (Vec3,
             let toward = frame_of(s, turn_of(s, d, time)).x_axis;
             let (strength, along) = sunset(toward.y)?;
             let flat = Vec3::new(toward.x, 0.0, toward.z).try_normalize()?;
-            Some((flat, glow_color(s.glow, along), strength, along))
+            Some((flat, glow_color(s.glow, along), strength * weights.get(&s.name).copied().unwrap_or(1.0), along))
         })
 }
 
 /// A fog color (not linear) warmed by the sunsets the camera looks at, like vanilla's.
-pub fn warmed_by_glows(dim: usize, d: &DimensionDef, time: f64, fog: Vec3, forward: Vec3) -> Vec3 {
-    glows(dim, d, time).fold(fog, |c, (flat, color, strength, _)| c.lerp(color, flat.dot(forward).max(0.0) * strength))
+pub fn warmed_by_glows(dim: usize, d: &DimensionDef, time: f64, fog: Vec3, forward: Vec3, weights: &FxHashMap<String, f32>) -> Vec3 {
+    glows(dim, d, time, weights).fold(fog, |c, (flat, color, strength, _)| c.lerp(color, flat.dot(forward).max(0.0) * strength))
 }
 
 /// Directions through the screen's middle and one screen unit right and up of it. From the eye:
@@ -116,12 +121,13 @@ pub struct Sky {
     assets: Assets,
     list: Vec<GpuSky>,
     /// The fog color of each liquid, linear.
-    liquid_colors: Vec<Vec3>,
+    block_colors: std::cell::RefCell<FxHashMap<u32, Vec3>>,
     /// This frame's buffer and the entries over the screen: where they start, how many.
     overlay: Option<(BufferId, u32, u32)>,
 }
 
 /// A picture over the whole screen, drawn last: from inside a liquid, a block or a fire.
+#[derive(Clone)]
 pub struct Overlay {
     pub picture: String,
     /// Linear rgb and how much shows.
@@ -134,9 +140,9 @@ pub struct Overlay {
 }
 
 /// The average color of a liquid's first frame, its tint in.
-fn average_color(assets: &Assets, l: &crate::content::LiquidDef) -> Vec3 {
+fn average_color(assets: &Assets, state: u32) -> Vec3 {
     let c = content();
-    let st = &c.states[l.first_state as usize];
+    let st = &c.states[state as usize];
     let img = c
         .textures
         .get(st.textures[0] as usize)
@@ -167,7 +173,7 @@ impl Sky {
             pictures: FxHashMap::default(),
             assets: assets.clone(),
             list: Vec::new(),
-            liquid_colors: Vec::new(),
+            block_colors: Default::default(),
             overlay: None,
         };
         s.reload(gpu, assets);
@@ -178,15 +184,7 @@ impl Sky {
     pub fn reload(&mut self, gpu: &mut dyn Backend, assets: &Assets) {
         self.assets = assets.clone();
         self.drop_pictures(gpu);
-        self.liquid_colors = content()
-            .liquids
-            .iter()
-            .map(|l| {
-                l.fog_color
-                    .map_or_else(|| average_color(assets, l), rgb)
-                    .powf(2.2)
-            })
-            .collect();
+        self.block_colors.get_mut().clear();
         let snippets = crate::shaders::snippets(assets, &HOOK);
         let made = crate::packs::compose(assets, "sky.wgsl", &[(&HOOK, &snippets)])
             .map_err(|e| e.0)
@@ -236,11 +234,12 @@ impl Sky {
         }
     }
 
-    pub fn liquid_color(&self, liquid: u16) -> Vec3 {
-        self.liquid_colors
-            .get(liquid as usize)
-            .copied()
-            .unwrap_or(Vec3::ZERO)
+    pub fn block_color(&self, state: u32) -> Vec3 {
+        *self
+            .block_colors
+            .borrow_mut()
+            .entry(state)
+            .or_insert_with(|| average_color(&self.assets, state).powf(2.2))
     }
 
     /// What goes over the screen, after the hand.
@@ -316,7 +315,7 @@ impl Sky {
         if !self.pictures.contains_key(name) {
             let loaded = self
                 .assets
-                .read(name, "textures", "png")
+                .read(&self.assets.picture(name), "textures", "png")
                 .and_then(|b| decode_png(&b));
             if loaded.is_none() {
                 log::error!("sky: no picture {name}");
@@ -347,16 +346,15 @@ impl Sky {
         dim: usize,
         time: f64,
         eye_y: f64,
-        in_liquid: bool,
-        look: &weft_abi::WeatherLook,
+        environment: &weft_abi::environment::EnvironmentValues,
+        weights: &FxHashMap<String, f32>,
         overlays: &[Overlay],
     ) {
         self.overlay = None;
         let Some(pipe) = self.pipe else { return };
         let c = content();
         let d = &c.dims[dim];
-        // From inside a liquid its fog hides the sky.
-        if in_liquid {
+        if environment.sky_opacity <= 0.0 {
             self.list.clear();
             let n = self.overlay_entries(gpu, overlays);
             if n > 0 {
@@ -376,7 +374,6 @@ impl Sky {
         }
         let turn = d.day_turn(time);
         let height = (turn * std::f64::consts::TAU).sin() as f32;
-        let light = d.daylight(time as u64);
         // 0 by day, 1 at night: vanilla's star brightness, before its last factor of 0.5.
         let night = if d.sky_light { (2.0 * (0.75 - height * 2.0)).clamp(0.0, 1.0).powi(2) } else { 1.0 };
 
@@ -388,9 +385,8 @@ impl Sky {
         self.list.push(GpuSky {
             axes: axes(Mat3::from_cols(px - o, py - o, o)),
             uv: [below as u32 as f32, 0.0, 0.0, 0.0],
-            color: rained(rgb(d.sky_color) * if d.sky_light { light } else { 1.0 }, 1.0, look.sky_gray)
-                .powf(2.2)
-                .extend(1.0)
+            color: (rained(Vec3::from_array(environment.sky_color).powf(1.0 / 2.2), 1.0, environment.sky_gray).powf(2.2))
+                .extend(environment.sky_opacity)
                 .to_array(),
             ids: [u32::MAX, kind::GRADIENT, 0, 0],
             extra: [0.0; 4],
@@ -400,11 +396,15 @@ impl Sky {
         let objects = c.game.sky.get(dim).map_or(&[][..], |l| &l[..]);
         let mut clouds = None;
         for (i, s) in objects.iter().enumerate() {
-            // Weather hides what is up there, domes aside: those are the sky.
-            let opacity =
-                (s.opacity[0] + (s.opacity[1] - s.opacity[0]) * night) * if s.kind == sky_kind::DOME { 1.0 } else { 1.0 - look.sky_cover };
+            // Cloud cover hides celestial objects, not the clouds or sky behind them.
+            let opacity = (s.opacity[0] + (s.opacity[1] - s.opacity[0]) * night)
+                * if matches!(s.kind, sky_kind::BODY | sky_kind::STARS) { 1.0 - environment.sky_cover } else { 1.0 }
+                * environment.sky_opacity
+                * weights.get(&s.name).copied().unwrap_or(1.0);
+            if opacity <= 0.0 || (s.kind == sky_kind::CLOUDS && (environment.cloud_opacity <= 0.0 || environment.cloud_fog_end <= 0.0)) {
+                continue;
+            }
             if s.kind == sky_kind::CLOUDS {
-                let Some((index, [w, h])) = self.picture(gpu, &s.texture) else { continue };
                 const CELL: f64 = 12.0;
                 let setting = |name: &str| {
                     c.game
@@ -412,17 +412,21 @@ impl Sky {
                         .get(name)
                         .map_or(0.0, |&id| crate::config::get(id))
                 };
-                // Past all the terrain there is, distant terrain too; the cost doesn't depend on it.
-                let reach = (setting("core:view_distance") * 16.0)
-                    .max(super::lod::Lod::distance() as f64)
-                    .max(1365.0)
-                    * 1.5;
                 let lifted = s.height as f64 + setting("core:cloud_height");
+                let low = (lifted - cam.pos.y) as f32;
+                if low >= environment.cloud_fog_end || low + 4.0 <= -environment.cloud_fog_end {
+                    continue;
+                }
+                let Some((index, [w, h])) = self.picture(gpu, &s.texture) else { continue };
                 let (x, z) = ((cam.pos.x + time * s.drift as f64) / CELL, cam.pos.z / CELL);
-                // Vanilla's: rain grays them, the time of day colors them, thunder darkens the rest.
-                let day = if d.sky_light { (height * 2.0 + 0.5).clamp(0.0, 1.0) } else { 1.0 };
-                let color = rained(rgb(s.color), 1.0, look.cloud_gray) * Vec3::new(day * 0.9 + 0.1, day * 0.9 + 0.1, day * 0.85 + 0.15);
-                let color = color.lerp(Vec3::splat((color.x * 0.3 + color.y * 0.59 + color.z * 0.11) * 0.2), look.cloud_dark);
+                let color = rained(rgb(s.color), 1.0, environment.cloud_gray)
+                    * Vec3::from_array(environment.cloud_color)
+                        .max(Vec3::ZERO)
+                        .powf(1.0 / 2.2);
+                let color = color.lerp(Vec3::splat((color.x * 0.3 + color.y * 0.59 + color.z * 0.11) * 0.2), environment.cloud_dark);
+                let ambient = environment.ambient.max(0.0);
+                let light = ambient + (1.0 - ambient).max(0.0) * environment.sunlight;
+                let color = color.powf(2.2) * light;
                 clouds = Some(self.list.len() as u32);
                 self.list.push(GpuSky {
                     axes: [[0.0; 4]; 3],
@@ -432,9 +436,11 @@ impl Sky {
                         x.floor().rem_euclid(4096.0) as f32,
                         z.floor().rem_euclid(4096.0) as f32,
                     ],
-                    color: color.powf(2.2).extend(0.8).to_array(),
+                    color: color
+                        .extend(0.8 * environment.cloud_opacity * opacity)
+                        .to_array(),
                     ids: [index, kind::CLOUDS, w, h],
-                    extra: [CELL as f32, 4.0, (lifted - cam.pos.y) as f32, reach as f32],
+                    extra: [CELL as f32, 4.0, low, 0.0],
                 });
                 continue;
             }
@@ -487,13 +493,16 @@ impl Sky {
             .skip(1)
             .position(|&(_, at)| self.list[at as usize].ids[1] == kind::BODY)
             .map_or(draws.len(), |p| p + 1);
-        let glowing: Vec<(Vec3, Vec3, f32, f32)> = glows(dim, d, time).collect();
+        let glowing: Vec<(Vec3, Vec3, f32, f32)> = glows(dim, d, time, weights).collect();
         for (n, (flat, color, strength, along)) in glowing.into_iter().enumerate() {
             let at = self.list.len() as u32;
             self.list.push(GpuSky {
                 axes: axes(Mat3::from_cols(flat, Vec3::Y, flat.cross(Vec3::Y))),
                 uv: [along, 0.0, 0.0, 0.0],
-                color: color.powf(2.2).extend(strength).to_array(),
+                color: color
+                    .powf(2.2)
+                    .extend(strength * environment.sky_opacity * (1.0 - environment.sky_cover))
+                    .to_array(),
                 ids: [u32::MAX, kind::GLOW, 0, 0],
                 extra: [0.0; 4],
             });

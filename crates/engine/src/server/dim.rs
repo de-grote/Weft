@@ -226,21 +226,8 @@ pub fn generate(c: &Content, dim: u32, seed: u64, pos: IVec3) -> Cube {
     if pos.y < def.min_cube_y || pos.y > def.max_cube_y {
         return Cube::uniform(AIR, 0);
     }
-    let mut blocks = vec![0u32; VOLUME];
-    let mut biomes = [0u16; 256];
-    let cols = match (def.builtin, &def.terrain, def.generator) {
-        (Some(f), _, _) => {
-            f(c, pos, &mut blocks);
-            return finish_generated(c, dim, seed, pos, blocks, biomes, None, true);
-        }
-        (None, None, None) => return Cube::uniform(AIR, 0),
-        (None, Some(t), _) => Some(Arc::new(
-            t.generate(seed, pos.to_array(), &mut blocks, &mut biomes)
-                .cols,
-        )),
-        (None, None, Some(_)) => def.columns(seed, pos.x, pos.z),
-    };
-    finish_generated(c, dim, seed, pos, blocks, biomes, cols, false)
+    let base = crate::generation::base(c, dim, seed, pos);
+    finish_generated(c, dim, seed, pos, base.blocks, base.biomes, base.columns, def.builtin.is_some())
 }
 
 /// Everything generation does after the terrain (which the GPU may have made): the
@@ -257,27 +244,14 @@ pub fn finish_generated(
     cols: Option<Arc<[abi::TerrainColumn; 256]>>,
     builtin: bool,
 ) -> Cube {
-    let def = &c.dims[dim as usize];
     let columns = cols.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
-    if !builtin && let Some((by, cb)) = def.generator {
-        let mut args =
-            abi::GenArgs { seed, cube: pos.to_array().into(), blocks: blocks.as_mut_ptr(), biomes: biomes.as_mut_ptr(), dim, columns };
-        host::invoke(by, cb, &mut args);
+    if !builtin {
+        crate::generation::run_generator(c, dim, seed, pos, &mut blocks, &mut biomes, cols.as_deref());
     }
-    let check = |blocks: &mut [u32], what: &'static str| {
-        let max = c.states.len() as u32;
-        let top = blocks.iter().copied().max().unwrap_or(0);
-        if top >= max {
-            for b in blocks.iter_mut().filter(|b| **b >= max) {
-                *b = AIR;
-            }
-            host::misuse(what, || format!("{} wrote state {top}, which does not exist (air instead)", def.name));
-        }
-    };
-    check(&mut blocks, "generator");
+    crate::generation::validate(c, dim, &mut blocks, "generator");
     let (changed, generated) = crate::features::place(c, dim, seed, pos, &mut blocks, &mut biomes, columns);
     if changed {
-        check(&mut blocks, "feature");
+        crate::generation::validate(c, dim, &mut blocks, "feature");
     }
     let mut cube = if blocks.iter().all(|&b| b == blocks[0]) {
         Cube::uniform(blocks[0], 0)
@@ -410,6 +384,7 @@ impl Dim {
             permission,
             attributes,
             shown,
+            ground,
             ..
         } = c.game.fields;
         // What lives has attributes; a dropped item or a block's entity none worth sending. A
@@ -454,18 +429,19 @@ impl Dim {
                 }
                 None => {}
             };
+            put(comps, ground, &crate::stack::client_bytes(e.item));
             let slots = &c.game.entities[e.kind as usize].shown_slots;
             if !slots.is_empty() {
                 let inv = inventories.get(&e.id);
-                let items: Vec<u8> = slots
+                let items: Vec<ItemStack> = slots
                     .iter()
-                    .flat_map(|&s| {
+                    .map(|&s| {
                         inv.and_then(|i| i.get(s as usize))
-                            .map_or(0, |s| s.item)
-                            .to_le_bytes()
+                            .copied()
+                            .unwrap_or_default()
                     })
                     .collect();
-                put(comps, shown, &items);
+                put(comps, shown, &crate::stack::shown_bytes(&items));
             }
             // A block entity is heard of only for what it shows.
             if e.anchor.is_some() {
@@ -485,8 +461,8 @@ impl Dim {
             hp[4..].copy_from_slice(&max.to_le_bytes());
             put(comps, health, &hp);
             put(comps, burning, &[(e.fire > 0) as u8]);
-            let items: Vec<u8> = e.worn.iter().flat_map(|i| i.to_le_bytes()).collect();
-            put(comps, worn, &items);
+            let inv = inventories.get(&e.id).map_or(&[][..], Vec::as_slice);
+            put(comps, worn, &crate::stack::shown_bytes(crate::content::equipped(c, e.kind, inv)));
             let mut sh = [0u8; 16];
             let size = e.size.unwrap_or_default();
             for (i, v) in [size.width, size.height, size.eye].into_iter().enumerate() {
@@ -520,16 +496,10 @@ impl Dim {
                 let bytes: Vec<u8> = a.iter().flat_map(|v| v.to_le_bytes()).collect();
                 put(comps, attributes, &bytes);
             }
-            if let Some(inv) = inventories.get(&e.id) {
-                use crate::net::codec::Wire;
-                let item = crate::content::in_main_hand(c, e.kind, inv, e.selected);
-                let mut bytes = crate::net::codec::W::default();
-                crate::stack::for_client(item).put(&mut bytes);
-                put(comps, held, &bytes.0);
-                let off = crate::content::in_off_hand(c, e.kind, inv);
-                let mut bytes = crate::net::codec::W::default();
-                crate::stack::for_client(off).put(&mut bytes);
-                put(comps, off_held, &bytes.0);
+            for (comp, item) in
+                [(held, crate::content::in_main_hand(c, e.kind, inv, e.selected)), (off_held, crate::content::in_off_hand(c, e.kind, inv))]
+            {
+                put(comps, comp, &crate::stack::client_bytes(item));
             }
             let use_value = e.using.0 | (e.using.1 as u32) << 31;
             put(comps, using, &use_value.to_le_bytes());
@@ -2029,22 +1999,15 @@ impl Dim {
             .par_iter()
             .map(|&i| {
                 let (e, nav) = (&list[i], list[i].nav.as_ref().unwrap());
-                let height = e.height(c).ceil() as i32;
+                let dims = e.dims(c);
                 // It goes down no further than it falls without harm.
                 let drop = (e.safe_fall.floor() as i32).max(1);
                 match on_body(e) {
                     Some((f, place)) => {
                         let deck = &bodies[&f];
-                        super::path::find(
-                            c,
-                            &super::space::DeckCells(deck),
-                            place.to_local(e.pos).floor().as_ivec3(),
-                            nav.target.floor().as_ivec3(),
-                            height,
-                            drop,
-                        )
+                        super::path::find(c, &super::space::DeckCells(deck), place.to_local(e.pos), nav.target, dims, drop)
                     }
-                    None => super::path::find(c, &block, e.pos.floor().as_ivec3(), nav.target.floor().as_ivec3(), height, drop),
+                    None => super::path::find(c, &block, e.pos, nav.target, dims, drop),
                 }
             })
             .collect();
@@ -2063,10 +2026,11 @@ impl Dim {
                 continue;
             }
             let pos = place.map_or(e.pos, |t| t.to_local(e.pos));
+            let dims = e.dims(c);
             let nav = e.nav.as_mut().unwrap();
             nav.stuck = if e.moved < 0.02 { nav.stuck + 1 } else { 0 };
             let close = (nav.target - pos).with_y(0.0).length() < 1.0 && (nav.target.y - pos.y).abs() < 1.5;
-            match super::path::steer(nav, pos, e.blocked) {
+            match super::path::steer(nav, pos, dims, e.blocked) {
                 _ if close || nav.stuck > 40 => e.nav = None,
                 Some((dir, jump)) => {
                     e.yaw = (-dir[0]).atan2(-dir[1]);
@@ -2691,7 +2655,12 @@ impl Dim {
             let size = e.size.unwrap_or(k.size());
             let (pos, walk, hw) = (e.pos, e.walk, size.width as f64 / 2.0);
             let low = e.pose.def().tilt != abi::pose_tilt::UPRIGHT;
-            let swims = crate::content::swims_in(c, e.kind, &e.worn);
+            let inv = self
+                .entities
+                .inventories
+                .get(&id)
+                .map_or(&[][..], Vec::as_slice);
+            let swims = crate::content::swims_in(c, e.kind, crate::content::equipped(c, e.kind, inv));
             let block = super::space::CubeCells(&self.space.cubes);
             let swim_at = pos + DVec3::Y * if low { 0.1 } else { e.dims(c).eye };
             let in_liquid = crate::physics::liquid_at(c, &block, swim_at).is_some_and(|l| swims.get(l as usize) == Some(&true));

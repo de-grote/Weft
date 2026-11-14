@@ -92,3 +92,7 @@ block.testmod.black_wool = Чёрная шерсть
 block.testmod.mossy_stone = Заросший камень
 block.testmod.red_glass = Красное стекло
 item.testmod.hammer = Молот
+
+command.testmod.display_calls = {0}: {1}
+
+command.testmod.eclipse = Источник окружения обновлён

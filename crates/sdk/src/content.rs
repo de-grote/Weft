@@ -170,7 +170,7 @@ impl Block {
     pub fn ore(&self) -> &'static Feature {
         Feature::generated(self.name().to_string())
     }
-    /// Its liquid, for `Registry::edit`: `r.edit(base::WATER.liquid()).fog(0x204020, 12.0)`.
+    /// Its liquid, for `Registry::edit`: `r.edit(base::WATER.liquid()).fog(0x204020, -8.0, 12.0)`.
     pub fn liquid(&self) -> &'static Liquid {
         Liquid::generated(self.name().to_string())
     }
@@ -478,8 +478,14 @@ impl EntityEffectBuilder<'_> {
     /// What its player sees goes through this screen shader while it has it
     /// (`shaders/post/<name>.wgsl`, `PostPixel`): night vision, blindness.
     pub fn screen(self, shader: &crate::Shader) -> Self {
-        let name = shader.name().to_string();
-        self.set_text(&crate::comps::entity_effect::SCREEN, &name)
+        self.environment(
+            crate::Environment::new("core:screen")
+                .blend(crate::environment::blend::MAX)
+                .observer(crate::environment::observer::BODY)
+                .priority(-400)
+                .fade(0.0, 1.0)
+                .post(shader, 1.0),
+        )
     }
     /// Its entity isn't drawn for anyone else while it has it (invisibility).
     pub fn hides(self) -> Self {
@@ -920,6 +926,11 @@ pub trait WithComponents: Sized {
     fn tag(mut self, tag: &str) -> Self {
         self.pending().push(Pending::tag(tag));
         self
+    }
+    /// Perception from a dimension, weather, biome, sampled block/liquid, entity kind,
+    /// active entity effect or equipped item. Other entry kinds do not emit sources.
+    fn environment(self, layer: crate::Environment) -> Self {
+        crate::environment::attach(self, layer)
     }
     /// Takes a tag away (another mod's, in an edit).
     fn untag(mut self, tag: &str) -> Self {
@@ -1674,7 +1685,11 @@ macro_rules! state_setters {
         pub fn hazard(self, h: crate::Hazard) -> Self {
             self.push(&bc::HAZARDS, h.0)
         }
-        /// A plant: tagged `plantable`, cross model, no collision. Placing a block into it is
+        /// Draw its item as the sprite of this block face instead of the model.
+        pub fn item_sprite(self, face: crate::Dir) -> Self {
+            self.set(&bc::ITEM_FACE, face.face() as u8)
+        }
+        /// A plant: tagged `plantable`, crossed flat boxes, no collision. Placing a block into it is
         /// refused, as for vanilla's flowers and sugar cane; grass that gives way is `.replaceable()`.
         pub fn plant(self) -> Self {
             self.not_solid()
@@ -2662,9 +2677,9 @@ impl ItemBuilder<'_> {
     pub fn modifier(self, m: crate::Modifier) -> Self {
         self.push(&crate::component::MODIFIERS, m.0)
     }
-    /// How a stack of it looks by what is in it, decided once per kind of stack (its data):
-    /// `.condition(|s, v| if s.wear() > 0 { v.texture("can_empty"); })`. Other players' hands
-    /// show the usual look: their stacks aren't sent.
+    /// How a stack looks, wherever it is displayed. Reads public components marked
+    /// `stack_flags::VISUAL` (wear is marked by default); count is normalized to one.
+    /// The result is cached until those components change.
     pub fn condition(self, f: impl Fn(&abi::ItemStack, &mut Looks) + Send + Sync + 'static) -> Self {
         let cb = callback(move |a: &mut abi::ItemModelArgs| {
             let mut v = Looks::default();
@@ -2672,7 +2687,8 @@ impl ItemBuilder<'_> {
             LOOKS.with(|l| {
                 *l.borrow_mut() = v;
                 let l = l.borrow();
-                (a.model, a.texture) = (Str::new(&l.model), Str::new(&l.texture));
+                (a.model, a.texture, a.worn_model, a.worn_texture) =
+                    (Str::new(&l.model), Str::new(&l.texture), Str::new(&l.worn_model), Str::new(&l.worn_texture));
             });
         });
         self.set(&crate::comps::item::CONDITION, cb)
@@ -2878,9 +2894,21 @@ impl ItemBuilder<'_> {
 pub struct Looks {
     model: String,
     texture: String,
+    worn_model: String,
+    worn_texture: String,
 }
 
 impl Looks {
+    /// A model attached to a bone while this stack is in equipment.
+    pub fn worn_model(&mut self, model: &str, bone: &str) -> &mut Self {
+        self.worn_model = format!("{}@{bone}", crate::asset("", model));
+        self
+    }
+    /// A texture on the wearer's armor geometry, under `entity/`.
+    pub fn worn_texture(&mut self, texture: &str) -> &mut Self {
+        self.worn_texture = crate::asset("entity", texture);
+        self
+    }
     /// A texture from `item/` instead of its own.
     pub fn texture(&mut self, t: &str) -> &mut Self {
         self.texture = crate::asset("item", t);
@@ -3213,6 +3241,13 @@ impl Gen {
     pub(crate) fn wrap(a: &mut abi::GenArgs) -> &mut Gen {
         unsafe { &mut *(a as *mut abi::GenArgs as *mut Gen) }
     }
+    pub fn view(&self) -> crate::Generation<'_> {
+        crate::Generation::new(self.args.source)
+    }
+    /// Read a block in world coordinates, including outside this cube and earlier local writes.
+    pub fn read(&self, pos: impl Into<BlockPos>) -> u32 {
+        self.view().read(pos)
+    }
     pub fn seed(&self) -> u64 {
         self.args.seed
     }
@@ -3225,18 +3260,32 @@ impl Gen {
         [c.x * 16, c.y * 16, c.z * 16].into()
     }
     pub fn blocks(&mut self) -> &mut [u32; 4096] {
+        if !self.args.written.is_null() {
+            unsafe { std::slice::from_raw_parts_mut(self.args.written, 64).fill(u64::MAX) };
+        }
         unsafe { &mut *(self.args.blocks as *mut [u32; 4096]) }
     }
     pub fn biomes(&mut self) -> &mut [u16; 256] {
+        if !self.args.biomes_written.is_null() {
+            unsafe { std::slice::from_raw_parts_mut(self.args.biomes_written, 4).fill(u64::MAX) };
+        }
         unsafe { &mut *(self.args.biomes as *mut [u16; 256]) }
     }
     #[inline]
     pub fn set(&mut self, x: usize, y: usize, z: usize, state: u32) {
-        self.blocks()[(y * 16 + z) * 16 + x] = state;
+        let i = (y * 16 + z) * 16 + x;
+        assert!(i < 4096 && x < 16 && y < 16 && z < 16);
+        unsafe {
+            *self.args.blocks.add(i) = state;
+            if !self.args.written.is_null() {
+                *self.args.written.add(i / 64) |= 1 << (i % 64);
+            }
+        }
     }
     #[inline]
     pub fn get(&mut self, x: usize, y: usize, z: usize) -> u32 {
-        self.blocks()[(y * 16 + z) * 16 + x]
+        let o = self.origin();
+        self.read([o.x + x as i32, o.y + y as i32, o.z + z as i32])
     }
 }
 
@@ -3634,21 +3683,43 @@ impl LiquidBuilder<'_> {
     pub fn heat(self, t: u32) -> Self {
         self.set(&crate::comps::liquid::HEAT, t)
     }
-    /// The fog seen from inside: its color (0xRRGGBB) and how many blocks away it hides
-    /// everything. By default the average color of its texture, 96 blocks.
-    pub fn fog(self, rgb: u32, blocks: f32) -> Self {
-        self.set(&crate::comps::liquid::FOG, abi::LiquidFog { color: rgb, distance: blocks })
+    /// A camera environment preset: color (0xRRGGBB), start and end in blocks.
+    /// Defaults to the average texture color, start -8 and end 96. Acoustics are independent.
+    pub fn fog(self, rgb: u32, start: f32, end: f32) -> Self {
+        let mut layer = crate::Environment::new("core:liquid_fog")
+            .priority(-699)
+            .fog(rgb, start, end);
+        if rgb == u32::MAX {
+            layer.fog_from_block = true;
+        }
+        self.environment(layer)
     }
     /// The picture over the screen from inside, relative names are under `block/`, and how much
     /// of it shows. By default its own texture at 0.1; for an inside that looks unlike the surface, set
     /// this and `fog` apart from its texture.
     pub fn overlay(self, texture: &str, opacity: f32) -> Self {
         let texture = crate::asset("block", texture);
-        self.set(&crate::comps::liquid::OVERLAY, abi::LiquidOverlay { texture, opacity })
+        let mut layer = crate::Environment::new("core:liquid_overlay")
+            .priority(-698)
+            .replace_overlays();
+        let block_face = if texture.is_empty() { 0 } else { -1 };
+        layer.overlays.push(abi::environment::EnvironmentOverlay {
+            texture,
+            color: [1.0, 1.0, 1.0, opacity],
+            tiles: 1.0,
+            block_face,
+            lit: true,
+            ..Default::default()
+        });
+        self.environment(layer)
     }
     /// Nothing over the screen from inside.
     pub fn no_overlay(self) -> Self {
-        self.set(&crate::comps::liquid::OVERLAY, abi::LiquidOverlay { texture: String::new(), opacity: 0.0 })
+        self.environment(
+            crate::Environment::new("core:liquid_overlay")
+                .priority(-698)
+                .replace_overlays(),
+        )
     }
     /// Also registers `item`: `empty` (a container item, any mod's) filled with this liquid, in
     /// creative tab `tab` (any mod's). The engine fills and pours it; no code needed.

@@ -7,14 +7,14 @@
 //! // Rain that rings on water and is gone anywhere else:
 //! r.particle(&DROP).on_enter_liquid(When::tag("water"), Then::turn_into_still(&RIPPLE)).on_land(When::any(), Then::die());
 //! r.condition(&CHARGED, |c| c.client().is_some_and(|v| v.component(&CHARGE).is_some_and(|c| c > 0)));
-//! c.post_effect("mymod:underwater", 1.0);                  // client: until turned off
+//! c.post_effect(&Shader::named("mymod:underwater"), 1.0);                  // client: until turned off
 //! ```
 //! Shaders for text (`{fx:..}`), GUI panels (`shader` in a class's `.gui`), particles, entities and screen
 //! effects are assets: `shaders/fx|gui|particle|entity|block|sky|post/<name>.wgsl` in the mod's folder.
 
 use crate::abi::Vec3;
 
-use crate::abi::{self, Str};
+use crate::abi;
 use crate::{
     Client, ClientView, Dimension, Music, Particle, Registry, SkyObject, SoundCategory, WithComponents, World, callback, comps, host,
 };
@@ -468,7 +468,13 @@ impl Drop for Burst {
 impl Client {
     /// Turns a screen effect (`shaders/post/<name>.wgsl`) on at `strength` (0 turns it off).
     pub fn post_effect(&self, effect: &crate::Shader, strength: f32) -> bool {
-        unsafe { (host().client_op)(self.raw(), abi::client_op::POST_EFFECT, Str::new(effect.name()), strength as f64) != 0 }
+        let name = format!("{}/{}", crate::full_name("post"), effect.name());
+        if strength <= 0.0 {
+            self.clear_environment(&name);
+            true
+        } else {
+            self.environment(&crate::Environment::new(&name).post(effect, strength))
+        }
     }
 }
 
